@@ -22,6 +22,7 @@ export type CityEventId =
   | 'renovation-grants'
   | 'infrastructure-boom';
 export type GamePhase =
+  | 'orderRoll'
   | 'rolling'
   | 'awaitingPurchase'
   | 'awaitingCard'
@@ -230,6 +231,7 @@ export interface GameState {
   cityEventDiscard: CityEventId[];
   activeCityEvents: ActiveCityEvent[];
   pendingCityEvent?: PendingCityEvent;
+  turnOrderRolls?: Record<string, [number, number]>;
   pendingPurchaseTileId?: number;
   pendingRent?: {
     payerId: string;
@@ -282,6 +284,7 @@ export interface GameState {
 }
 
 export type GameAction =
+  | { type: 'roll_for_order'; playerId: string; dice?: [number, number] }
   | { type: 'roll'; playerId: string; dice?: [number, number] }
   | { type: 'buy'; playerId: string }
   | { type: 'decline_buy'; playerId: string }

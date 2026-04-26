@@ -4726,6 +4726,103 @@ input:focus {
   display: none;
 }
 
+.board-turn-order-prompt {
+  grid-row: 2;
+  align-self: center;
+  justify-self: center;
+  display: grid;
+  width: min(560px, 88%);
+  max-height: min(62vh, 560px);
+  gap: 12px;
+  overflow: auto;
+  border: 1px solid rgba(252, 211, 77, 0.24);
+  border-radius: 12px;
+  padding: 14px;
+  color: #f8fafc;
+  background:
+    radial-gradient(circle at 12% 4%, rgba(252, 211, 77, 0.2), transparent 35%),
+    linear-gradient(145deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.96));
+  box-shadow:
+    0 28px 82px rgba(2, 6, 23, 0.48),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  pointer-events: auto;
+  scrollbar-width: none;
+}
+
+.board-turn-order-prompt::-webkit-scrollbar {
+  display: none;
+}
+
+.turn-order-head {
+  display: grid;
+  gap: 5px;
+}
+
+.turn-order-head span {
+  color: #facc15;
+  font-size: 11px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.turn-order-head strong {
+  font-size: clamp(20px, 2.2vw, 30px);
+  line-height: 1;
+}
+
+.turn-order-head p {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.turn-order-list {
+  display: grid;
+  gap: 7px;
+}
+
+.turn-order-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(15, 23, 42, 0.7);
+}
+
+.turn-order-row.active {
+  border-color: rgba(252, 211, 77, 0.42);
+  background: linear-gradient(135deg, rgba(252, 211, 77, 0.16), rgba(37, 99, 235, 0.1)), rgba(15, 23, 42, 0.82);
+}
+
+.turn-order-player {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.turn-order-player span,
+.turn-order-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-order-player span {
+  color: #e2e8f0;
+  font-weight: 950;
+}
+
+.turn-order-row strong {
+  color: #fef3c7;
+  font-size: 13px;
+  text-align: right;
+}
+
 .board-purchase-prompt .modal-head {
   gap: 12px;
 }
@@ -5727,6 +5824,7 @@ input:focus {
   }
 
   .board-purchase-prompt,
+  .board-turn-order-prompt,
   .board-casino-prompt,
   .board-jail-prompt,
   .board-log-shell,
@@ -5849,6 +5947,7 @@ input:focus {
   }
 
   .board-purchase-prompt,
+  .board-turn-order-prompt,
   .board-casino-prompt,
   .board-jail-prompt,
   .board-rent-prompt,

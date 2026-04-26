@@ -20,6 +20,7 @@ const rtcConfig: RTCConfiguration = {
 export class PeerMesh {
   private readonly peers = new Map<string, RTCPeerConnection>();
   private readonly channels = new Map<string, RTCDataChannel>();
+  private readonly pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
   private readonly onMessageHandlers: MessageHandler[] = [];
   private readonly onStatusHandlers: StatusHandler[] = [];
 
@@ -48,6 +49,7 @@ export class PeerMesh {
         this.peers.get(peerId)?.close();
         this.peers.delete(peerId);
         this.channels.delete(peerId);
+        this.pendingIceCandidates.delete(peerId);
       }
     });
   }
@@ -58,6 +60,7 @@ export class PeerMesh {
 
     if (signal.kind === 'offer') {
       await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
+      await this.flushPendingIceCandidates(peerId, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       await this.sendSignal(peerId, 'answer', answer).catch(() => undefined);
@@ -65,10 +68,11 @@ export class PeerMesh {
 
     if (signal.kind === 'answer') {
       await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
+      await this.flushPendingIceCandidates(peerId, peer);
     }
 
     if (signal.kind === 'ice') {
-      await peer.addIceCandidate(signal.payload as RTCIceCandidateInit);
+      await this.addOrQueueIceCandidate(peerId, peer, signal.payload as RTCIceCandidateInit);
     }
   }
 
@@ -91,6 +95,7 @@ export class PeerMesh {
     this.peers.get(peerId)?.close();
     this.channels.delete(peerId);
     this.peers.delete(peerId);
+    this.pendingIceCandidates.delete(peerId);
     this.onStatusHandlers.forEach((handler) => handler(peerId, false));
   }
 
@@ -99,6 +104,7 @@ export class PeerMesh {
     this.peers.forEach((peer) => peer.close());
     this.channels.clear();
     this.peers.clear();
+    this.pendingIceCandidates.clear();
   }
 
   private async createPeer(peerId: string, initiator: boolean) {
@@ -132,5 +138,26 @@ export class PeerMesh {
       const message = JSON.parse(event.data as string) as PeerMessage;
       this.onMessageHandlers.forEach((handler) => handler(message, peerId));
     };
+  }
+
+  private async addOrQueueIceCandidate(peerId: string, peer: RTCPeerConnection, candidate: RTCIceCandidateInit) {
+    if (!peer.remoteDescription) {
+      const pending = this.pendingIceCandidates.get(peerId) ?? [];
+      pending.push(candidate);
+      this.pendingIceCandidates.set(peerId, pending);
+      return;
+    }
+
+    await peer.addIceCandidate(candidate).catch(() => undefined);
+  }
+
+  private async flushPendingIceCandidates(peerId: string, peer: RTCPeerConnection) {
+    const pending = this.pendingIceCandidates.get(peerId);
+    if (!pending?.length) return;
+
+    this.pendingIceCandidates.delete(peerId);
+    for (const candidate of pending) {
+      await peer.addIceCandidate(candidate).catch(() => undefined);
+    }
   }
 }

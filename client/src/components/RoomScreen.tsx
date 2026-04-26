@@ -4,16 +4,14 @@ import { useState } from 'react';
 import { MAX_PLAYERS } from '../engine/gameEngine';
 import { SIGNALR_SERVER_URL } from '../network/roomClient';
 import { useGameStore } from '../store/useGameStore';
-
-const PLAYER_NAME_COOKIE = 'ukraine-monopoly-player-name';
-const DEFAULT_PLAYER_NAME = 'Гравець';
+import { normalizePlayerName, readSavedPlayerName, savePlayerName } from '../utils/playerNameStorage';
 
 export const RoomScreen = () => {
-  const [name, setName] = useState(readSavedPlayerName);
+  const { createRoom, joinRoom, startLocalDemo, connection, playerName: storedPlayerName } = useGameStore();
+  const [name, setName] = useState(() => readSavedPlayerName(storedPlayerName));
   const [code, setCode] = useState('');
   const [testMode, setTestMode] = useState(false);
-  const { createRoom, joinRoom, startLocalDemo, connection } = useGameStore();
-  const playerName = name.trim() || DEFAULT_PLAYER_NAME;
+  const playerName = normalizePlayerName(name);
 
   return (
     <motion.section
@@ -79,7 +77,13 @@ export const RoomScreen = () => {
               Приєднатись
             </button>
           </div>
-          <button className="ghost" onClick={startLocalDemo}>
+          <button
+            className="ghost"
+            onClick={() => {
+              savePlayerName(playerName);
+              startLocalDemo(playerName);
+            }}
+          >
             <Dice5 size={18} />
             Демо за одним браузером
           </button>
@@ -90,24 +94,4 @@ export const RoomScreen = () => {
       </div>
     </motion.section>
   );
-};
-
-const readSavedPlayerName = () => {
-  if (typeof document === 'undefined') return DEFAULT_PLAYER_NAME;
-  const cookie = document.cookie
-    .split('; ')
-    .find((candidate) => candidate.startsWith(`${PLAYER_NAME_COOKIE}=`));
-  if (!cookie) return DEFAULT_PLAYER_NAME;
-  const value = cookie.slice(PLAYER_NAME_COOKIE.length + 1);
-  try {
-    return decodeURIComponent(value) || DEFAULT_PLAYER_NAME;
-  } catch {
-    return DEFAULT_PLAYER_NAME;
-  }
-};
-
-const savePlayerName = (name: string) => {
-  if (typeof document === 'undefined') return;
-  const value = encodeURIComponent(name.trim() || DEFAULT_PLAYER_NAME);
-  document.cookie = `${PLAYER_NAME_COOKIE}=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
 };

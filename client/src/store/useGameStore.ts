@@ -4,11 +4,13 @@ import type { GameAction, GameState } from '../engine/types';
 import { PeerMesh, type PeerMessage } from '../network/peerMesh';
 import {
   isRoomConnectionNotReadyError,
+  isTransientSignalRDisconnect,
   RoomClient,
   type RoomPlayer,
   type RoomSnapshot,
   type SignalPayload,
 } from '../network/roomClient';
+import { normalizePlayerName, readSavedPlayerName, savePlayerName } from '../utils/playerNameStorage';
 
 type Screen = 'home' | 'lobby' | 'game' | 'finished';
 
@@ -31,7 +33,7 @@ interface GameStore {
   createRoom: (playerName: string, testMode?: boolean) => Promise<void>;
   joinRoom: (code: string, playerName: string) => Promise<void>;
   setReady: (ready: boolean) => Promise<void>;
-  startLocalDemo: () => void;
+  startLocalDemo: (playerName?: string) => void;
   startRoomGame: () => void;
   dispatch: (action: GameAction, fromPeer?: boolean) => void;
   applyRemoteMessage: (message: PeerMessage, fromPeerId: string) => void;
@@ -78,12 +80,14 @@ export const useGameStore = create<GameStore>((set, get) => ({
   async resumeSavedSession() {
     const saved = readSavedSession();
     if (!saved) return;
+    const savedPlayerName = readSavedPlayerName(saved.playerName);
 
     if (saved.mode === 'local') {
+      savePlayerName(savedPlayerName);
       set({
         screen: saved.screen,
         localPlayerId: saved.localPlayerId,
-        playerName: saved.playerName,
+        playerName: savedPlayerName,
         game: saved.game,
         room: undefined,
         connection: { signalr: 'idle', p2p: {} },
@@ -92,11 +96,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
 
     if (!saved.room || !saved.localPlayerId) return;
+    savePlayerName(savedPlayerName);
     const roomClient = configureRoomClient();
     set({
       screen: saved.game ? 'game' : 'lobby',
       localPlayerId: saved.localPlayerId,
-      playerName: saved.playerName,
+      playerName: savedPlayerName,
       room: saved.room,
       game: saved.game,
       roomClient,
@@ -104,13 +109,13 @@ export const useGameStore = create<GameStore>((set, get) => ({
     });
 
     try {
-      const room = await roomClient.joinRoom(saved.room.code, saved.playerName ?? 'Гравець', saved.localPlayerId);
+      const room = await roomClient.joinRoom(saved.room.code, savedPlayerName, saved.localPlayerId);
       const localPlayerId = resolveLocalPlayerId(room, saved.localPlayerId);
       const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
       const nextScreen = saved.game ? 'game' : 'lobby';
       set({ screen: nextScreen, room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
-      saveSession({ ...saved, screen: nextScreen, localPlayerId, room });
+      saveSession({ ...saved, screen: nextScreen, localPlayerId, playerName: savedPlayerName, room });
 
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 800);
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 2_000);
@@ -130,11 +135,13 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   async createRoom(playerName, testMode = false) {
+    const normalizedPlayerName = normalizePlayerName(playerName);
     const localPlayerId = createStablePlayerId();
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId });
     try {
-      const room = await roomClient.createRoom(playerName, testMode, localPlayerId);
+      const room = await roomClient.createRoom(normalizedPlayerName, testMode, localPlayerId);
+      savePlayerName(normalizedPlayerName);
       const resolvedLocalPlayerId = resolveLocalPlayerId(room, localPlayerId);
       const peerMesh = configurePeerMesh(resolvedLocalPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
@@ -146,11 +153,13 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   async joinRoom(code, playerName) {
+    const normalizedPlayerName = normalizePlayerName(playerName);
     const localPlayerId = createStablePlayerId();
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId });
     try {
-      const room = await roomClient.joinRoom(code, playerName, localPlayerId);
+      const room = await roomClient.joinRoom(code, normalizedPlayerName, localPlayerId);
+      savePlayerName(normalizedPlayerName);
       const resolvedLocalPlayerId = resolveLocalPlayerId(room, localPlayerId, room.players.at(-1)?.id);
       const peerMesh = configurePeerMesh(resolvedLocalPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
@@ -175,9 +184,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
   },
 
-  startLocalDemo() {
-    const game = createInitialGame(['Олена', 'Тарас', 'Марія'], 'local-demo');
-    set({ screen: 'game', localPlayerId: game.currentPlayerId, playerName: 'Олена', room: undefined, game });
+  startLocalDemo(playerName) {
+    const normalizedPlayerName = normalizePlayerName(playerName);
+    savePlayerName(normalizedPlayerName);
+    const game = createInitialGame([normalizedPlayerName, 'Тарас', 'Марія'], 'local-demo', { determineTurnOrder: true });
+    set({ screen: 'game', localPlayerId: game.currentPlayerId, playerName: normalizedPlayerName, room: undefined, game });
     persistCurrentSession(get());
   },
 
@@ -186,7 +197,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     if (!room || !localPlayerId) return;
     const localPlayer = room.players.find((player) => player.id === localPlayerId);
     if (!localPlayer?.isHost) return;
-    const game = createInitialGame(room.players.map((player) => player.name), `room-${room.code}`);
+    const game = createInitialGame(room.players.map((player) => player.name), `room-${room.code}`, { determineTurnOrder: true });
     const remapped = {
       ...game,
       players: game.players.map((player, index) => ({ ...player, id: room.players[index].id })),
@@ -269,6 +280,10 @@ const configureRoomClient = () => {
       useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
       return;
     }
+    if (error && isTransientSignalRDisconnect(error)) {
+      useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
+      return;
+    }
     useGameStore.setState({
       connection: {
         signalr: 'error',
@@ -324,9 +339,11 @@ const configureRoomClient = () => {
 const rejoinCurrentRoom = async (roomClient: RoomClient) => {
   const { room, localPlayerId, playerName, peerMesh, game } = useGameStore.getState();
   if (!room || !localPlayerId) return;
+  const normalizedPlayerName = normalizePlayerName(playerName);
 
   try {
-    const nextRoom = await roomClient.joinRoom(room.code, playerName ?? 'Гравець', localPlayerId);
+    const nextRoom = await roomClient.joinRoom(room.code, normalizedPlayerName, localPlayerId);
+    savePlayerName(normalizedPlayerName);
     const nextPeerMesh = peerMesh ?? configurePeerMesh(localPlayerId, roomClient, nextRoom.code);
     await nextPeerMesh.syncPeers(nextRoom.players);
     useGameStore.setState({
@@ -445,6 +462,11 @@ const clearSavedSession = () => {
 
 const setConnectionError = (error: unknown) => {
   const connection = useGameStore.getState().connection;
+  if (isTransientSignalRDisconnect(error)) {
+    useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
+    return;
+  }
+
   useGameStore.setState({
     connection: {
       signalr: isRoomConnectionNotReadyError(error) ? 'connecting' : connection.signalr,

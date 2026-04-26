@@ -34,7 +34,15 @@ const CASINO_SPIN_DURATION_MS = 5_400;
 const JAIL_FINE = money(100);
 const JAIL_TURNS = 3;
 
-export const createInitialGame = (playerNames: string[], id: string = crypto.randomUUID()): GameState => {
+interface CreateInitialGameOptions {
+  determineTurnOrder?: boolean;
+}
+
+export const createInitialGame = (
+  playerNames: string[],
+  id: string = crypto.randomUUID(),
+  options: CreateInitialGameOptions = {},
+): GameState => {
   if (playerNames.length < MIN_PLAYERS || playerNames.length > MAX_PLAYERS) {
     throw new Error(`Гра підтримує ${MIN_PLAYERS}-${MAX_PLAYERS} гравців.`);
   }
@@ -58,7 +66,7 @@ export const createInitialGame = (playerNames: string[], id: string = crypto.ran
     currentPlayerId: players[0].id,
     turn: 1,
     currentRound: 1,
-    phase: 'rolling',
+    phase: options.determineTurnOrder ? 'orderRoll' : 'rolling',
     properties: Object.fromEntries(
       propertyTiles.map((tile) => [
         tile.id,
@@ -78,12 +86,22 @@ export const createInitialGame = (playerNames: string[], id: string = crypto.ran
     dice: [1, 1],
     diceRollId: 0,
     doublesInRow: 0,
-    log: [log('Партія створена. Кидайте кубики.', 'good')],
+    turnOrderRolls: options.determineTurnOrder ? {} : undefined,
+    log: [
+      log(
+        options.determineTurnOrder
+          ? 'Партія створена. Кидайте кубики, щоб визначити чергу ходів.'
+          : 'Партія створена. Кидайте кубики.',
+        'good',
+      ),
+    ],
   };
 };
 
 export const reduceGame = (state: GameState, action: GameAction): GameState => {
   switch (action.type) {
+    case 'roll_for_order':
+      return rollForTurnOrder(state, action.playerId, action.dice ?? randomDice());
     case 'roll':
       return rollDice(state, action.playerId, action.dice ?? randomDice());
     case 'buy':
@@ -235,6 +253,64 @@ export const diceRotationForValue = (value: number): [number, number, number] =>
     6: [-Math.PI / 2, 0, 0],
   };
   return rotations[value] ?? rotations[1];
+};
+
+const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, number]): GameState => {
+  assertCurrent(state, playerId);
+  if (state.phase !== 'orderRoll') throw new Error('Зараз не визначається черга ходів.');
+  if (state.turnOrderRolls?.[playerId]) throw new Error('Гравець уже кинув кубики за чергу.');
+
+  const rolls = { ...(state.turnOrderRolls ?? {}), [playerId]: dice };
+  const player = getPlayer(state, playerId);
+  const base: GameState = {
+    ...state,
+    dice,
+    diceRollId: state.diceRollId + 1,
+    lastDice: dice,
+    turnOrderRolls: rolls,
+    log: appendLog(state, `${player.name} кидає ${dice[0] + dice[1]} за чергу ходів.`),
+  };
+
+  const nextPlayer = base.players.find((candidate) => !rolls[candidate.id] && !candidate.isBankrupt);
+  if (nextPlayer) {
+    return {
+      ...base,
+      currentPlayerId: nextPlayer.id,
+    };
+  }
+
+  const originalIndex = new Map(base.players.map((candidate, index) => [candidate.id, index]));
+  const orderedPlayers = [...base.players].sort((left, right) => {
+    const leftDice = rolls[left.id] ?? [0, 0];
+    const rightDice = rolls[right.id] ?? [0, 0];
+    const leftTotal = leftDice[0] + leftDice[1];
+    const rightTotal = rightDice[0] + rightDice[1];
+    const leftHigh = Math.max(...leftDice);
+    const rightHigh = Math.max(...rightDice);
+    const leftLow = Math.min(...leftDice);
+    const rightLow = Math.min(...rightDice);
+    return (
+      rightTotal - leftTotal ||
+      rightHigh - leftHigh ||
+      rightLow - leftLow ||
+      (originalIndex.get(left.id) ?? 0) - (originalIndex.get(right.id) ?? 0)
+    );
+  });
+  const orderText = orderedPlayers
+    .map((candidate, index) => `${index + 1}. ${candidate.name} (${(rolls[candidate.id] ?? [0, 0]).join(' + ')})`)
+    .join('; ');
+
+  return {
+    ...base,
+    players: orderedPlayers,
+    currentPlayerId: orderedPlayers[0].id,
+    phase: 'rolling',
+    turn: 1,
+    currentRound: 1,
+    doublesInRow: 0,
+    builtThisRoll: undefined,
+    log: appendLog(base, `Чергу визначено: ${orderText}. ${orderedPlayers[0].name} починає партію.`, 'good'),
+  };
 };
 
 const rollDice = (state: GameState, playerId: string, dice: [number, number]): GameState => {

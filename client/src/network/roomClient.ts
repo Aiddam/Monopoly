@@ -40,10 +40,15 @@ export type RoomConnectionStatus = 'connecting' | 'connected' | 'reconnecting' |
 type ConnectionStateHandler = (status: RoomConnectionStatus, error?: Error) => void;
 
 const ROOM_CONNECTION_NOT_READY_MESSAGE = 'Немає підключення до кімнати. Зачекайте перепідключення.';
+const RECONNECT_DELAYS_MS = [0, 2_000, 5_000, 10_000, 30_000, 60_000];
+const MANUAL_RECONNECT_DELAYS_MS = [1_000, 3_000, 8_000, 15_000, 30_000];
 
 export class RoomClient {
   private connection?: signalR.HubConnection;
   private connectPromise?: Promise<void>;
+  private manualReconnectTimer?: number;
+  private manualReconnectAttempt = 0;
+  private intentionallyStopped = false;
   private readonly handlers: Partial<{ [K in keyof RoomHandlerMap]: RoomHandlerMap[K][] }> = {};
   private readonly connectionStateHandlers: ConnectionStateHandler[] = [];
   private readonly reconnectedHandlers: Array<() => void> = [];
@@ -77,6 +82,7 @@ export class RoomClient {
   async connect() {
     if (this.connection?.state === signalR.HubConnectionState.Connected) return;
     if (this.connectPromise) return this.connectPromise;
+    this.intentionallyStopped = false;
     if (
       this.connection?.state === signalR.HubConnectionState.Connecting ||
       this.connection?.state === signalR.HubConnectionState.Reconnecting
@@ -86,8 +92,10 @@ export class RoomClient {
 
     this.connection = new signalR.HubConnectionBuilder()
       .withUrl(`${this.serverUrl}/hubs/rooms`)
-      .withAutomaticReconnect()
+      .withAutomaticReconnect(RECONNECT_DELAYS_MS)
       .build();
+    this.connection.serverTimeoutInMilliseconds = 60_000;
+    this.connection.keepAliveIntervalInMilliseconds = 15_000;
 
     this.connection.onreconnecting((error) => this.emitConnectionState('reconnecting', error));
     this.connection.onreconnected(() => {
@@ -151,6 +159,8 @@ export class RoomClient {
     if (code) {
       await this.invokeConnected('LeaveRoom', normalizeRoomCode(code));
     }
+    this.intentionallyStopped = true;
+    this.clearManualReconnectTimer();
   }
 
   async closeRoom(code: string) {
@@ -166,6 +176,32 @@ export class RoomClient {
 
   private emitConnectionState(status: RoomConnectionStatus, error?: Error) {
     this.connectionStateHandlers.forEach((handler) => handler(status, error));
+    if (status === 'connected') {
+      this.manualReconnectAttempt = 0;
+      this.clearManualReconnectTimer();
+      return;
+    }
+    if (status === 'disconnected' && !this.intentionallyStopped) {
+      this.scheduleManualReconnect();
+    }
+  }
+
+  private scheduleManualReconnect() {
+    if (this.manualReconnectTimer !== undefined) return;
+
+    const delay =
+      MANUAL_RECONNECT_DELAYS_MS[Math.min(this.manualReconnectAttempt, MANUAL_RECONNECT_DELAYS_MS.length - 1)];
+    this.manualReconnectAttempt += 1;
+    this.manualReconnectTimer = window.setTimeout(() => {
+      this.manualReconnectTimer = undefined;
+      this.connect().catch(() => this.scheduleManualReconnect());
+    }, delay);
+  }
+
+  private clearManualReconnectTimer() {
+    if (this.manualReconnectTimer === undefined) return;
+    window.clearTimeout(this.manualReconnectTimer);
+    this.manualReconnectTimer = undefined;
   }
 }
 
@@ -173,6 +209,12 @@ export const isRoomConnectionNotReadyError = (error: unknown): boolean =>
   error instanceof Error &&
   (error.message === ROOM_CONNECTION_NOT_READY_MESSAGE ||
     error.message.includes("Cannot send data if the connection is not in the 'Connected' State"));
+
+export const isTransientSignalRDisconnect = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.message.includes('WebSocket closed with status code: 1006') ||
+    error.message.includes('Server timeout elapsed') ||
+    error.message.includes('Connection disconnected with error'));
 
 const normalizeRoomCode = (code: string) => code.trim().toUpperCase();
 

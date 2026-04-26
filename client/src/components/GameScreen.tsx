@@ -225,7 +225,9 @@ export const GameScreen = () => {
             {soundEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
             {soundEnabled ? 'Звук' : 'Тиша'}
           </button>
-          <span className="turn-status-inline">Ходить {currentPlayer.name}</span>
+          <span className="turn-status-inline">
+            {game.phase === 'orderRoll' ? 'Кидає за чергу' : 'Ходить'} {currentPlayer.name}
+          </span>
           <span className="turn-pill">
             Коло {game.currentRound ?? 1} · Хід {game.turn}
           </span>
@@ -445,11 +447,13 @@ const GameBoard = ({
         <div className="board-center">
           <div className="board-status-pill" aria-live="polite">
             <Landmark size={34} />
-          <span>Ходить</span>
+          <span>{game.phase === 'orderRoll' ? 'Кидає за чергу' : 'Ходить'}</span>
           <strong>{currentPlayer.name}</strong>
         </div>
           <CityEventBanner game={game} />
-          {game.phase === 'awaitingJailDecision' && game.pendingJail && isLocalTurn && !isBoardBusy ? (
+          {game.phase === 'orderRoll' ? (
+            <BoardTurnOrderPrompt game={game} isLocalTurn={isLocalTurn} isDiceRolling={isDiceRolling} dispatch={dispatch} />
+          ) : game.phase === 'awaitingJailDecision' && game.pendingJail && isLocalTurn && !isBoardBusy ? (
             <BoardJailDecisionPrompt game={game} dispatch={dispatch} />
           ) : game.phase === 'rolling' && currentPlayer.jailTurns > 0 && isLocalTurn && !isBoardBusy ? (
             <BoardJailTurnPrompt game={game} dispatch={dispatch} />
@@ -584,6 +588,60 @@ const BoardActiveTrade = ({
         className="board-trade-card"
       />
     </motion.div>
+  );
+};
+
+const BoardTurnOrderPrompt = ({
+  game,
+  isLocalTurn,
+  isDiceRolling,
+  dispatch,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  isDiceRolling: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const rolls = game.turnOrderRolls ?? {};
+  const rolledCount = Object.keys(rolls).length;
+
+  return (
+    <div className="board-turn-order-prompt">
+      <div className="turn-order-head">
+        <span>Черга ходів</span>
+        <strong>{currentPlayer.name} кидає кубики</strong>
+        <p>
+          {rolledCount}/{game.players.length} гравців вже кинули. Найбільша сума починає партію.
+        </p>
+      </div>
+
+      <div className="turn-order-list">
+        {game.players.map((player) => {
+          const dice = rolls[player.id];
+          const total = dice ? dice[0] + dice[1] : undefined;
+          const isActive = player.id === currentPlayer.id;
+          return (
+            <div className={`turn-order-row ${isActive ? 'active' : ''}`} key={player.id}>
+              <div className="turn-order-player">
+                <PlayerFigurine player={player} />
+                <span>{player.name}</span>
+              </div>
+              <strong>{dice ? `${dice[0]} + ${dice[1]} = ${total}` : isActive ? 'Кидає зараз' : 'Очікує'}</strong>
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        className="primary"
+        disabled={!isLocalTurn || isDiceRolling}
+        onClick={() => dispatch({ type: 'roll_for_order', playerId: currentPlayer.id })}
+      >
+        <RotateCcw size={18} />
+        {isLocalTurn ? 'Кинути за чергу' : `Очікуємо ${currentPlayer.name}`}
+      </button>
+    </div>
   );
 };
 
@@ -1224,6 +1282,17 @@ const BoardActionDock = ({
       </div>
 
       <div className="dock-primary-action">
+        {game.phase === 'orderRoll' && (
+          <button
+            className="primary"
+            disabled={!isLocalTurn || isDiceRolling}
+            onClick={() => dispatch({ type: 'roll_for_order', playerId: currentPlayer.id })}
+          >
+            <RotateCcw size={18} />
+            Кинути за чергу
+          </button>
+        )}
+
         {game.phase === 'rolling' && !isCurrentPlayerJailed && (
           <button
             className="primary"
@@ -3626,7 +3695,8 @@ const useTurnTimer = (
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
 ) => {
   const [secondsLeft, setSecondsLeft] = useState(TURN_SECONDS);
-  const turnKey = `${game.id}:${game.turn}:${game.currentPlayerId}`;
+  const timerPhaseKey = game.phase === 'orderRoll' ? 'orderRoll' : 'turn';
+  const turnKey = `${game.id}:${game.turn}:${game.currentPlayerId}:${timerPhaseKey}`;
   const expiredRef = useRef('');
 
   useEffect(() => {
@@ -3644,6 +3714,11 @@ const useTurnTimer = (
   useEffect(() => {
     if (secondsLeft > 0 || expiredRef.current === turnKey || !isLocalTurn) return;
     expiredRef.current = turnKey;
+
+    if (game.phase === 'orderRoll') {
+      dispatch({ type: 'roll_for_order', playerId: game.currentPlayerId });
+      return;
+    }
 
     if (game.phase === 'rolling') {
       dispatch({ type: 'roll', playerId: game.currentPlayerId });

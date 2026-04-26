@@ -22,6 +22,25 @@ describe('Ukraine Monopoly engine', () => {
     );
   });
 
+  it('lets players roll once to determine the starting turn order', () => {
+    let game = createInitialGame(['One', 'Two', 'Three'], 'turn-order', { determineTurnOrder: true });
+
+    expect(game.phase).toBe('orderRoll');
+    expect(game.currentPlayerId).toBe('p1');
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p1', dice: [1, 1] });
+    expect(game.phase).toBe('orderRoll');
+    expect(game.currentPlayerId).toBe('p2');
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p2', dice: [6, 5] });
+    expect(game.currentPlayerId).toBe('p3');
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p3', dice: [3, 3] });
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p2');
+    expect(game.players.map((player) => player.id)).toEqual(['p2', 'p3', 'p1']);
+  });
+
   it('moves a player, lets them buy Pavlohrad, and deducts money', () => {
     let game = createInitialGame(['Олена', 'Тарас'], 'test');
     game = {
