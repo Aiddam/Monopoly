@@ -19,6 +19,21 @@ public sealed class RoomHub(RoomManager rooms) : Hub
         }
     }
 
+    public async Task<RoomSnapshot> RestoreRoom(RoomRestoreRequest previousRoom, string playerName, string playerId)
+    {
+        try
+        {
+            var snapshot = rooms.RestoreRoom(Context.ConnectionId, previousRoom, playerName, playerId);
+            await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
+            await Clients.Caller.SendAsync("RoomSnapshot", snapshot);
+            return snapshot;
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new HubException(exception.Message);
+        }
+    }
+
     public async Task<RoomSnapshot> JoinRoom(string code, string playerName, string? playerId = null)
     {
         try

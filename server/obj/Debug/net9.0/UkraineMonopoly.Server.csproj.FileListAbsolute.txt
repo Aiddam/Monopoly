@@ -33,3 +33,4 @@ D:\Projects\Monopoly\server\bin\check-build\UkraineMonopoly.Server.deps.json
 D:\Projects\Monopoly\server\bin\check-build\UkraineMonopoly.Server.runtimeconfig.json
 D:\Projects\Monopoly\server\bin\check-build\UkraineMonopoly.Server.dll
 D:\Projects\Monopoly\server\bin\check-build\UkraineMonopoly.Server.pdb
+D:\Projects\Monopoly\server\obj\Debug\net9.0\UkraineMonopoly.Server.sourcelink.json

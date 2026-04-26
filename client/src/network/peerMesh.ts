@@ -21,6 +21,7 @@ export class PeerMesh {
   private readonly peers = new Map<string, RTCPeerConnection>();
   private readonly channels = new Map<string, RTCDataChannel>();
   private readonly pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
+  private readonly signalQueues = new Map<string, Promise<void>>();
   private readonly onMessageHandlers: MessageHandler[] = [];
   private readonly onStatusHandlers: StatusHandler[] = [];
 
@@ -50,11 +51,25 @@ export class PeerMesh {
         this.peers.delete(peerId);
         this.channels.delete(peerId);
         this.pendingIceCandidates.delete(peerId);
+        this.signalQueues.delete(peerId);
       }
     });
   }
 
   async handleSignal(signal: SignalPayload) {
+    const peerId = signal.fromPeerId;
+    const previous = this.signalQueues.get(peerId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.processSignal(signal));
+    const queued = next.finally(() => {
+      if (this.signalQueues.get(peerId) === queued) {
+        this.signalQueues.delete(peerId);
+      }
+    });
+    this.signalQueues.set(peerId, queued);
+    await next;
+  }
+
+  private async processSignal(signal: SignalPayload) {
     const peerId = signal.fromPeerId;
     const peer = this.peers.get(peerId) ?? (await this.createPeer(peerId, false));
 
@@ -96,6 +111,7 @@ export class PeerMesh {
     this.channels.delete(peerId);
     this.peers.delete(peerId);
     this.pendingIceCandidates.delete(peerId);
+    this.signalQueues.delete(peerId);
     this.onStatusHandlers.forEach((handler) => handler(peerId, false));
   }
 
@@ -105,6 +121,7 @@ export class PeerMesh {
     this.channels.clear();
     this.peers.clear();
     this.pendingIceCandidates.clear();
+    this.signalQueues.clear();
   }
 
   private async createPeer(peerId: string, initiator: boolean) {
@@ -148,7 +165,7 @@ export class PeerMesh {
       return;
     }
 
-    await peer.addIceCandidate(candidate).catch(() => undefined);
+    await this.safeAddIceCandidate(peer, candidate);
   }
 
   private async flushPendingIceCandidates(peerId: string, peer: RTCPeerConnection) {
@@ -157,7 +174,16 @@ export class PeerMesh {
 
     this.pendingIceCandidates.delete(peerId);
     for (const candidate of pending) {
-      await peer.addIceCandidate(candidate).catch(() => undefined);
+      await this.safeAddIceCandidate(peer, candidate);
+    }
+  }
+
+  private async safeAddIceCandidate(peer: RTCPeerConnection, candidate: RTCIceCandidateInit) {
+    try {
+      if (!peer.remoteDescription) return;
+      await peer.addIceCandidate(candidate);
+    } catch {
+      // ICE can arrive during renegotiation or just after a peer closes. SignalR state sync is the source of truth.
     }
   }
 }

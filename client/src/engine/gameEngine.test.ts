@@ -41,6 +41,23 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.map((player) => player.id)).toEqual(['p2', 'p3', 'p1']);
   });
 
+  it('allows any unrolled player to roll during starting turn order', () => {
+    let game = createInitialGame(['One', 'Two', 'Three'], 'turn-order-free', { determineTurnOrder: true });
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p3', dice: [6, 6] });
+
+    expect(game.phase).toBe('orderRoll');
+    expect(game.turnOrderRolls?.p3).toEqual([6, 6]);
+    expect(game.currentPlayerId).toBe('p1');
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p1', dice: [1, 1] });
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p2', dice: [3, 3] });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p3');
+    expect(game.players.map((player) => player.id)).toEqual(['p3', 'p2', 'p1']);
+  });
+
   it('moves a player, lets them buy Pavlohrad, and deducts money', () => {
     let game = createInitialGame(['Олена', 'Тарас'], 'test');
     game = {
@@ -604,6 +621,9 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.auction?.highestBidderId).toBe('p2');
     expect(game.auction?.highestBid).toBe(money(60));
     expect(game.auction?.bids).toHaveLength(1);
+    expect(() => reduceGame(game, { type: 'auction_bid', playerId: 'p1', amount: money(69) })).toThrow(
+      'Мінімальна ставка 70₴.',
+    );
 
     game = { ...game, auction: { ...game.auction!, endsAt: Date.now() - 1 } };
     game = reduceGame(game, { type: 'resolve_auction' });

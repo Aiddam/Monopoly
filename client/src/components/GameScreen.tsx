@@ -31,6 +31,7 @@ import { boardTiles, getTile, isPropertyTile } from '../data/board';
 import { getCityEventDefinition } from '../data/cityEvents';
 import { money } from '../engine/economy';
 import {
+  AUCTION_BID_INCREMENT,
   calculateRent,
   getEffectiveHouseCost,
   getEffectivePropertyPrice,
@@ -108,6 +109,11 @@ export const GameScreen = () => {
   const localId = localPlayerId ?? game.currentPlayerId;
   const localPlayer = game.players.find((player) => player.id === localId) ?? currentPlayer;
   const isLocalTurn = currentPlayer.id === localId || !room;
+  const orderRollPlayer = room ? localPlayer : currentPlayer;
+  const canLocalRollForOrder =
+    game.phase === 'orderRoll' &&
+    !orderRollPlayer.isBankrupt &&
+    !game.turnOrderRolls?.[orderRollPlayer.id];
   const tradePartners = game.players.filter((player) => player.id !== localPlayer.id && !player.isBankrupt);
   const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
   const activeTradeOffer = game.tradeOffers.find(
@@ -246,6 +252,8 @@ export const GameScreen = () => {
           isDiceRolling={isDiceRolling}
           rollingKey={rollingKey}
           isLocalTurn={isLocalTurn}
+          orderRollPlayer={orderRollPlayer}
+          canLocalRollForOrder={canLocalRollForOrder}
           isBoardBusy={isBoardBusy}
           hasDoubleRoll={hasDoubleRoll}
           dispatch={dispatch}
@@ -399,6 +407,8 @@ const GameBoard = ({
   isDiceRolling,
   rollingKey,
   isLocalTurn,
+  orderRollPlayer,
+  canLocalRollForOrder,
   isBoardBusy,
   hasDoubleRoll,
   dispatch,
@@ -419,6 +429,8 @@ const GameBoard = ({
   isDiceRolling: boolean;
   rollingKey: number;
   isLocalTurn: boolean;
+  orderRollPlayer: Player;
+  canLocalRollForOrder: boolean;
   isBoardBusy: boolean;
   hasDoubleRoll: boolean;
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
@@ -452,7 +464,12 @@ const GameBoard = ({
         </div>
           <CityEventBanner game={game} />
           {game.phase === 'orderRoll' ? (
-            <BoardTurnOrderPrompt game={game} isLocalTurn={isLocalTurn} isDiceRolling={isDiceRolling} dispatch={dispatch} />
+            <BoardTurnOrderPrompt
+              game={game}
+              orderRollPlayer={orderRollPlayer}
+              canLocalRollForOrder={canLocalRollForOrder}
+              dispatch={dispatch}
+            />
           ) : game.phase === 'awaitingJailDecision' && game.pendingJail && isLocalTurn && !isBoardBusy ? (
             <BoardJailDecisionPrompt game={game} dispatch={dispatch} />
           ) : game.phase === 'rolling' && currentPlayer.jailTurns > 0 && isLocalTurn && !isBoardBusy ? (
@@ -493,6 +510,8 @@ const GameBoard = ({
             game={game}
             isDiceRolling={isDiceRolling}
             isLocalTurn={isLocalTurn}
+            orderRollPlayer={orderRollPlayer}
+            canLocalRollForOrder={canLocalRollForOrder}
             isBoardBusy={isBoardBusy}
             hasDoubleRoll={hasDoubleRoll}
             dispatch={dispatch}
@@ -593,18 +612,24 @@ const BoardActiveTrade = ({
 
 const BoardTurnOrderPrompt = ({
   game,
-  isLocalTurn,
-  isDiceRolling,
+  orderRollPlayer,
+  canLocalRollForOrder,
   dispatch,
 }: {
   game: GameState;
-  isLocalTurn: boolean;
-  isDiceRolling: boolean;
+  orderRollPlayer: Player;
+  canLocalRollForOrder: boolean;
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const rolls = game.turnOrderRolls ?? {};
   const rolledCount = Object.keys(rolls).length;
+  const hasOrderRoll = Boolean(rolls[orderRollPlayer.id]);
+  const orderButtonLabel = canLocalRollForOrder
+    ? 'Кинути за чергу'
+    : hasOrderRoll
+      ? 'Очікуємо інших'
+      : `Очікуємо ${currentPlayer.name}`;
 
   return (
     <div className="board-turn-order-prompt">
@@ -635,11 +660,11 @@ const BoardTurnOrderPrompt = ({
 
       <button
         className="primary"
-        disabled={!isLocalTurn || isDiceRolling}
-        onClick={() => dispatch({ type: 'roll_for_order', playerId: currentPlayer.id })}
+        disabled={!canLocalRollForOrder}
+        onClick={() => dispatch({ type: 'roll_for_order', playerId: orderRollPlayer.id })}
       >
         <RotateCcw size={18} />
-        {isLocalTurn ? 'Кинути за чергу' : `Очікуємо ${currentPlayer.name}`}
+        {orderButtonLabel}
       </button>
     </div>
   );
@@ -1251,6 +1276,8 @@ const BoardActionDock = ({
   game,
   isDiceRolling,
   isLocalTurn,
+  orderRollPlayer,
+  canLocalRollForOrder,
   isBoardBusy,
   hasDoubleRoll,
   dispatch,
@@ -1259,6 +1286,8 @@ const BoardActionDock = ({
   game: GameState;
   isDiceRolling: boolean;
   isLocalTurn: boolean;
+  orderRollPlayer: Player;
+  canLocalRollForOrder: boolean;
   isBoardBusy: boolean;
   hasDoubleRoll: boolean;
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
@@ -1285,8 +1314,8 @@ const BoardActionDock = ({
         {game.phase === 'orderRoll' && (
           <button
             className="primary"
-            disabled={!isLocalTurn || isDiceRolling}
-            onClick={() => dispatch({ type: 'roll_for_order', playerId: currentPlayer.id })}
+            disabled={!canLocalRollForOrder}
+            onClick={() => dispatch({ type: 'roll_for_order', playerId: orderRollPlayer.id })}
           >
             <RotateCcw size={18} />
             Кинути за чергу
@@ -1476,7 +1505,7 @@ const AuctionOverlay = ({ game }: { game: GameState }) => {
   const bidder = players.find((player) => player.id === bidderId);
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const secondsLeft = auction ? Math.max(0, Math.ceil((auction.endsAt - now) / 1000)) : 0;
-  const nextMinimumBid = auction ? (auction.highestBid > 0 ? auction.highestBid + money(10) : auction.minimumBid) : 0;
+  const nextMinimumBid = auction ? (auction.highestBid > 0 ? auction.highestBid + AUCTION_BID_INCREMENT : auction.minimumBid) : 0;
 
   useEffect(() => {
     if (!players.some((player) => player.id === demoBidderId)) {
@@ -1569,7 +1598,7 @@ const AuctionOverlay = ({ game }: { game: GameState }) => {
           <input
             type="number"
             min={nextMinimumBid}
-            step={money(10)}
+            step={AUCTION_BID_INCREMENT}
             value={bidAmount}
             onChange={(event) => setBidAmount(Math.max(0, Number(event.target.value)))}
           />
@@ -1580,7 +1609,7 @@ const AuctionOverlay = ({ game }: { game: GameState }) => {
         </form>
 
         <div className="auction-quick-actions">
-          {[money(10), money(50), money(100)].map((increment) => (
+          {[AUCTION_BID_INCREMENT, money(50), money(100)].map((increment) => (
             <button
               className="ghost compact"
               type="button"

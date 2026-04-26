@@ -18,6 +18,18 @@ public sealed record RoomSnapshot(
     IReadOnlyList<RoomPlayer> Players,
     bool TestMode);
 
+public sealed record RoomRestorePlayer(
+    string Id,
+    string Name,
+    bool IsHost,
+    bool Ready,
+    DateTimeOffset JoinedAt);
+
+public sealed record RoomRestoreRequest(
+    string Code,
+    IReadOnlyList<RoomRestorePlayer> Players,
+    bool TestMode);
+
 public sealed record SignalEnvelope(
     string FromPeerId,
     string ToPeerId,

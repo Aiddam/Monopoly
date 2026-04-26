@@ -3653,12 +3653,35 @@ input:focus {
   right: 18px;
   bottom: 18px;
   z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   max-width: min(360px, calc(100vw - 36px));
   border-radius: 8px;
   padding: 12px 14px;
   color: #fff8e8;
   background: #b63a34;
   box-shadow: 0 16px 42px rgba(55, 20, 16, 0.22);
+}
+
+.toast span {
+  min-width: 0;
+}
+
+.toast button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  color: #fff8e8;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .finish-screen {

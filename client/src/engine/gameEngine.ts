@@ -28,6 +28,7 @@ export const PLAYER_COLORS = ['#f8c24e', '#43b3ff', '#f0645f', '#3ccf91', '#a78b
 const STARTING_MONEY = money(1500);
 const MORTGAGE_GRACE_TURNS = 10;
 const AUCTION_DURATION_MS = 15_000;
+export const AUCTION_BID_INCREMENT = money(10);
 const CASINO_MAX_BET = money(300);
 const CASINO_MAX_MULTIPLIER = 6;
 const CASINO_SPIN_DURATION_MS = 5_400;
@@ -256,12 +257,12 @@ export const diceRotationForValue = (value: number): [number, number, number] =>
 };
 
 const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, number]): GameState => {
-  assertCurrent(state, playerId);
   if (state.phase !== 'orderRoll') throw new Error('Зараз не визначається черга ходів.');
   if (state.turnOrderRolls?.[playerId]) throw new Error('Гравець уже кинув кубики за чергу.');
 
   const rolls = { ...(state.turnOrderRolls ?? {}), [playerId]: dice };
   const player = getPlayer(state, playerId);
+  if (player.isBankrupt) throw new Error('Гравець вибув.');
   const base: GameState = {
     ...state,
     dice,
@@ -563,7 +564,8 @@ const auctionBid = (state: GameState, playerId: string, amount: number): GameSta
   if (player.jailTurns > 0) throw new Error('Гравець у вʼязниці не може брати участь в аукціоні.');
   if (state.auction.highestBidderId === playerId) throw new Error('Ваша ставка вже найвища.');
   const normalizedAmount = Math.floor(amount);
-  const minimumBid = state.auction.highestBid > 0 ? state.auction.highestBid + money(1) : state.auction.minimumBid;
+  const minimumBid =
+    state.auction.highestBid > 0 ? state.auction.highestBid + AUCTION_BID_INCREMENT : state.auction.minimumBid;
   if (!Number.isFinite(normalizedAmount) || normalizedAmount < minimumBid) {
     throw new Error(`Мінімальна ставка ${minimumBid}₴.`);
   }

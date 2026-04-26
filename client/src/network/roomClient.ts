@@ -132,6 +132,11 @@ export class RoomClient {
     }
   }
 
+  async restoreRoom(previousRoom: RoomSnapshot, playerName: string, playerId: string) {
+    await this.connect();
+    return this.connection!.invoke<RoomSnapshot>('RestoreRoom', previousRoom, playerName, playerId);
+  }
+
   async joinRoom(code: string, playerName: string, playerId?: string) {
     await this.connect();
     const roomCode = normalizeRoomCode(code);

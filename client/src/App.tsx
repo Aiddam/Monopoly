@@ -7,7 +7,7 @@ import { RoomScreen } from './components/RoomScreen';
 import { useGameStore } from './store/useGameStore';
 
 export const App = () => {
-  const { screen, game, connection, leaveRoom, resumeSavedSession } = useGameStore();
+  const { screen, game, connection, leaveRoom, resumeSavedSession, clearConnectionError } = useGameStore();
   const resumeStarted = useRef(false);
   const winner = game?.players.find((player) => player.id === game.winnerId);
 
@@ -16,6 +16,12 @@ export const App = () => {
     resumeStarted.current = true;
     void resumeSavedSession();
   }, [resumeSavedSession]);
+
+  useEffect(() => {
+    if (!connection.error) return;
+    const timer = window.setTimeout(clearConnectionError, 4500);
+    return () => window.clearTimeout(timer);
+  }, [clearConnectionError, connection.error]);
 
   return (
     <main className="app-shell">
@@ -42,7 +48,14 @@ export const App = () => {
           </motion.section>
         )}
       </AnimatePresence>
-      {connection.error && <div className="toast">{connection.error}</div>}
+      {connection.error && (
+        <div className="toast">
+          <span>{connection.error}</span>
+          <button type="button" onClick={clearConnectionError} aria-label="Закрити повідомлення">
+            ×
+          </button>
+        </div>
+      )}
     </main>
   );
 };

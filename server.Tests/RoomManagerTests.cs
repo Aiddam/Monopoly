@@ -79,4 +79,40 @@ public sealed class RoomManagerTests
         Assert.True(manager.ContainsPeer(room.Code, "host-id"));
         Assert.Equal("conn-host-2", manager.GetConnectionIdForPeer(room.Code, "host-id"));
     }
+
+    [Fact]
+    public void HostCanRestoreRoomAfterServerMemoryReset()
+    {
+        var originalManager = new RoomManager();
+        var originalRoom = originalManager.CreateRoom("host-conn", "Host", playerId: "host-id");
+        originalManager.JoinRoom("p2-conn", originalRoom.Code, "Two", "p2-id");
+        originalManager.JoinRoom("p3-conn", originalRoom.Code, "Three", "p3-id");
+        var snapshot = originalManager.GetSnapshot(originalRoom.Code);
+
+        var restoredManager = new RoomManager();
+        var restored = restoredManager.RestoreRoom("host-new", snapshot, "Host", "host-id");
+
+        Assert.Equal(originalRoom.Code, restored.Code);
+        Assert.Equal(3, restored.Players.Count);
+        Assert.True(restoredManager.ContainsPeer(originalRoom.Code, "host-id"));
+        Assert.False(restoredManager.ContainsPeer(originalRoom.Code, "p2-id"));
+
+        var rejoined = restoredManager.JoinRoom("p2-new", originalRoom.Code, "Two", "p2-id");
+
+        Assert.Equal(3, rejoined.Players.Count);
+        Assert.True(restoredManager.ContainsPeer(originalRoom.Code, "p2-id"));
+    }
+
+    [Fact]
+    public void NonHostCannotRestoreRoomAfterServerMemoryReset()
+    {
+        var originalManager = new RoomManager();
+        var originalRoom = originalManager.CreateRoom("host-conn", "Host", playerId: "host-id");
+        originalManager.JoinRoom("p2-conn", originalRoom.Code, "Two", "p2-id");
+        var snapshot = originalManager.GetSnapshot(originalRoom.Code);
+
+        var restoredManager = new RoomManager();
+
+        Assert.Throws<InvalidOperationException>(() => restoredManager.RestoreRoom("p2-new", snapshot, "Two", "p2-id"));
+    }
 }

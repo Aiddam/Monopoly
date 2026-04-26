@@ -37,6 +37,7 @@ interface GameStore {
   startRoomGame: () => void;
   dispatch: (action: GameAction, fromPeer?: boolean) => void;
   applyRemoteMessage: (message: PeerMessage, fromPeerId: string) => void;
+  clearConnectionError: () => void;
   leaveRoom: () => Promise<void>;
 }
 
@@ -53,6 +54,10 @@ interface SavedSession {
 
 const SESSION_STORAGE_KEY = 'ukraine-monopoly-session-v1';
 const ROOM_NOT_FOUND_MESSAGE = 'Кімнату не знайдено. Якщо сервер Render перезапустився, створіть нову кімнату.';
+const ROOM_RESTORE_WAIT_MESSAGE = 'Сервер перезапустився. Очікуємо, поки хост відновить кімнату.';
+const ROOM_REJOIN_RETRY_MS = 2_500;
+
+let roomRejoinRetryTimer: number | undefined;
 
 function readSavedSession(): SavedSession | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -117,17 +122,14 @@ export const useGameStore = create<GameStore>((set, get) => ({
       set({ screen: nextScreen, room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
       saveSession({ ...saved, screen: nextScreen, localPlayerId, playerName: savedPlayerName, room });
 
-      window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 800);
-      window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 2_000);
+      window.setTimeout(() => broadcastRoomMessage(room, roomClient, peerMesh, { type: 'sync:request' }), 800);
+      window.setTimeout(() => broadcastRoomMessage(room, roomClient, peerMesh, { type: 'sync:request' }), 2_000);
     } catch (error) {
       if (isRoomNotFoundError(error)) {
-        clearSavedSession();
-        set({
-          screen: 'home',
-          room: undefined,
-          game: undefined,
-          connection: { signalr: 'error', p2p: {}, error: ROOM_NOT_FOUND_MESSAGE },
-        });
+        const restored = await tryRestoreRoomIfHost(roomClient, saved.room, savedPlayerName, saved.localPlayerId, saved.game);
+        if (!restored) {
+          waitForHostRoomRestore(roomClient);
+        }
         return;
       }
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
@@ -214,6 +216,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const isHost = !room || room.players.find((player) => player.id === localPlayerId)?.isHost;
 
     if (!isHost && !fromPeer) {
+      clearConnectionErrorState();
       broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:action', action });
       return;
     }
@@ -221,7 +224,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
     try {
       const next = reduceGame(game, action);
       broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:state', state: next });
-      set({ game: next, screen: next.phase === 'finished' ? 'finished' : 'game' });
+      set({
+        game: next,
+        screen: next.phase === 'finished' ? 'finished' : 'game',
+        connection: withoutConnectionError(get().connection),
+      });
       persistCurrentSession(get());
     } catch (error) {
       set({ connection: { ...get().connection, error: errorMessage(error) } });
@@ -247,8 +254,13 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
   },
 
+  clearConnectionError() {
+    clearConnectionErrorState();
+  },
+
   async leaveRoom() {
     const { room, roomClient, peerMesh } = get();
+    clearRejoinRetryTimer();
     peerMesh?.close();
     try {
       await roomClient?.leaveRoom(room?.code);
@@ -327,6 +339,7 @@ const configureRoomClient = () => {
     persistCurrentSession(useGameStore.getState());
   });
   roomClient.on('RoomClosed', () => {
+    clearRejoinRetryTimer();
     useGameStore.setState({ screen: 'home', room: undefined, game: undefined });
     clearSavedSession();
   });
@@ -346,6 +359,7 @@ const rejoinCurrentRoom = async (roomClient: RoomClient) => {
     savePlayerName(normalizedPlayerName);
     const nextPeerMesh = peerMesh ?? configurePeerMesh(localPlayerId, roomClient, nextRoom.code);
     await nextPeerMesh.syncPeers(nextRoom.players);
+    clearRejoinRetryTimer();
     useGameStore.setState({
       room: nextRoom,
       peerMesh: nextPeerMesh,
@@ -356,10 +370,86 @@ const rejoinCurrentRoom = async (roomClient: RoomClient) => {
     const localPlayer = nextRoom.players.find((player) => player.id === localPlayerId);
     if (localPlayer?.isHost && game) {
       broadcastRoomMessage(nextRoom, roomClient, nextPeerMesh, { type: 'game:state', state: game });
+    } else {
+      window.setTimeout(() => broadcastRoomMessage(nextRoom, roomClient, nextPeerMesh, { type: 'sync:request' }), 800);
+      window.setTimeout(() => broadcastRoomMessage(nextRoom, roomClient, nextPeerMesh, { type: 'sync:request' }), 2_000);
     }
   } catch (error) {
-    setConnectionError(isRoomNotFoundError(error) ? new Error(ROOM_NOT_FOUND_MESSAGE) : error);
+    if (isRoomNotFoundError(error)) {
+      const restored = await tryRestoreRoomIfHost(roomClient, room, normalizedPlayerName, localPlayerId, game);
+      if (!restored) {
+        waitForHostRoomRestore(roomClient);
+      }
+      return;
+    }
+
+    setConnectionError(error);
   }
+};
+
+const tryRestoreRoomIfHost = async (
+  roomClient: RoomClient,
+  room: RoomSnapshot,
+  playerName: string,
+  localPlayerId: string,
+  game?: GameState,
+): Promise<boolean> => {
+  const localRoomPlayer = room.players.find((player) => player.id === localPlayerId);
+  if (!localRoomPlayer?.isHost) return false;
+
+  try {
+    const restoredRoom = await roomClient.restoreRoom(room, playerName, localPlayerId);
+    const previousPeerMesh = useGameStore.getState().peerMesh;
+    previousPeerMesh?.close();
+    const peerMesh = configurePeerMesh(localPlayerId, roomClient, restoredRoom.code);
+    await peerMesh.syncPeers(restoredRoom.players);
+    clearRejoinRetryTimer();
+    savePlayerName(playerName);
+    useGameStore.setState({
+      screen: game ? 'game' : 'lobby',
+      room: restoredRoom,
+      localPlayerId,
+      playerName,
+      game,
+      peerMesh,
+      connection: { signalr: 'connected', p2p: {} },
+    });
+    persistCurrentSession(useGameStore.getState());
+
+    if (game) {
+      window.setTimeout(() => broadcastRoomMessage(restoredRoom, roomClient, peerMesh, { type: 'game:state', state: game }), 300);
+    }
+    return true;
+  } catch (error) {
+    setConnectionError(error);
+    return true;
+  }
+};
+
+const waitForHostRoomRestore = (roomClient: RoomClient) => {
+  const connection = useGameStore.getState().connection;
+  useGameStore.setState({
+    connection: {
+      signalr: 'connecting',
+      p2p: connection.p2p,
+      error: ROOM_RESTORE_WAIT_MESSAGE,
+    },
+  });
+  scheduleRoomRejoinRetry(roomClient);
+};
+
+const scheduleRoomRejoinRetry = (roomClient: RoomClient) => {
+  if (roomRejoinRetryTimer !== undefined) return;
+  roomRejoinRetryTimer = window.setTimeout(() => {
+    roomRejoinRetryTimer = undefined;
+    void rejoinCurrentRoom(roomClient);
+  }, ROOM_REJOIN_RETRY_MS);
+};
+
+const clearRejoinRetryTimer = () => {
+  if (roomRejoinRetryTimer === undefined) return;
+  window.clearTimeout(roomRejoinRetryTimer);
+  roomRejoinRetryTimer = undefined;
 };
 
 const configurePeerMesh = (localPlayerId: string, roomClient: RoomClient, roomCode: string) => {
@@ -458,6 +548,17 @@ const clearSavedSession = () => {
   } catch {
     // Ignore storage cleanup failures.
   }
+};
+
+const withoutConnectionError = (connection: ConnectionState): ConnectionState => ({
+  signalr: connection.signalr,
+  p2p: connection.p2p,
+});
+
+const clearConnectionErrorState = () => {
+  const connection = useGameStore.getState().connection;
+  if (!connection.error) return;
+  useGameStore.setState({ connection: withoutConnectionError(connection) });
 };
 
 const setConnectionError = (error: unknown) => {

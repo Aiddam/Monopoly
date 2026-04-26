@@ -26,6 +26,71 @@ public sealed class RoomManager
         }
     }
 
+    public RoomSnapshot RestoreRoom(string connectionId, RoomSnapshot previousRoom, string playerName, string playerId) =>
+        RestoreRoom(
+            connectionId,
+            new RoomRestoreRequest(
+                previousRoom.Code,
+                previousRoom.Players
+                    .Select(player => new RoomRestorePlayer(player.Id, player.Name, player.IsHost, player.Ready, player.JoinedAt))
+                    .ToList(),
+                previousRoom.TestMode),
+            playerName,
+            playerId);
+
+    public RoomSnapshot RestoreRoom(string connectionId, RoomRestoreRequest previousRoom, string playerName, string playerId)
+    {
+        lock (_gate)
+        {
+            var roomCode = CleanCode(previousRoom.Code);
+            if (string.IsNullOrWhiteSpace(roomCode))
+            {
+                throw new InvalidOperationException("Код кімнати некоректний.");
+            }
+
+            if (_rooms.TryGetValue(roomCode, out var existingRoom) && !existingRoom.Closed)
+            {
+                return JoinRoom(connectionId, roomCode, playerName, playerId);
+            }
+
+            var stablePlayerId = CleanPlayerId(playerId, connectionId);
+            var previousPlayers = previousRoom.Players
+                .GroupBy(player => CleanPlayerId(player.Id, player.Id))
+                .Select(group => group.First())
+                .Take(MaxPlayers)
+                .ToList();
+            var previousHost = previousPlayers.FirstOrDefault(player => player.Id == stablePlayerId);
+            if (previousHost is null || !previousHost.IsHost)
+            {
+                throw new InvalidOperationException("Відновити кімнату може тільки хост.");
+            }
+
+            LeaveRoom(connectionId);
+            var host = new RoomPlayer(
+                stablePlayerId,
+                CleanName(playerName),
+                true,
+                true,
+                NormalizeJoinedAt(previousHost.JoinedAt),
+                connectionId);
+            var room = new Room(roomCode, host, previousRoom.TestMode);
+
+            foreach (var previousPlayer in previousPlayers.Where(player => player.Id != stablePlayerId))
+            {
+                room.Players.Add(new RoomPlayer(
+                    CleanPlayerId(previousPlayer.Id, previousPlayer.Id),
+                    CleanName(previousPlayer.Name),
+                    false,
+                    previousPlayer.Ready,
+                    NormalizeJoinedAt(previousPlayer.JoinedAt)));
+            }
+
+            _rooms[room.Code] = room;
+            _connectionRooms[connectionId] = room.Code;
+            return room.Snapshot();
+        }
+    }
+
     public RoomSnapshot JoinRoom(string connectionId, string code, string playerName, string? playerId = null)
     {
         lock (_gate)
@@ -246,6 +311,9 @@ public sealed class RoomManager
         var trimmed = string.IsNullOrWhiteSpace(playerId) ? fallback : playerId.Trim();
         return trimmed.Length > 64 ? trimmed[..64] : trimmed;
     }
+
+    private static DateTimeOffset NormalizeJoinedAt(DateTimeOffset joinedAt) =>
+        joinedAt == default ? DateTimeOffset.UtcNow : joinedAt;
 }
 
 public sealed record DisconnectedPlayer(string Code, string PlayerId, RoomSnapshot Snapshot);
