@@ -35,6 +35,15 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     },
   },
   {
+    id: 'tax-madness',
+    title: 'Податкове шаленство',
+    text: 'Усі штрафи банку, податки та штрафні картки x2 на 2 раунди.',
+    durationRounds: 2,
+    effects: {
+      fineMultiplier: 2,
+    },
+  },
+  {
     id: 'city-tender',
     title: 'Міський тендер',
     text: 'Банк запускає аукціон на випадкове вільне поле зі стартом 80% ціни.',
@@ -82,6 +91,90 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     effects: {
       rentGroups: ['Блакитна', 'Помаранчева'],
       rentMultiplier: 1.25,
+    },
+  },
+  {
+    id: 'night-market',
+    title: 'Нічний ринок',
+    text: 'Оренда на фіолетових і бурштинових вулицях +40% на 2 раунди.',
+    durationRounds: 2,
+    effects: {
+      rentGroups: ['Фіолетова', 'Бурштинова'],
+      rentMultiplier: 1.4,
+    },
+  },
+  {
+    id: 'construction-permit',
+    title: 'Будівельні дозволи',
+    text: 'Будинки на червоних і золотих вулицях 2 раунди коштують на 25% дешевше.',
+    durationRounds: 2,
+    effects: {
+      houseCostGroups: ['Червона', 'Золота'],
+      houseCostMultiplier: 0.75,
+    },
+  },
+  {
+    id: 'bank-audit',
+    title: 'Банківський аудит',
+    text: 'Придбання банків 2 раунди дорожче на 25%, але їхня оренда +25%.',
+    durationRounds: 2,
+    effects: {
+      propertyPriceTypes: ['bank'],
+      propertyPriceMultiplier: 1.25,
+      rentPropertyTypes: ['bank'],
+      rentMultiplier: 1.25,
+    },
+  },
+  {
+    id: 'regional-festival',
+    title: 'Фестиваль регіонів',
+    text: 'Оренда на зелених, синіх і блакитних вулицях +30% на 2 раунди.',
+    durationRounds: 2,
+    effects: {
+      rentGroups: ['Зелена', 'Синя', 'Блакитна'],
+      rentMultiplier: 1.3,
+    },
+  },
+  {
+    id: 'transport-strike',
+    title: 'Транспортний страйк',
+    text: 'Оренда банків і сервісів 2 раунди зменшується на 40%.',
+    durationRounds: 2,
+    effects: {
+      rentPropertyTypes: ['bank', 'utility'],
+      rentMultiplier: 0.6,
+    },
+  },
+  {
+    id: 'utility-modernization',
+    title: 'Модернізація сервісів',
+    text: 'Сервіси 3 раунди дорожчі на 20%, а їхня оренда +50%.',
+    durationRounds: 3,
+    effects: {
+      propertyPriceTypes: ['utility'],
+      propertyPriceMultiplier: 1.2,
+      rentPropertyTypes: ['utility'],
+      rentMultiplier: 1.5,
+    },
+  },
+  {
+    id: 'heritage-protection',
+    title: 'Охорона спадщини',
+    text: 'Будинки на золотих і зелених вулицях 2 раунди дорожчі на 35%.',
+    durationRounds: 2,
+    effects: {
+      houseCostGroups: ['Золота', 'Зелена'],
+      houseCostMultiplier: 1.35,
+    },
+  },
+  {
+    id: 'startup-wave',
+    title: 'Стартап-хвиля',
+    text: 'Вільні міста та сервіси 2 раунди дешевші на 15%.',
+    durationRounds: 2,
+    effects: {
+      propertyPriceTypes: ['city', 'utility'],
+      propertyPriceMultiplier: 0.85,
     },
   },
 ];

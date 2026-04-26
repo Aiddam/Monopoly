@@ -19,6 +19,7 @@ import {
   RotateCcw,
   ShieldAlert,
   Trash2,
+  TrendingUp,
   UsersRound,
   Volume2,
   VolumeX,
@@ -33,11 +34,12 @@ import { money } from '../engine/economy';
 import {
   AUCTION_BID_INCREMENT,
   calculateRent,
+  getEffectiveFineAmount,
   getEffectiveHouseCost,
   getEffectivePropertyPrice,
   getEffectiveUnmortgageCost,
 } from '../engine/gameEngine';
-import type { CityTile, GameState, Player, PropertyTile, RentServiceOffer, TradeOffer } from '../engine/types';
+import type { CityTile, GameState, MoneyHistoryPoint, Player, PropertyTile, RentServiceOffer, TradeOffer } from '../engine/types';
 import { useGameStore } from '../store/useGameStore';
 import { DiceRoller } from './DiceRoller';
 
@@ -56,7 +58,7 @@ const CASINO_RESULT_HOLD_MS = 850;
 const JAIL_FINE = money(100);
 const BUILDING_ANIMATION_MS = 2600;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
-type WorkspaceTab = 'cards' | 'trade';
+type WorkspaceTab = 'cards' | 'trade' | 'chart';
 type GameSoundKind =
   | 'auction'
   | 'bid'
@@ -73,6 +75,7 @@ type GameSoundKind =
   | 'rent'
   | 'trade'
   | 'turn'
+  | 'turn-alert'
   | 'win';
 type TradeDraft = {
   targetId: string;
@@ -127,13 +130,15 @@ export const GameScreen = () => {
   const rollingKey = game.diceRollId || game.turn * 10 + game.dice[0] + game.dice[1];
   const secondsLeft = useTurnTimer(game, isLocalTurn, dispatch);
   const hasDoubleRoll = Boolean(game.lastDice && game.lastDice[0] === game.lastDice[1] && game.doublesInRow > 0);
-  const isDiceRolling = useDiceRollAnimation(game);
+  const shouldAnimateDiceRoll =
+    game.phase !== 'orderRoll' || !room || game.lastOrderRollPlayerId === localPlayer.id;
+  const isDiceRolling = useDiceRollAnimation(game, shouldAnimateDiceRoll);
   const { displayPositions, isAnimating: isPawnAnimating } = useAnimatedPositions(game);
   const isBoardBusy = isDiceRolling || isPawnAnimating;
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const canUseAdmin = Boolean(room?.testMode);
   useAutoContinueTurn(game, isLocalTurn, dispatch, isBoardBusy);
-  useGameSounds(game, soundEnabled);
+  useGameSounds(game, soundEnabled, localPlayer.id, Boolean(room));
 
   const toggleSound = () => {
     setSoundEnabled((enabled) => {
@@ -678,7 +683,8 @@ const BoardJailDecisionPrompt = ({
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
-  const canPay = currentPlayer.money >= JAIL_FINE;
+  const jailFine = getEffectiveFineAmount(game, JAIL_FINE);
+  const canPay = currentPlayer.money >= jailFine;
 
   return (
     <motion.article
@@ -693,7 +699,7 @@ const BoardJailDecisionPrompt = ({
           <p className="eyebrow">До вʼязниці</p>
           <h3>{currentPlayer.name}</h3>
         </div>
-        <strong>{formatMoney(JAIL_FINE)}</strong>
+        <strong>{formatMoney(jailFine)}</strong>
       </div>
       <p>Можна сплатити штраф і лишитись на полі або вирушити у вʼязницю на 3 ходи без винагороди за Старт.</p>
       <div className="jail-actions">
@@ -729,7 +735,8 @@ const BoardJailTurnPrompt = ({
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const hasExitCard = currentPlayer.jailCards > 0;
-  const canPay = hasExitCard || currentPlayer.money >= JAIL_FINE;
+  const jailFine = getEffectiveFineAmount(game, JAIL_FINE);
+  const canPay = hasExitCard || currentPlayer.money >= jailFine;
 
   return (
     <motion.article
@@ -759,7 +766,7 @@ const BoardJailTurnPrompt = ({
           onClick={() => dispatch({ type: 'pay_bail', playerId: currentPlayer.id })}
         >
           <HandCoins size={16} />
-          {hasExitCard ? 'Картка виходу' : `Сплатити ${formatMoney(JAIL_FINE)}`}
+          {hasExitCard ? 'Картка виходу' : `Сплатити ${formatMoney(jailFine)}`}
         </button>
         <button
           className="secondary compact"
@@ -1234,9 +1241,13 @@ const BoardLogFeed = ({ game, deferUpdates }: { game: GameState; deferUpdates: b
 
   useEffect(() => {
     const element = logRef.current;
-    if (!element || !stickToBottomRef.current) return;
-    element.scrollTop = element.scrollHeight;
-    setShowJumpDown(false);
+    if (!element) return;
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+      stickToBottomRef.current = true;
+      setShowJumpDown(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [entries.length]);
 
   return (
@@ -1404,6 +1415,15 @@ const BoardActionDock = ({
           <ArrowLeftRight size={18} />
           Угода
         </button>
+        <button
+          className="dock-tool icon-only"
+          type="button"
+          title="Графік капіталу"
+          aria-label="Відкрити графік капіталу"
+          onClick={() => onOpenWorkspace('chart')}
+        >
+          <TrendingUp size={19} />
+        </button>
       </div>
 
     </div>
@@ -1411,7 +1431,8 @@ const BoardActionDock = ({
 };
 
 const DiceRollOverlay = ({ game, isRolling, rollingKey }: { game: GameState; isRolling: boolean; rollingKey: number }) => {
-  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId);
+  const rollingPlayerId = game.phase === 'orderRoll' ? game.lastOrderRollPlayerId : game.currentPlayerId;
+  const currentPlayer = game.players.find((player) => player.id === rollingPlayerId);
 
   return (
     <AnimatePresence>
@@ -1847,9 +1868,11 @@ const BoardPawns = ({ game, displayPositions }: { game: GameState; displayPositi
       {Object.entries(groups).flatMap(([tileId, players]) =>
         players.map((player, index) => {
           const point = pawnPoint(Number(tileId), index, players.length);
+          const baseScale = players.length > 4 ? 0.82 : 1;
+          const isTurnStartPawn = game.phase === 'rolling' && player.id === game.currentPlayerId && !player.isBankrupt;
           return (
             <motion.div
-              className={`board-pawn ${player.jailTurns > 0 ? 'jailed' : ''}`}
+              className={`board-pawn ${player.jailTurns > 0 ? 'jailed' : ''} ${isTurnStartPawn ? 'turn-start' : ''}`}
               layoutId={`token-${player.id}`}
               data-player-id={player.id}
               data-jail-turns={player.jailTurns > 0 ? player.jailTurns : undefined}
@@ -1857,10 +1880,11 @@ const BoardPawns = ({ game, displayPositions }: { game: GameState; displayPositi
               key={player.id}
               style={
                 {
-                  '--pawn-scale': players.length > 4 ? 0.82 : 1,
+                  '--pawn-color': player.color,
+                  '--pawn-scale': isTurnStartPawn ? baseScale * 1.28 : baseScale,
                   left: `${point.x}%`,
                   top: `${point.y}%`,
-                  zIndex: 40 + index,
+                  zIndex: 40 + index + (isTurnStartPawn ? 20 : 0),
                 } as CSSProperties
               }
               transition={{ type: 'spring', stiffness: 230, damping: 20 }}
@@ -1918,8 +1942,9 @@ const BuildingAnimationLayer = ({ events }: { events: BuildingAnimationEvent[] }
 const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
   const { game } = useGameStore();
   if (!game) return null;
+  const isCompact = game.players.length > 4;
   return (
-    <section className="panel players-panel">
+    <section className={`panel players-panel ${isCompact ? 'compact-players' : ''}`}>
       <p className="eyebrow">Гравці</p>
       {game.players.map((player) => {
         const isActive = player.id === game.currentPlayerId;
@@ -1964,12 +1989,15 @@ const WorkspaceDrawer = ({
   const tabs: Array<{ id: WorkspaceTab; label: string; icon: typeof Layers }> = [
     { id: 'cards', label: 'Мої картки', icon: Layers },
     { id: 'trade', label: 'Угода', icon: ArrowLeftRight },
+    { id: 'chart', label: 'Графік', icon: TrendingUp },
   ];
+  const title =
+    activeTab === 'cards' ? 'Мої картки' : activeTab === 'trade' ? 'Угода' : 'Графік капіталу';
 
   return (
     <div className="workspace-backdrop" role="presentation" onMouseDown={onClose}>
       <motion.aside
-        className="workspace-drawer"
+        className={`workspace-drawer ${activeTab === 'chart' ? 'chart-drawer' : ''}`}
         role="dialog"
         aria-modal="true"
         initial={{ opacity: 0, x: 28, scale: 0.98 }}
@@ -1981,7 +2009,7 @@ const WorkspaceDrawer = ({
         <div className="drawer-head">
           <div>
             <p className="eyebrow">Керування</p>
-            <h2>{activeTab === 'cards' ? 'Мої картки' : 'Угода'}</h2>
+            <h2>{title}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Закрити">
             <X size={18} />
@@ -2016,13 +2044,200 @@ const WorkspaceDrawer = ({
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.16 }}
           >
-            {activeTab === 'cards' ? <ManagePanel /> : <TradePanel onStartTrade={onStartTrade} />}
+            {activeTab === 'cards' ? (
+              <ManagePanel />
+            ) : activeTab === 'trade' ? (
+              <TradePanel onStartTrade={onStartTrade} />
+            ) : (
+              <MoneyChartPanel />
+            )}
           </motion.div>
         </AnimatePresence>
       </motion.aside>
     </div>
   );
 };
+
+const MoneyChartPanel = () => {
+  const { game } = useGameStore();
+  const [hoveredIndex, setHoveredIndex] = useState<number | undefined>();
+  const history = useMemo(() => (game ? getMoneyChartHistory(game) : []), [game]);
+
+  if (!game) return null;
+
+  const chartWidth = 620;
+  const chartHeight = 280;
+  const padding = { top: 20, right: 18, bottom: 34, left: 54 };
+  const innerWidth = chartWidth - padding.left - padding.right;
+  const innerHeight = chartHeight - padding.top - padding.bottom;
+  const values = history.flatMap((point) => game.players.map((player) => getChartWorth(point, player)));
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const valuePadding = rawMin === rawMax ? money(100) : Math.max(money(50), (rawMax - rawMin) * 0.12);
+  const minMoney = rawMin < 0 ? rawMin - valuePadding : Math.max(0, rawMin - valuePadding);
+  const maxMoney = rawMax + valuePadding;
+  const range = Math.max(1, maxMoney - minMoney);
+  const activeIndex = Math.min(hoveredIndex ?? history.length - 1, history.length - 1);
+  const activePoint = history[activeIndex];
+  const xForIndex = (index: number) =>
+    padding.left + (history.length === 1 ? innerWidth / 2 : (index / (history.length - 1)) * innerWidth);
+  const yForMoney = (amount: number) => padding.top + ((maxMoney - amount) / range) * innerHeight;
+  const activeRows = [...game.players]
+    .map((player) => ({
+      player,
+      amount: activePoint ? getChartWorth(activePoint, player) : player.money,
+      cash: activePoint?.money[player.id] ?? player.money,
+    }))
+    .sort((left, right) => right.amount - left.amount);
+
+  const makePath = (player: Player) =>
+    history
+      .map((point, index) => {
+        const command = index === 0 ? 'M' : 'L';
+        return `${command} ${xForIndex(index).toFixed(2)} ${yForMoney(getChartWorth(point, player)).toFixed(2)}`;
+      })
+      .join(' ');
+
+  return (
+    <div className="money-chart-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Статистика</p>
+          <h3>Капітал по ходах</h3>
+        </div>
+        <strong>{history.length} точок</strong>
+      </div>
+
+      <div className="money-chart-card" onMouseLeave={() => setHoveredIndex(undefined)}>
+        <svg className="money-chart-svg" viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Графік капіталу гравців">
+          {[0, 0.5, 1].map((step) => {
+            const y = padding.top + innerHeight * step;
+            const label = formatMoney(Math.round(maxMoney - range * step));
+            return (
+              <g key={step}>
+                <line className="money-chart-grid" x1={padding.left} x2={chartWidth - padding.right} y1={y} y2={y} />
+                <text className="money-chart-axis-label" x={padding.left - 10} y={y} textAnchor="end" dominantBaseline="middle">
+                  {label}
+                </text>
+              </g>
+            );
+          })}
+
+          {game.players.map((player) => (
+            <path className="money-chart-line" d={makePath(player)} stroke={player.color} key={player.id} />
+          ))}
+
+          {activePoint && (
+            <line
+              className="money-chart-cursor"
+              x1={xForIndex(activeIndex)}
+              x2={xForIndex(activeIndex)}
+              y1={padding.top}
+              y2={chartHeight - padding.bottom}
+            />
+          )}
+
+          {activePoint &&
+            game.players.map((player) => (
+              <circle
+                className="money-chart-point"
+                cx={xForIndex(activeIndex)}
+                cy={yForMoney(getChartWorth(activePoint, player))}
+                r="4.5"
+                fill={player.color}
+                key={player.id}
+              />
+            ))}
+
+          {history.map((point, index) => {
+            const step = history.length === 1 ? innerWidth : innerWidth / (history.length - 1);
+            const x = history.length === 1 ? padding.left : Math.max(padding.left, xForIndex(index) - step / 2);
+            const width = history.length === 1 ? innerWidth : Math.min(step, chartWidth - padding.right - x);
+            return (
+              <rect
+                className="money-chart-hit"
+                x={x}
+                y={padding.top}
+                width={width}
+                height={innerHeight}
+                onMouseEnter={() => setHoveredIndex(index)}
+                onFocus={() => setHoveredIndex(index)}
+                tabIndex={0}
+                key={`${point.turn}-${point.round}-${index}`}
+              />
+            );
+          })}
+
+          <text className="money-chart-turn-label" x={padding.left} y={chartHeight - 8}>
+            Хід {history[0]?.turn ?? game.turn}
+          </text>
+          <text className="money-chart-turn-label" x={chartWidth - padding.right} y={chartHeight - 8} textAnchor="end">
+            Хід {history[history.length - 1]?.turn ?? game.turn}
+          </text>
+        </svg>
+      </div>
+
+      {activePoint && (
+        <div className="money-chart-tooltip">
+          <div className="money-chart-tooltip-head">
+            <strong>Хід {activePoint.turn}</strong>
+            <span>Раунд {activePoint.round}</span>
+          </div>
+          {activeRows.map(({ player, amount, cash }) => (
+            <div className="money-chart-tooltip-row" title={`Готівка: ${formatMoney(cash)}`} key={player.id}>
+              <span className="money-chart-dot" style={{ background: player.color }} />
+              <span>{player.name}</span>
+              <strong>{formatMoney(amount)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="money-chart-legend">
+        {game.players.map((player) => (
+          <span key={player.id}>
+            <i style={{ background: player.color }} />
+            {player.name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const getMoneyChartHistory = (game: GameState): MoneyHistoryPoint[] => {
+  const history = game.moneyHistory && game.moneyHistory.length > 0 ? game.moneyHistory : [createCurrentMoneyPoint(game)];
+  const current = createCurrentMoneyPoint(game);
+  const last = history[history.length - 1];
+  const isSamePoint = last.turn === current.turn && last.round === current.round;
+
+  if (isSamePoint) {
+    return history.map((point, index) => (index === history.length - 1 ? { ...current, createdAt: point.createdAt } : point));
+  }
+
+  return [...history, current];
+};
+
+const createCurrentMoneyPoint = (game: GameState): MoneyHistoryPoint => ({
+  turn: game.turn,
+  round: game.currentRound ?? 1,
+  createdAt: game.log[0]?.createdAt ?? 0,
+  money: Object.fromEntries(game.players.map((player) => [player.id, player.money])),
+  worth: Object.fromEntries(game.players.map((player) => [player.id, calculatePlayerChartWorth(game, player)])),
+});
+
+const getChartWorth = (point: MoneyHistoryPoint, player: Player): number =>
+  point.worth?.[player.id] ?? point.money[player.id] ?? player.money;
+
+const calculatePlayerChartWorth = (game: GameState, player: Player): number =>
+  player.money +
+  player.properties.reduce((sum, tileId) => {
+    const tile = getTile(tileId);
+    if (!isPropertyTile(tile)) return sum;
+    const property = game.properties[tile.id];
+    const buildingValue = tile.type === 'city' ? property.houses * tile.houseCost : 0;
+    return sum + tile.price + buildingValue;
+  }, 0);
 
 const ManagePanel = () => {
   const { game, localPlayerId, room, dispatch } = useGameStore();
@@ -3490,7 +3705,7 @@ type SoundSnapshot = {
   resolvedTradeCount: number;
 };
 
-const useGameSounds = (game: GameState, enabled: boolean) => {
+const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string, isOnlineRoom: boolean) => {
   const audioRef = useRef<AudioContext | undefined>(undefined);
   const snapshotRef = useRef<SoundSnapshot | undefined>(undefined);
   const buildingSnapshotRef = useRef(createSoundBuildingSnapshot(game));
@@ -3538,7 +3753,12 @@ const useGameSounds = (game: GameState, enabled: boolean) => {
 
     const sounds: GameSoundKind[] = [];
     if (nextSnapshot.diceRollId > previousSnapshot.diceRollId) sounds.push('dice');
-    if (nextSnapshot.currentPlayerId !== previousSnapshot.currentPlayerId) sounds.push('turn');
+    const shouldSignalTurn =
+      nextSnapshot.phase === 'rolling' &&
+      (nextSnapshot.currentPlayerId !== previousSnapshot.currentPlayerId || previousSnapshot.phase !== 'rolling');
+    if (shouldSignalTurn) {
+      sounds.push(!isOnlineRoom || nextSnapshot.currentPlayerId === localPlayerId ? 'turn-alert' : 'turn');
+    }
     if (nextSnapshot.pendingCardKey && nextSnapshot.pendingCardKey !== previousSnapshot.pendingCardKey) sounds.push('card');
     if (nextSnapshot.cityEventKey && nextSnapshot.cityEventKey !== previousSnapshot.cityEventKey) sounds.push('card');
     if (nextSnapshot.casinoSpinKey && nextSnapshot.casinoSpinKey !== previousSnapshot.casinoSpinKey) sounds.push('casino');
@@ -3575,7 +3795,7 @@ const useGameSounds = (game: GameState, enabled: boolean) => {
     uniqueSounds(sounds)
       .slice(0, 4)
       .forEach((sound, index) => playGameSound(context, sound, index * 80));
-  }, [enabled, game]);
+  }, [enabled, game, isOnlineRoom, localPlayerId]);
 };
 
 const createGameSoundSnapshot = (game: GameState): SoundSnapshot => ({
@@ -3662,6 +3882,10 @@ const playGameSound = (context: AudioContext, sound: GameSoundKind, delayMs = 0)
       break;
     case 'turn':
       playTone(context, 480, 0.08, 'sine', 0.026, delayMs);
+      break;
+    case 'turn-alert':
+      playTone(context, 660, 0.09, 'sine', 0.052, delayMs);
+      playTone(context, 880, 0.11, 'triangle', 0.048, delayMs + 75);
       break;
     case 'win':
       [523, 659, 784, 1046].forEach((frequency, index) => playTone(context, frequency, 0.1, 'triangle', 0.04, delayMs + index * 60));
@@ -3835,7 +4059,7 @@ const useAutoContinueTurn = (
   }, [autoKey, dispatch, game, hasPendingTrade, isBoardBusy, isJailRollEnd, isLocalTurn]);
 };
 
-const useDiceRollAnimation = (game: GameState) => {
+const useDiceRollAnimation = (game: GameState, enabled = true) => {
   const [activeRollId, setActiveRollId] = useState<number | undefined>();
   const lastRollIdRef = useRef(game.diceRollId ?? 0);
 
@@ -3849,13 +4073,18 @@ const useDiceRollAnimation = (game: GameState) => {
     if (rollId === 0 || rollId === lastRollIdRef.current) return;
 
     lastRollIdRef.current = rollId;
+    if (!enabled) {
+      setActiveRollId(undefined);
+      return;
+    }
+
     setActiveRollId(rollId);
     const timer = window.setTimeout(() => {
       setActiveRollId((current) => (current === rollId ? undefined : current));
     }, DICE_ROLL_ANIMATION_MS);
 
     return () => window.clearTimeout(timer);
-  }, [game.diceRollId]);
+  }, [enabled, game.diceRollId]);
 
   return activeRollId === (game.diceRollId ?? 0);
 };

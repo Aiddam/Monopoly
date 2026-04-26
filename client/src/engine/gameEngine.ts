@@ -11,6 +11,7 @@ import type {
   GameAction,
   GameState,
   LogEntry,
+  MoneyHistoryPoint,
   PendingPayment,
   Player,
   PropertyState,
@@ -20,6 +21,7 @@ import type {
 } from './types';
 import { money } from './economy';
 import { getStartReward } from './startRewards';
+import { getLateGameFineMultiplier, getLateGamePriceMultiplier } from './difficulty';
 
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 6;
@@ -61,6 +63,19 @@ export const createInitialGame = (
     isBankrupt: false,
   }));
 
+  const properties = Object.fromEntries(
+    propertyTiles.map((tile) => [
+      tile.id,
+      { houses: 0, mortgaged: false, mortgagedAtTurn: undefined, mortgageTurnsLeft: undefined },
+    ]),
+  );
+  const moneyHistory = createMoneyHistorySnapshot({
+    players,
+    turn: 1,
+    currentRound: 1,
+    properties,
+  });
+
   return {
     id,
     players,
@@ -68,12 +83,7 @@ export const createInitialGame = (
     turn: 1,
     currentRound: 1,
     phase: options.determineTurnOrder ? 'orderRoll' : 'rolling',
-    properties: Object.fromEntries(
-      propertyTiles.map((tile) => [
-        tile.id,
-        { houses: 0, mortgaged: false, mortgagedAtTurn: undefined, mortgageTurnsLeft: undefined },
-      ]),
-    ),
+    properties,
     chanceDeck: createCardDeck(chanceCards),
     communityDeck: createCardDeck(communityCards),
     discardChance: [],
@@ -87,6 +97,7 @@ export const createInitialGame = (
     dice: [1, 1],
     diceRollId: 0,
     doublesInRow: 0,
+    moneyHistory: [moneyHistory],
     turnOrderRolls: options.determineTurnOrder ? {} : undefined,
     log: [
       log(
@@ -100,65 +111,148 @@ export const createInitialGame = (
 };
 
 export const reduceGame = (state: GameState, action: GameAction): GameState => {
+  let next: GameState;
+
   switch (action.type) {
     case 'roll_for_order':
-      return rollForTurnOrder(state, action.playerId, action.dice ?? randomDice());
+      next = rollForTurnOrder(state, action.playerId, action.dice ?? randomDice());
+      break;
     case 'roll':
-      return rollDice(state, action.playerId, action.dice ?? randomDice());
+      next = rollDice(state, action.playerId, action.dice ?? randomDice());
+      break;
     case 'buy':
-      return buyPendingProperty(state, action.playerId);
+      next = buyPendingProperty(state, action.playerId);
+      break;
     case 'decline_buy':
-      return startAuction(state, action.playerId);
+      next = startAuction(state, action.playerId);
+      break;
     case 'draw_card':
-      return drawPendingCard(state, action.playerId);
+      next = drawPendingCard(state, action.playerId);
+      break;
     case 'auction_bid':
-      return auctionBid(state, action.playerId, action.amount);
+      next = auctionBid(state, action.playerId, action.amount);
+      break;
     case 'auction_pass':
-      return auctionPass(state, action.playerId);
+      next = auctionPass(state, action.playerId);
+      break;
     case 'resolve_auction':
-      return resolveAuction(state);
+      next = resolveAuction(state);
+      break;
     case 'skip_casino':
-      return skipCasino(state, action.playerId);
+      next = skipCasino(state, action.playerId);
+      break;
     case 'start_casino_spin':
-      return startCasinoSpin(state, action.playerId, action.amount, action.multiplier, action.spinSeed);
+      next = startCasinoSpin(state, action.playerId, action.amount, action.multiplier, action.spinSeed);
+      break;
     case 'casino_bet':
-      return casinoBet(state, action.playerId, action.amount, action.multiplier);
+      next = casinoBet(state, action.playerId, action.amount, action.multiplier);
+      break;
     case 'pay_jail_fine':
-      return payJailFine(state, action.playerId);
+      next = payJailFine(state, action.playerId);
+      break;
     case 'go_to_jail':
-      return goToJailFromDecision(state, action.playerId);
+      next = goToJailFromDecision(state, action.playerId);
+      break;
     case 'build':
-      return buildOnCity(state, action.playerId, action.tileId);
+      next = buildOnCity(state, action.playerId, action.tileId);
+      break;
     case 'sell_building':
-      return sellBuilding(state, action.playerId, action.tileId);
+      next = sellBuilding(state, action.playerId, action.tileId);
+      break;
     case 'mortgage':
-      return mortgageProperty(state, action.playerId, action.tileId);
+      next = mortgageProperty(state, action.playerId, action.tileId);
+      break;
     case 'unmortgage':
-      return unmortgageProperty(state, action.playerId, action.tileId);
+      next = unmortgageProperty(state, action.playerId, action.tileId);
+      break;
     case 'propose_trade':
-      return proposeTrade(state, action.offer);
+      next = proposeTrade(state, action.offer);
+      break;
     case 'accept_trade':
-      return acceptTrade(state, action.playerId, action.offerId);
+      next = acceptTrade(state, action.playerId, action.offerId);
+      break;
     case 'decline_trade':
-      return updateTradeStatus(state, action.playerId, action.offerId, 'declined');
+      next = updateTradeStatus(state, action.playerId, action.offerId, 'declined');
+      break;
     case 'pay_rent':
-      return payRent(state, action.playerId);
+      next = payRent(state, action.playerId);
+      break;
     case 'pay_payment':
-      return payPendingPayment(state, action.playerId);
+      next = payPendingPayment(state, action.playerId);
+      break;
     case 'pay_bail':
-      return payBail(state, action.playerId);
+      next = payBail(state, action.playerId);
+      break;
     case 'admin_move_current_player':
-      return adminMoveCurrentPlayer(state, action.tileId);
+      next = adminMoveCurrentPlayer(state, action.tileId);
+      break;
     case 'end_turn':
-      return endTurn(state, action.playerId);
+      next = endTurn(state, action.playerId);
+      break;
     case 'continue_turn':
-      return continueTurn(state, action.playerId);
+      next = continueTurn(state, action.playerId);
+      break;
     case 'declare_bankruptcy':
-      return declareBankruptcy(state, action.playerId);
+      next = declareBankruptcy(state, action.playerId);
+      break;
     default:
-      return state;
+      next = state;
   }
+
+  return recordMoneyHistory(state, next);
 };
+
+const MONEY_HISTORY_LIMIT = 240;
+
+const createMoneyHistorySnapshot = (
+  state: Pick<GameState, 'players' | 'turn' | 'currentRound' | 'properties'>,
+): MoneyHistoryPoint => ({
+  turn: state.turn,
+  round: state.currentRound ?? 1,
+  createdAt: Date.now(),
+  money: Object.fromEntries(state.players.map((player) => [player.id, player.money])),
+  worth: Object.fromEntries(state.players.map((player) => [player.id, calculatePlayerWorth(state, player)])),
+});
+
+const hasSameMoneySnapshot = (left: MoneyHistoryPoint, right: MoneyHistoryPoint): boolean => {
+  const ids = new Set([...Object.keys(left.money), ...Object.keys(right.money)]);
+  return [...ids].every((id) => left.money[id] === right.money[id] && left.worth?.[id] === right.worth?.[id]);
+};
+
+const recordMoneyHistory = (previous: GameState, next: GameState): GameState => {
+  const previousHistory =
+    previous.moneyHistory && previous.moneyHistory.length > 0
+      ? previous.moneyHistory
+      : [createMoneyHistorySnapshot(previous)];
+  const snapshot = createMoneyHistorySnapshot(next);
+  const last = previousHistory[previousHistory.length - 1];
+  const isSameTurnPoint = last.turn === snapshot.turn && last.round === snapshot.round;
+
+  let moneyHistory: MoneyHistoryPoint[];
+  if (isSameTurnPoint) {
+    moneyHistory = hasSameMoneySnapshot(last, snapshot)
+      ? previousHistory
+      : [...previousHistory.slice(0, -1), snapshot];
+  } else {
+    moneyHistory = [...previousHistory, snapshot];
+  }
+
+  if (moneyHistory.length > MONEY_HISTORY_LIMIT) {
+    moneyHistory = moneyHistory.slice(moneyHistory.length - MONEY_HISTORY_LIMIT);
+  }
+
+  return next.moneyHistory === moneyHistory ? next : { ...next, moneyHistory };
+};
+
+const calculatePlayerWorth = (state: Pick<GameState, 'properties'>, player: Player): number =>
+  player.money +
+  player.properties.reduce((sum, tileId) => {
+    const tile = getTile(tileId);
+    if (!isPropertyTile(tile)) return sum;
+    const property = state.properties[tile.id];
+    const buildingValue = tile.type === 'city' ? property.houses * tile.houseCost : 0;
+    return sum + tile.price + buildingValue;
+  }, 0);
 
 export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 0): number => {
   const ownerId = state.properties[tile.id]?.ownerId;
@@ -181,13 +275,13 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
 };
 
 export const getEffectivePropertyPrice = (state: GameState, tile: PropertyTile): number =>
-  ceilMoney(tile.price * getCityEventPropertyPriceMultiplier(state, tile));
+  ceilMoney(tile.price * getCityEventPropertyPriceMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
 
 export const getEffectiveHouseCost = (state: GameState, tile: CityTile): number =>
-  ceilMoney(tile.houseCost * getCityEventHouseCostMultiplier(state, tile));
+  ceilMoney(tile.houseCost * getCityEventHouseCostMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
 
 export const getEffectiveUnmortgageCost = (state: GameState, tile: PropertyTile): number =>
-  ceilMoney(tile.mortgage * 1.1 * getCityEventUnmortgageMultiplier(state));
+  ceilMoney(tile.mortgage * 1.1 * getCityEventUnmortgageMultiplier(state) * getLateGamePriceMultiplier(state.turn));
 
 const ceilMoney = (value: number): number => Math.ceil(value - 1e-6);
 
@@ -244,6 +338,12 @@ const getCityEventUnmortgageMultiplier = (state: GameState): number =>
     1,
   );
 
+const getCityEventFineMultiplier = (state: GameState): number =>
+  getActiveCityEventDefinitions(state).reduce((multiplier, event) => multiplier * (event.effects.fineMultiplier ?? 1), 1);
+
+export const getEffectiveFineAmount = (state: GameState, amount: number): number =>
+  ceilMoney(amount * getCityEventFineMultiplier(state) * getLateGameFineMultiplier(state.turn));
+
 export const diceRotationForValue = (value: number): [number, number, number] => {
   const rotations: Record<number, [number, number, number]> = {
     1: [0, 0, 0],
@@ -268,6 +368,7 @@ const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, num
     dice,
     diceRollId: state.diceRollId + 1,
     lastDice: dice,
+    lastOrderRollPlayerId: playerId,
     turnOrderRolls: rolls,
     log: appendLog(state, `${player.name} кидає ${dice[0] + dice[1]} за чергу ходів.`),
   };
@@ -310,6 +411,7 @@ const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, num
     currentRound: 1,
     doublesInRow: 0,
     builtThisRoll: undefined,
+    lastOrderRollPlayerId: playerId,
     log: appendLog(base, `Чергу визначено: ${orderText}. ${orderedPlayers[0].name} починає партію.`, 'good'),
   };
 };
@@ -369,7 +471,7 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
 const movePlayer = (state: GameState, playerId: string, steps: number): GameState => {
   const player = getPlayer(state, playerId);
   const nextPosition = (player.position + steps) % boardTiles.length;
-  const startReward = getStartReward(player.position, nextPosition, steps > 0);
+  const startReward = getStartReward(player.position, nextPosition, steps > 0, state.turn);
   const startRewardText = startReward > 0 ? ` і отримує ${startReward}₴ за Старт` : '';
   let next: GameState = {
     ...state,
@@ -394,13 +496,14 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
   const tile = getTile(player.position);
 
   if (tile.type === 'goToJail') {
+    const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
     return {
       ...state,
       phase: 'awaitingJailDecision',
       pendingJail: { playerId, tileId: tile.id },
       log: appendLog(
         state,
-        `${player.name} потрапляє на "До вʼязниці" і має вибрати: сплатити ${JAIL_FINE}₴ або піти у вʼязницю.`,
+        `${player.name} потрапляє на "До вʼязниці" і має вибрати: сплатити ${jailFine}₴ або піти у вʼязницю.`,
         'bad',
       ),
     };
@@ -787,14 +890,15 @@ const payJailFine = (state: GameState, playerId: string): GameState => {
   }
 
   const player = getPlayer(state, playerId);
-  if (player.money < JAIL_FINE) throw new Error('Недостатньо коштів для штрафу.');
+  const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
+  if (player.money < jailFine) throw new Error('Недостатньо коштів для штрафу.');
 
   return {
-    ...chargePlayer(state, playerId, JAIL_FINE),
+    ...chargePlayer(state, playerId, jailFine),
     phase: 'turnEnd',
     doublesInRow: 0,
     pendingJail: undefined,
-    log: appendLog(state, `${player.name} сплачує ${JAIL_FINE}₴ і не йде у вʼязницю.`, 'bad'),
+    log: appendLog(state, `${player.name} сплачує ${jailFine}₴ і не йде у вʼязницю.`, 'bad'),
   };
 };
 
@@ -1225,7 +1329,8 @@ const payBail = (state: GameState, playerId: string): GameState => {
   assertCurrent(state, playerId);
   const player = getPlayer(state, playerId);
   if (player.jailTurns <= 0) throw new Error('Гравець не у вʼязниці.');
-  if (player.money < JAIL_FINE && player.jailCards <= 0) throw new Error('Недостатньо коштів.');
+  const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
+  if (player.money < jailFine && player.jailCards <= 0) throw new Error('Недостатньо коштів.');
   const usesCard = player.jailCards > 0;
   return {
     ...state,
@@ -1236,7 +1341,7 @@ const payBail = (state: GameState, playerId: string): GameState => {
             ...candidate,
             jailTurns: 0,
             jailCards: Math.max(0, candidate.jailCards - 1),
-            money: usesCard ? candidate.money : candidate.money - JAIL_FINE,
+            money: usesCard ? candidate.money : candidate.money - jailFine,
           }
         : candidate,
     ),
@@ -1244,7 +1349,7 @@ const payBail = (state: GameState, playerId: string): GameState => {
       state,
       usesCard
         ? `${player.name} використовує картку виходу з вʼязниці і може кидати кубики.`
-        : `${player.name} сплачує штраф ${JAIL_FINE}₴ і може кидати кубики.`,
+        : `${player.name} сплачує штраф ${jailFine}₴ і може кидати кубики.`,
       'good',
     ),
   };
@@ -1660,13 +1765,14 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
   const player = getPlayer(state, playerId);
   const tile = getTile(player.position);
   if (tile.type === 'goToJail') {
+    const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
     return {
       ...state,
       phase: 'awaitingJailDecision',
       pendingJail: { playerId, tileId: tile.id },
       log: appendLog(
         state,
-        `${player.name} потрапляє на "До вʼязниці" і має вибрати: сплатити ${JAIL_FINE}₴ або піти у вʼязницю.`,
+        `${player.name} потрапляє на "До вʼязниці" і має вибрати: сплатити ${jailFine}₴ або піти у вʼязницю.`,
         'bad',
       ),
     };
@@ -1752,7 +1858,7 @@ const transfer = (state: GameState, fromId: string, toId: string, amount: number
 });
 
 const createPendingPayment = (state: GameState, payment: PendingPayment): GameState => {
-  const amount = Math.floor(payment.amount);
+  const amount = Math.floor(payment.source === 'tax' ? getEffectiveFineAmount(state, payment.amount) : payment.amount);
   if (!Number.isFinite(amount) || amount <= 0) {
     return {
       ...state,
@@ -1840,7 +1946,7 @@ const createCardDeck = (cards: typeof chanceCards): number[] => {
 };
 
 const createCityEventDeck = (recentDiscard: CityEventId[] = []): CityEventId[] => {
-  const recentSet = new Set(recentDiscard.slice(-2));
+  const recentSet = new Set(recentDiscard.slice(-5));
   const candidates = cityEventDefinitions
     .map((event) => event.id)
     .filter((eventId) => !recentSet.has(eventId));

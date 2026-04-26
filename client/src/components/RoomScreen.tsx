@@ -1,7 +1,6 @@
 import { motion } from 'framer-motion';
 import { Dice5, DoorOpen, UsersRound } from 'lucide-react';
 import { useState } from 'react';
-import { MAX_PLAYERS } from '../engine/gameEngine';
 import { SIGNALR_SERVER_URL } from '../network/roomClient';
 import { useGameStore } from '../store/useGameStore';
 import { normalizePlayerName, readSavedPlayerName, savePlayerName } from '../utils/playerNameStorage';
@@ -24,10 +23,6 @@ export const RoomScreen = () => {
         <div className="brand-mark">UM</div>
         <p className="eyebrow">Веб-Монополія України</p>
         <h1>Купуйте міста, будуйте квартали й ведіть переговори напряму між гравцями.</h1>
-        <p className="lead">
-          Павлоград на дошці, банки замість станцій, українські міста з власними ілюстраціями, SignalR для кімнат і
-          WebRTC для peer-to-peer синхронізації гри до {MAX_PLAYERS} гравців.
-        </p>
       </div>
 
       <div className="home-panel">

@@ -16,11 +16,20 @@ export type CityEventId =
   | 'tourist-season'
   | 'economic-crisis'
   | 'tax-crisis'
+  | 'tax-madness'
   | 'city-tender'
   | 'bank-day'
   | 'investor-day'
   | 'renovation-grants'
-  | 'infrastructure-boom';
+  | 'infrastructure-boom'
+  | 'night-market'
+  | 'construction-permit'
+  | 'bank-audit'
+  | 'regional-festival'
+  | 'transport-strike'
+  | 'utility-modernization'
+  | 'heritage-protection'
+  | 'startup-wave';
 export type GamePhase =
   | 'orderRoll'
   | 'rolling'
@@ -170,6 +179,7 @@ export interface CityEventEffect {
   houseCostMultiplier?: number;
   houseCostGroups?: string[];
   unmortgageMultiplier?: number;
+  fineMultiplier?: number;
   startAuctionOnUnowned?: boolean;
   auctionMinimumMultiplier?: number;
 }
@@ -213,6 +223,14 @@ export interface LogEntry {
   text: string;
   tone?: 'good' | 'bad' | 'neutral';
   createdAt?: number;
+}
+
+export interface MoneyHistoryPoint {
+  turn: number;
+  round: number;
+  createdAt: number;
+  money: Record<string, number>;
+  worth?: Record<string, number>;
 }
 
 export interface GameState {
@@ -273,6 +291,7 @@ export interface GameState {
   dice: [number, number];
   diceRollId: number;
   lastDice?: [number, number];
+  lastOrderRollPlayerId?: string;
   doublesInRow: number;
   builtThisRoll?: {
     playerId: string;
@@ -281,6 +300,7 @@ export interface GameState {
   };
   winnerId?: string;
   log: LogEntry[];
+  moneyHistory?: MoneyHistoryPoint[];
 }
 
 export type GameAction =

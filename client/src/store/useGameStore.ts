@@ -200,10 +200,20 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const localPlayer = room.players.find((player) => player.id === localPlayerId);
     if (!localPlayer?.isHost) return;
     const game = createInitialGame(room.players.map((player) => player.name), `room-${room.code}`, { determineTurnOrder: true });
+    const remappedPlayers = game.players.map((player, index) => ({ ...player, id: room.players[index].id }));
     const remapped = {
       ...game,
-      players: game.players.map((player, index) => ({ ...player, id: room.players[index].id })),
+      players: remappedPlayers,
       currentPlayerId: room.players[0].id,
+      moneyHistory: [
+        {
+          turn: game.turn,
+          round: game.currentRound,
+          createdAt: Date.now(),
+          money: Object.fromEntries(remappedPlayers.map((player) => [player.id, player.money])),
+          worth: Object.fromEntries(remappedPlayers.map((player) => [player.id, player.money])),
+        },
+      ],
     };
     broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:init', state: remapped });
     set({ game: remapped, screen: 'game' });

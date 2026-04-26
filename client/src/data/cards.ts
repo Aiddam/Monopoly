@@ -1,5 +1,7 @@
 import type { CardDeck, GameState } from '../engine/types';
+import { getCityEventDefinition } from './cityEvents';
 import { getStartReward } from '../engine/startRewards';
+import { getLateGameFineMultiplier } from '../engine/difficulty';
 import { money, moneyText } from '../engine/economy';
 import { boardTiles } from './board';
 
@@ -205,12 +207,15 @@ export const communityCards: CardDefinition[] = [
   },
 ];
 
-const addMoney = (state: GameState, playerId: string, amount: number): GameState => ({
-  ...state,
-  players: state.players.map((player) =>
-    player.id === playerId ? { ...player, money: player.money + amount } : player,
-  ),
-});
+const addMoney = (state: GameState, playerId: string, amount: number): GameState => {
+  const normalizedAmount = amount < 0 ? -getEffectiveFineAmount(state, Math.abs(amount)) : amount;
+  return {
+    ...state,
+    players: state.players.map((player) =>
+      player.id === playerId ? { ...player, money: player.money + normalizedAmount } : player,
+    ),
+  };
+};
 
 const transferMoney = (state: GameState, fromPlayerId: string, toPlayerId: string, amount: number): GameState => ({
   ...state,
@@ -239,7 +244,7 @@ const moveTo = (state: GameState, playerId: string, tileId: number, collectGo: b
   ...state,
   players: state.players.map((player) => {
     if (player.id !== playerId) return player;
-    return { ...player, position: tileId, money: player.money + getStartReward(player.position, tileId, collectGo) };
+    return { ...player, position: tileId, money: player.money + getStartReward(player.position, tileId, collectGo, state.turn) };
   }),
 });
 
@@ -248,7 +253,7 @@ const moveBy = (state: GameState, playerId: string, steps: number): GameState =>
   players: state.players.map((player) => {
     if (player.id !== playerId) return player;
     const nextPosition = (player.position + steps + boardTiles.length) % boardTiles.length;
-    return { ...player, position: nextPosition, money: player.money + getStartReward(player.position, nextPosition, steps > 0) };
+    return { ...player, position: nextPosition, money: player.money + getStartReward(player.position, nextPosition, steps > 0, state.turn) };
   }),
 });
 
@@ -281,4 +286,12 @@ const repair = (state: GameState, playerId: string, houseFee: number, hotelFee: 
     return sum + property.houses * houseFee;
   }, 0);
   return addMoney(state, playerId, -total);
+};
+
+const getEffectiveFineAmount = (state: GameState, amount: number): number => {
+  const multiplier = (state.activeCityEvents ?? []).reduce(
+    (current, event) => current * (getCityEventDefinition(event.id).effects.fineMultiplier ?? 1),
+    1,
+  );
+  return Math.ceil(amount * multiplier * getLateGameFineMultiplier(state.turn));
 };

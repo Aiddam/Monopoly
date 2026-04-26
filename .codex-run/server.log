@@ -1,5 +1,6 @@
 Using launch settings from server\Properties\launchSettings.json...
 Building...
+D:\Projects\Monopoly\server\Rooms\RoomManager.cs(286,33): warning CA2014: Potential stack overflow. Move the stackalloc out of the loop. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca2014) [D:\Projects\Monopoly\server\UkraineMonopoly.Server.csproj]
 info: Microsoft.Hosting.Lifetime[14]
       Now listening on: http://localhost:5109
 info: Microsoft.Hosting.Lifetime[0]
