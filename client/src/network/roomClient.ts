@@ -111,4 +111,8 @@ export class RoomClient {
 }
 
 const isHubInvokeVersionError = (error: unknown): boolean =>
-  error instanceof Error && error.message.includes("Failed to invoke");
+  error instanceof Error &&
+  (error.message.includes('Failed to invoke') ||
+    error.message.includes('An unexpected error occurred invoking') ||
+    error.message.includes('Invocation provides') ||
+    error.message.includes('could not be resolved'));

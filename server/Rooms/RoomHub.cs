@@ -6,27 +6,52 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 {
     public async Task<RoomSnapshot> CreateRoom(string playerName, bool testMode = false, string? playerId = null)
     {
-        var snapshot = rooms.CreateRoom(Context.ConnectionId, playerName, testMode, playerId);
-        await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
-        await Clients.Caller.SendAsync("RoomSnapshot", snapshot);
-        return snapshot;
+        try
+        {
+            var snapshot = rooms.CreateRoom(Context.ConnectionId, playerName, testMode, playerId);
+            await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
+            await Clients.Caller.SendAsync("RoomSnapshot", snapshot);
+            return snapshot;
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new HubException(exception.Message);
+        }
     }
 
     public async Task<RoomSnapshot> JoinRoom(string code, string playerName, string? playerId = null)
     {
-        var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName, playerId);
-        await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
-        var joinedPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
-        var joined = snapshot.Players.First(player => player.Id == joinedPeerId);
-        await Clients.OthersInGroup(snapshot.Code).SendAsync("PeerJoined", joined);
-        await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
-        return snapshot;
+        try
+        {
+            var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName, playerId);
+            await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
+            var joinedPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
+            var joined = snapshot.Players.FirstOrDefault(player => player.Id == joinedPeerId);
+            if (joined is null)
+            {
+                throw new HubException("Не вдалося приєднати гравця до кімнати.");
+            }
+            await Clients.OthersInGroup(snapshot.Code).SendAsync("PeerJoined", joined);
+            await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
+            return snapshot;
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new HubException(exception.Message);
+        }
     }
 
     public async Task SetReady(string code, bool ready)
     {
-        var snapshot = rooms.SetReady(Context.ConnectionId, code, ready);
-        await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
+        try
+        {
+            var snapshot = rooms.SetReady(Context.ConnectionId, code, ready);
+            await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new HubException(exception.Message);
+        }
     }
 
     public async Task RelaySignal(string code, string toPeerId, string kind, object? payload)
@@ -50,8 +75,15 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     public async Task CloseRoom(string code)
     {
-        var snapshot = rooms.CloseRoom(Context.ConnectionId, code);
-        await Clients.Group(snapshot.Code).SendAsync("RoomClosed");
+        try
+        {
+            var snapshot = rooms.CloseRoom(Context.ConnectionId, code);
+            await Clients.Group(snapshot.Code).SendAsync("RoomClosed");
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new HubException(exception.Message);
+        }
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
