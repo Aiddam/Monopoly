@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace UkraineMonopoly.Server.Rooms;
 
 public sealed record RoomPlayer(
@@ -5,7 +7,11 @@ public sealed record RoomPlayer(
     string Name,
     bool IsHost,
     bool Ready,
-    DateTimeOffset JoinedAt);
+    DateTimeOffset JoinedAt,
+    [property: JsonIgnore] string? ConnectionId = null)
+{
+    public bool Online => !string.IsNullOrWhiteSpace(ConnectionId);
+}
 
 public sealed record RoomSnapshot(
     string Code,

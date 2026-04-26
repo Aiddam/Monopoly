@@ -1,13 +1,21 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { Crown } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import { GameScreen } from './components/GameScreen';
 import { LobbyScreen } from './components/LobbyScreen';
 import { RoomScreen } from './components/RoomScreen';
 import { useGameStore } from './store/useGameStore';
 
 export const App = () => {
-  const { screen, game, connection, leaveRoom } = useGameStore();
+  const { screen, game, connection, leaveRoom, resumeSavedSession } = useGameStore();
+  const resumeStarted = useRef(false);
   const winner = game?.players.find((player) => player.id === game.winnerId);
+
+  useEffect(() => {
+    if (resumeStarted.current) return;
+    resumeStarted.current = true;
+    void resumeSavedSession();
+  }, [resumeSavedSession]);
 
   return (
     <main className="app-shell">

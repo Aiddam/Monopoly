@@ -37,7 +37,7 @@ export class PeerMesh {
   }
 
   async syncPeers(players: RoomPlayer[]) {
-    const otherPlayers = players.filter((player) => player.id !== this.selfPeerId);
+    const otherPlayers = players.filter((player) => player.id !== this.selfPeerId && player.online !== false);
     for (const player of otherPlayers) {
       if (!this.peers.has(player.id) && this.selfPeerId < player.id) {
         await this.createPeer(player.id, true);
@@ -84,6 +84,14 @@ export class PeerMesh {
     if (channel?.readyState === 'open') {
       channel.send(JSON.stringify(message));
     }
+  }
+
+  removePeer(peerId: string) {
+    this.channels.get(peerId)?.close();
+    this.peers.get(peerId)?.close();
+    this.channels.delete(peerId);
+    this.peers.delete(peerId);
+    this.onStatusHandlers.forEach((handler) => handler(peerId, false));
   }
 
   close() {

@@ -15,11 +15,13 @@ interface ConnectionState {
 interface GameStore {
   screen: Screen;
   localPlayerId?: string;
+  playerName?: string;
   room?: RoomSnapshot;
   roomClient?: RoomClient;
   peerMesh?: PeerMesh;
   connection: ConnectionState;
   game?: GameState;
+  resumeSavedSession: () => Promise<void>;
   createRoom: (playerName: string, testMode?: boolean) => Promise<void>;
   joinRoom: (code: string, playerName: string) => Promise<void>;
   setReady: (ready: boolean) => Promise<void>;
@@ -30,34 +32,110 @@ interface GameStore {
   leaveRoom: () => Promise<void>;
 }
 
+interface SavedSession {
+  version: 1;
+  mode: 'local' | 'room';
+  screen: Screen;
+  localPlayerId?: string;
+  playerName?: string;
+  room?: RoomSnapshot;
+  game?: GameState;
+  savedAt: number;
+}
+
+const SESSION_STORAGE_KEY = 'ukraine-monopoly-session-v1';
+
+function readSavedSession(): SavedSession | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as SavedSession;
+    if (parsed.version !== 1) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+const savedSession = readSavedSession();
+
 export const useGameStore = create<GameStore>((set, get) => ({
-  screen: 'home',
+  screen: savedSession?.screen ?? 'home',
+  localPlayerId: savedSession?.localPlayerId,
+  playerName: savedSession?.playerName,
+  room: savedSession?.room,
+  game: savedSession?.game,
   connection: { signalr: 'idle', p2p: {} },
 
-  async createRoom(playerName, testMode = false) {
+  async resumeSavedSession() {
+    const saved = readSavedSession();
+    if (!saved) return;
+
+    if (saved.mode === 'local') {
+      set({
+        screen: saved.screen,
+        localPlayerId: saved.localPlayerId,
+        playerName: saved.playerName,
+        game: saved.game,
+        room: undefined,
+        connection: { signalr: 'idle', p2p: {} },
+      });
+      return;
+    }
+
+    if (!saved.room || !saved.localPlayerId) return;
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient });
+    set({
+      screen: saved.game ? 'game' : 'lobby',
+      localPlayerId: saved.localPlayerId,
+      playerName: saved.playerName,
+      room: saved.room,
+      game: saved.game,
+      roomClient,
+      connection: { signalr: 'connecting', p2p: {} },
+    });
+
     try {
-      const room = await roomClient.createRoom(playerName, testMode);
-      const localPlayerId = roomClient.connectionId ?? room.players[0].id;
+      const room = await roomClient.joinRoom(saved.room.code, saved.playerName ?? 'Гравець', saved.localPlayerId);
+      const peerMesh = configurePeerMesh(saved.localPlayerId, roomClient, room.code);
+      await peerMesh.syncPeers(room.players);
+      const nextScreen = saved.game ? 'game' : 'lobby';
+      set({ screen: nextScreen, room, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      saveSession({ ...saved, screen: nextScreen, room });
+
+      window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 800);
+      window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 2_000);
+    } catch (error) {
+      set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
+    }
+  },
+
+  async createRoom(playerName, testMode = false) {
+    const localPlayerId = createStablePlayerId();
+    const roomClient = configureRoomClient();
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
+    try {
+      const room = await roomClient.createRoom(playerName, testMode, localPlayerId);
       const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
       set({ screen: 'lobby', room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      persistCurrentSession(get());
     } catch (error) {
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
     }
   },
 
   async joinRoom(code, playerName) {
+    const localPlayerId = createStablePlayerId();
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient });
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
     try {
-      const room = await roomClient.joinRoom(code, playerName);
-      const localPlayerId = roomClient.connectionId ?? room.players.at(-1)?.id;
-      if (!localPlayerId) throw new Error('Не вдалося визначити локального гравця.');
+      const room = await roomClient.joinRoom(code, playerName, localPlayerId);
       const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
       set({ screen: 'lobby', room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      persistCurrentSession(get());
     } catch (error) {
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
     }
@@ -70,7 +148,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   startLocalDemo() {
     const game = createInitialGame(['Олена', 'Тарас', 'Марія'], 'local-demo');
-    set({ screen: 'game', localPlayerId: game.currentPlayerId, room: undefined, game });
+    set({ screen: 'game', localPlayerId: game.currentPlayerId, playerName: 'Олена', room: undefined, game });
+    persistCurrentSession(get());
   },
 
   startRoomGame() {
@@ -86,6 +165,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     };
     peerMesh?.broadcast({ type: 'game:init', state: remapped });
     set({ game: remapped, screen: 'game' });
+    persistCurrentSession(get());
   },
 
   dispatch(action, fromPeer = false) {
@@ -102,6 +182,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const next = reduceGame(game, action);
       peerMesh?.broadcast({ type: 'game:state', state: next });
       set({ game: next, screen: next.phase === 'finished' ? 'finished' : 'game' });
+      persistCurrentSession(get());
     } catch (error) {
       set({ connection: { ...get().connection, error: errorMessage(error) } });
     }
@@ -112,6 +193,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const isHost = room?.players.find((player) => player.id === localPlayerId)?.isHost;
     if (message.type === 'game:init' || message.type === 'game:state') {
       set({ game: message.state, screen: message.state.phase === 'finished' ? 'finished' : 'game' });
+      persistCurrentSession(get());
     }
     if (message.type === 'game:action' && isHost) {
       get().dispatch(message.action, true);
@@ -121,6 +203,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
     if (message.type === 'sync:response') {
       set({ game: message.state, screen: 'game' });
+      persistCurrentSession(get());
     }
   },
 
@@ -133,9 +216,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
       room: undefined,
       game: undefined,
       localPlayerId: undefined,
+      playerName: undefined,
       peerMesh: undefined,
       connection: { signalr: 'idle', p2p: {} },
     });
+    clearSavedSession();
   },
 }));
 
@@ -145,6 +230,10 @@ const configureRoomClient = () => {
     const { peerMesh } = useGameStore.getState();
     void peerMesh?.syncPeers(room.players);
     useGameStore.setState({ room });
+    persistCurrentSession(useGameStore.getState());
+  });
+  roomClient.on('PeerLeft', (playerId) => {
+    useGameStore.getState().peerMesh?.removePeer(playerId);
   });
   roomClient.on('SignalReceived', (signal: SignalPayload) => {
     void useGameStore.getState().peerMesh?.handleSignal(signal);
@@ -158,9 +247,11 @@ const configureRoomClient = () => {
         players: room.players.map((player) => ({ ...player, isHost: player.id === hostPeerId })),
       },
     });
+    persistCurrentSession(useGameStore.getState());
   });
   roomClient.on('RoomClosed', () => {
     useGameStore.setState({ screen: 'home', room: undefined, game: undefined });
+    clearSavedSession();
   });
   roomClient.on('ErrorMessage', (message) => {
     useGameStore.setState({ connection: { ...useGameStore.getState().connection, error: message } });
@@ -180,7 +271,63 @@ const configurePeerMesh = (localPlayerId: string, roomClient: RoomClient, roomCo
   return peerMesh;
 };
 
+const createStablePlayerId = (): string =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `player-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const saveSession = (session: Omit<SavedSession, 'version' | 'savedAt'>) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        ...session,
+        version: 1,
+        savedAt: Date.now(),
+      } satisfies SavedSession),
+    );
+  } catch {
+    // localStorage can be unavailable in private browsing; the game still works without reload restore.
+  }
+};
+
+const persistCurrentSession = (state: GameStore) => {
+  if (state.room && state.localPlayerId) {
+    saveSession({
+      mode: 'room',
+      screen: state.screen,
+      localPlayerId: state.localPlayerId,
+      playerName: state.playerName,
+      room: state.room,
+      game: state.game,
+    });
+    return;
+  }
+
+  if (state.game) {
+    saveSession({
+      mode: 'local',
+      screen: state.screen,
+      localPlayerId: state.localPlayerId,
+      playerName: state.playerName,
+      game: state.game,
+    });
+  }
+};
+
+const clearSavedSession = () => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+};
+
 export const canStartRoom = (players: RoomPlayer[]) =>
-  players.length >= MIN_PLAYERS && players.length <= MAX_PLAYERS && players.every((player) => player.ready || player.isHost);
+  players.length >= MIN_PLAYERS &&
+  players.length <= MAX_PLAYERS &&
+  players.every((player) => player.online !== false && (player.ready || player.isHost));
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Невідома помилка.');

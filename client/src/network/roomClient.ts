@@ -8,6 +8,7 @@ export interface RoomPlayer {
   isHost: boolean;
   ready: boolean;
   joinedAt: string;
+  online?: boolean;
 }
 
 export interface RoomSnapshot {
@@ -70,14 +71,14 @@ export class RoomClient {
     await this.connection.start();
   }
 
-  async createRoom(playerName: string, testMode = false) {
+  async createRoom(playerName: string, testMode = false, playerId?: string) {
     await this.connect();
-    return this.connection!.invoke<RoomSnapshot>('CreateRoom', playerName, testMode);
+    return this.connection!.invoke<RoomSnapshot>('CreateRoom', playerName, testMode, playerId);
   }
 
-  async joinRoom(code: string, playerName: string) {
+  async joinRoom(code: string, playerName: string, playerId?: string) {
     await this.connect();
-    return this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName);
+    return this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName, playerId);
   }
 
   async setReady(code: string, ready: boolean) {

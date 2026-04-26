@@ -38,9 +38,9 @@ export const LobbyScreen = () => {
             </div>
             <div>
               <h2>{player.name}</h2>
-              <p>{player.isHost ? 'Хост кімнати' : player.ready ? 'Готовий' : 'Очікує'}</p>
+              <p>{player.online === false ? 'Перепідключається' : player.isHost ? 'Хост кімнати' : player.ready ? 'Готовий' : 'Очікує'}</p>
             </div>
-            {(player.ready || player.isHost) && <Check className="seat-check" size={20} />}
+            {player.online !== false && (player.ready || player.isHost) && <Check className="seat-check" size={20} />}
           </article>
         ))}
         {Array.from({ length: Math.max(0, MAX_PLAYERS - room.players.length) }).map((_, index) => (

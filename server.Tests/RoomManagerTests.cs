@@ -58,4 +58,25 @@ public sealed class RoomManagerTests
         Assert.True(manager.ContainsPeer(room.Code, "p2"));
         Assert.False(manager.ContainsPeer(room.Code, "missing"));
     }
+
+    [Fact]
+    public void DisconnectKeepsStablePlayerForReconnect()
+    {
+        var manager = new RoomManager();
+        var room = manager.CreateRoom("conn-host", "Host", playerId: "host-id");
+
+        var disconnected = manager.Disconnect("conn-host");
+
+        Assert.NotNull(disconnected);
+        Assert.Equal("host-id", disconnected!.PlayerId);
+        Assert.False(manager.ContainsPeer(room.Code, "host-id"));
+
+        var reconnected = manager.JoinRoom("conn-host-2", room.Code, "Host", "host-id");
+
+        Assert.Single(reconnected.Players);
+        Assert.Equal("host-id", reconnected.Players[0].Id);
+        Assert.True(reconnected.Players[0].IsHost);
+        Assert.True(manager.ContainsPeer(room.Code, "host-id"));
+        Assert.Equal("conn-host-2", manager.GetConnectionIdForPeer(room.Code, "host-id"));
+    }
 }

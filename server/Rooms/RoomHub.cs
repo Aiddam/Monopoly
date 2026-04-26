@@ -4,19 +4,20 @@ namespace UkraineMonopoly.Server.Rooms;
 
 public sealed class RoomHub(RoomManager rooms) : Hub
 {
-    public async Task<RoomSnapshot> CreateRoom(string playerName, bool testMode = false)
+    public async Task<RoomSnapshot> CreateRoom(string playerName, bool testMode = false, string? playerId = null)
     {
-        var snapshot = rooms.CreateRoom(Context.ConnectionId, playerName, testMode);
+        var snapshot = rooms.CreateRoom(Context.ConnectionId, playerName, testMode, playerId);
         await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
         await Clients.Caller.SendAsync("RoomSnapshot", snapshot);
         return snapshot;
     }
 
-    public async Task<RoomSnapshot> JoinRoom(string code, string playerName)
+    public async Task<RoomSnapshot> JoinRoom(string code, string playerName, string? playerId = null)
     {
-        var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName);
+        var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName, playerId);
         await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
-        var joined = snapshot.Players.First(player => player.Id == Context.ConnectionId);
+        var joinedPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
+        var joined = snapshot.Players.First(player => player.Id == joinedPeerId);
         await Clients.OthersInGroup(snapshot.Code).SendAsync("PeerJoined", joined);
         await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
         return snapshot;
@@ -30,14 +31,16 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     public async Task RelaySignal(string code, string toPeerId, string kind, object? payload)
     {
-        if (!rooms.ContainsPeer(code, Context.ConnectionId) || !rooms.ContainsPeer(code, toPeerId))
+        var fromPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
+        var toConnectionId = rooms.GetConnectionIdForPeer(code, toPeerId);
+        if (fromPeerId is null || toConnectionId is null || !rooms.ContainsPeer(code, fromPeerId) || !rooms.ContainsPeer(code, toPeerId))
         {
             await Clients.Caller.SendAsync("ErrorMessage", "SignalR relay відхилено: peer не в кімнаті.");
             return;
         }
 
-        var signal = new SignalEnvelope(Context.ConnectionId, toPeerId, kind, payload);
-        await Clients.Client(toPeerId).SendAsync("SignalReceived", signal);
+        var signal = new SignalEnvelope(fromPeerId, toPeerId, kind, payload);
+        await Clients.Client(toConnectionId).SendAsync("SignalReceived", signal);
     }
 
     public async Task LeaveRoom(string code)
@@ -53,16 +56,18 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        var code = rooms.GetRoomCodeForConnection(Context.ConnectionId);
-        if (code is not null)
+        var disconnected = rooms.Disconnect(Context.ConnectionId);
+        if (disconnected is not null)
         {
-            await LeaveCurrentRoom(code);
+            await Clients.Group(disconnected.Code).SendAsync("PeerLeft", disconnected.PlayerId);
+            await Clients.Group(disconnected.Code).SendAsync("RoomSnapshot", disconnected.Snapshot);
         }
         await base.OnDisconnectedAsync(exception);
     }
 
     private async Task LeaveCurrentRoom(string code)
     {
+        var peerId = rooms.GetPeerIdForConnection(Context.ConnectionId) ?? Context.ConnectionId;
         var snapshot = rooms.LeaveRoom(Context.ConnectionId);
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, code);
         if (snapshot is null)
@@ -70,7 +75,7 @@ public sealed class RoomHub(RoomManager rooms) : Hub
             return;
         }
 
-        await Clients.Group(snapshot.Code).SendAsync("PeerLeft", Context.ConnectionId);
+        await Clients.Group(snapshot.Code).SendAsync("PeerLeft", peerId);
         await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
         var host = snapshot.Players.FirstOrDefault(player => player.IsHost);
         if (host is not null)

@@ -11,13 +11,14 @@ public sealed class RoomManager
     private readonly ConcurrentDictionary<string, string> _connectionRooms = new();
     private readonly object _gate = new();
 
-    public RoomSnapshot CreateRoom(string connectionId, string playerName, bool testMode = false)
+    public RoomSnapshot CreateRoom(string connectionId, string playerName, bool testMode = false, string? playerId = null)
     {
         lock (_gate)
         {
             LeaveRoom(connectionId);
+            var stablePlayerId = CleanPlayerId(playerId, connectionId);
             var code = CreateUniqueCode();
-            var host = new RoomPlayer(connectionId, CleanName(playerName), true, true, DateTimeOffset.UtcNow);
+            var host = new RoomPlayer(stablePlayerId, CleanName(playerName), true, true, DateTimeOffset.UtcNow, connectionId);
             var room = new Room(code, host, testMode);
             _rooms[code] = room;
             _connectionRooms[connectionId] = code;
@@ -25,7 +26,7 @@ public sealed class RoomManager
         }
     }
 
-    public RoomSnapshot JoinRoom(string connectionId, string code, string playerName)
+    public RoomSnapshot JoinRoom(string connectionId, string code, string playerName, string? playerId = null)
     {
         lock (_gate)
         {
@@ -34,13 +35,27 @@ public sealed class RoomManager
                 throw new InvalidOperationException("Кімнату не знайдено.");
             }
 
+            LeaveRoom(connectionId);
+            var stablePlayerId = CleanPlayerId(playerId, connectionId);
+            var existingIndex = room.Players.FindIndex(player => player.Id == stablePlayerId);
+            if (existingIndex >= 0)
+            {
+                var existing = room.Players[existingIndex];
+                if (!string.IsNullOrWhiteSpace(existing.ConnectionId))
+                {
+                    _connectionRooms.TryRemove(existing.ConnectionId, out _);
+                }
+                room.Players[existingIndex] = existing with { Name = CleanName(playerName), ConnectionId = connectionId };
+                _connectionRooms[connectionId] = room.Code;
+                return room.Snapshot();
+            }
+
             if (room.Players.Count >= MaxPlayers)
             {
                 throw new InvalidOperationException($"У кімнаті вже {MaxPlayers} гравців.");
             }
 
-            LeaveRoom(connectionId);
-            room.Players.Add(new RoomPlayer(connectionId, CleanName(playerName), false, false, DateTimeOffset.UtcNow));
+            room.Players.Add(new RoomPlayer(stablePlayerId, CleanName(playerName), false, false, DateTimeOffset.UtcNow, connectionId));
             _connectionRooms[connectionId] = room.Code;
             return room.Snapshot();
         }
@@ -51,7 +66,7 @@ public sealed class RoomManager
         lock (_gate)
         {
             var room = GetRoom(code);
-            var playerIndex = room.Players.FindIndex(player => player.Id == connectionId);
+            var playerIndex = room.Players.FindIndex(player => player.ConnectionId == connectionId);
             if (playerIndex < 0)
             {
                 throw new InvalidOperationException("Гравець не в цій кімнаті.");
@@ -77,8 +92,9 @@ public sealed class RoomManager
                 return null;
             }
 
-            var wasHost = room.Players.Any(player => player.Id == connectionId && player.IsHost);
-            room.Players.RemoveAll(player => player.Id == connectionId);
+            var removed = room.Players.FirstOrDefault(player => player.ConnectionId == connectionId);
+            var wasHost = removed?.IsHost == true;
+            room.Players.RemoveAll(player => player.ConnectionId == connectionId);
 
             if (room.Players.Count == 0)
             {
@@ -102,7 +118,7 @@ public sealed class RoomManager
         lock (_gate)
         {
             var room = GetRoom(code);
-            var player = room.Players.FirstOrDefault(candidate => candidate.Id == connectionId);
+            var player = room.Players.FirstOrDefault(candidate => candidate.ConnectionId == connectionId);
             if (player is not { IsHost: true })
             {
                 throw new InvalidOperationException("Закрити кімнату може тільки хост.");
@@ -112,7 +128,10 @@ public sealed class RoomManager
             _rooms.TryRemove(code, out _);
             foreach (var roomPlayer in room.Players)
             {
-                _connectionRooms.TryRemove(roomPlayer.Id, out _);
+                if (!string.IsNullOrWhiteSpace(roomPlayer.ConnectionId))
+                {
+                    _connectionRooms.TryRemove(roomPlayer.ConnectionId, out _);
+                }
             }
             return room.Snapshot();
         }
@@ -129,11 +148,59 @@ public sealed class RoomManager
     public string? GetRoomCodeForConnection(string connectionId) =>
         _connectionRooms.TryGetValue(connectionId, out var code) ? code : null;
 
+    public string? GetPeerIdForConnection(string connectionId)
+    {
+        lock (_gate)
+        {
+            if (!_connectionRooms.TryGetValue(connectionId, out var code) || !_rooms.TryGetValue(code, out var room))
+            {
+                return null;
+            }
+
+            return room.Players.FirstOrDefault(player => player.ConnectionId == connectionId)?.Id;
+        }
+    }
+
+    public string? GetConnectionIdForPeer(string code, string peerId)
+    {
+        lock (_gate)
+        {
+            if (!_rooms.TryGetValue(code, out var room))
+            {
+                return null;
+            }
+
+            return room.Players.FirstOrDefault(player => player.Id == peerId)?.ConnectionId;
+        }
+    }
+
+    public DisconnectedPlayer? Disconnect(string connectionId)
+    {
+        lock (_gate)
+        {
+            if (!_connectionRooms.TryRemove(connectionId, out var code) || !_rooms.TryGetValue(code, out var room))
+            {
+                return null;
+            }
+
+            var playerIndex = room.Players.FindIndex(player => player.ConnectionId == connectionId);
+            if (playerIndex < 0)
+            {
+                return null;
+            }
+
+            var player = room.Players[playerIndex];
+            room.Players[playerIndex] = player with { ConnectionId = null };
+            return new DisconnectedPlayer(code, player.Id, room.Snapshot());
+        }
+    }
+
     public bool ContainsPeer(string code, string peerId)
     {
         lock (_gate)
         {
-            return _rooms.TryGetValue(code, out var room) && room.Players.Any(player => player.Id == peerId);
+            return _rooms.TryGetValue(code, out var room) &&
+                room.Players.Any(player => player.Id == peerId && !string.IsNullOrWhiteSpace(player.ConnectionId));
         }
     }
 
@@ -170,4 +237,12 @@ public sealed class RoomManager
         var trimmed = string.IsNullOrWhiteSpace(name) ? "Гравець" : name.Trim();
         return trimmed.Length > 18 ? trimmed[..18] : trimmed;
     }
+
+    private static string CleanPlayerId(string? playerId, string fallback)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(playerId) ? fallback : playerId.Trim();
+        return trimmed.Length > 64 ? trimmed[..64] : trimmed;
+    }
 }
+
+public sealed record DisconnectedPlayer(string Code, string PlayerId, RoomSnapshot Snapshot);
