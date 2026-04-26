@@ -1,0 +1,3955 @@
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  ArrowLeftRight,
+  BadgeDollarSign,
+  BadgePercent,
+  Building2,
+  Check,
+  ChevronsDown,
+  CircleHelp,
+  Flag,
+  Hammer,
+  HandCoins,
+  Home,
+  Hotel,
+  Landmark,
+  Layers,
+  Lock,
+  LogOut,
+  RotateCcw,
+  ShieldAlert,
+  Trash2,
+  UsersRound,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-react';
+import type { CSSProperties, Dispatch, FormEvent, SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { boardTiles, getTile, isPropertyTile } from '../data/board';
+import { getCityEventDefinition } from '../data/cityEvents';
+import { money } from '../engine/economy';
+import {
+  calculateRent,
+  getEffectiveHouseCost,
+  getEffectivePropertyPrice,
+  getEffectiveUnmortgageCost,
+} from '../engine/gameEngine';
+import type { CityTile, GameState, Player, PropertyTile, RentServiceOffer, TradeOffer } from '../engine/types';
+import { useGameStore } from '../store/useGameStore';
+import { DiceRoller } from './DiceRoller';
+
+const TURN_SECONDS = 120;
+const AUTO_CONTINUE_MS = 1300;
+const CARD_REVEAL_MS = 3600;
+const DICE_ROLL_ANIMATION_MS = 4200;
+const PAWN_STEP_ANIMATION_MS = 180;
+const MORTGAGE_GRACE_TURNS = 10;
+const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit' });
+const CASINO_MAX_BET = money(300);
+const CASINO_DEFAULT_BET = money(100);
+const CASINO_MULTIPLIERS = [0, 1, 2, 3, 4, 5, 6];
+const CASINO_SPIN_MS = 5400;
+const CASINO_RESULT_HOLD_MS = 850;
+const JAIL_FINE = money(100);
+const BUILDING_ANIMATION_MS = 2600;
+const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
+type WorkspaceTab = 'cards' | 'trade';
+type GameSoundKind =
+  | 'auction'
+  | 'bid'
+  | 'build'
+  | 'card'
+  | 'casino'
+  | 'cash'
+  | 'demolish'
+  | 'dice'
+  | 'hotel'
+  | 'jail'
+  | 'loss'
+  | 'purchase'
+  | 'rent'
+  | 'trade'
+  | 'turn'
+  | 'win';
+type TradeDraft = {
+  targetId: string;
+  offerMoney: number;
+  requestMoney: number;
+  offerProperties: number[];
+  requestProperties: number[];
+  offerRentServices: RentServiceOffer[];
+  requestRentServices: RentServiceOffer[];
+};
+type TradeDraftUpdater = Dispatch<SetStateAction<TradeDraft | undefined>>;
+type TradeTileState = 'offer' | 'request' | 'offer-selected' | 'request-selected' | 'disabled';
+type BuildingAnimationEvent = {
+  id: string;
+  tileId: number;
+  kind: 'build' | 'demolish';
+  fromHouses: number;
+  toHouses: number;
+  color: string;
+};
+
+export const GameScreen = () => {
+  const { game, localPlayerId, room, dispatch, leaveRoom } = useGameStore();
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab | undefined>();
+  const [selectedPropertyId, setSelectedPropertyId] = useState<number | undefined>();
+  const [tradeDraft, setTradeDraft] = useState<TradeDraft | undefined>();
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(() =>
+    typeof window === 'undefined' ? true : window.localStorage.getItem(SOUND_STORAGE_KEY) !== 'off',
+  );
+  if (!game) return null;
+
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const localId = localPlayerId ?? game.currentPlayerId;
+  const localPlayer = game.players.find((player) => player.id === localId) ?? currentPlayer;
+  const isLocalTurn = currentPlayer.id === localId || !room;
+  const tradePartners = game.players.filter((player) => player.id !== localPlayer.id && !player.isBankrupt);
+  const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
+  const activeTradeOffer = game.tradeOffers.find(
+    (offer) =>
+      offer.status === 'pending' &&
+      (!room || offer.fromPlayerId === localPlayer.id || offer.toPlayerId === localPlayer.id),
+  );
+  const incomingTrade = game.tradeOffers.find(
+    (offer) => offer.status === 'pending' && (!room || offer.toPlayerId === localPlayer.id),
+  );
+  const rollingKey = game.diceRollId || game.turn * 10 + game.dice[0] + game.dice[1];
+  const secondsLeft = useTurnTimer(game, isLocalTurn, dispatch);
+  const hasDoubleRoll = Boolean(game.lastDice && game.lastDice[0] === game.lastDice[1] && game.doublesInRow > 0);
+  const isDiceRolling = useDiceRollAnimation(game);
+  const { displayPositions, isAnimating: isPawnAnimating } = useAnimatedPositions(game);
+  const isBoardBusy = isDiceRolling || isPawnAnimating;
+  const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
+  const canUseAdmin = Boolean(room?.testMode);
+  useAutoContinueTurn(game, isLocalTurn, dispatch, isBoardBusy);
+  useGameSounds(game, soundEnabled);
+
+  const toggleSound = () => {
+    setSoundEnabled((enabled) => {
+      const next = !enabled;
+      window.localStorage.setItem(SOUND_STORAGE_KEY, next ? 'on' : 'off');
+      return next;
+    });
+  };
+
+  const handleStartTradeDraft = (_player: Player, partners: Player[]) => {
+    setTradeDraft({
+      targetId: partners[0]?.id ?? '',
+      offerMoney: 0,
+      requestMoney: 0,
+      offerProperties: [],
+      requestProperties: [],
+      offerRentServices: [],
+      requestRentServices: [],
+    });
+    setWorkspaceTab(undefined);
+    setSelectedPropertyId(undefined);
+  };
+
+  const handleSelectProperty = (tileId: number) => {
+    if (tradeDraft) {
+      setTradeDraft((draft) => (draft ? toggleTradeDraftTile(game, localPlayer.id, draft, tileId) : draft));
+      return;
+    }
+
+    setSelectedPropertyId(tileId);
+  };
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [game.id]);
+
+  useEffect(() => {
+    if (!tradeDraft) return;
+    const targetExists = tradePartners.some((partner) => partner.id === tradeDraft.targetId);
+    if (!isLocalTurn || hasPendingTrade || !targetExists) {
+      setTradeDraft(undefined);
+    }
+  }, [hasPendingTrade, isLocalTurn, tradeDraft, tradePartners]);
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (adminOpen) {
+        setAdminOpen(false);
+        return;
+      }
+      if (selectedPropertyId !== undefined) {
+        setSelectedPropertyId(undefined);
+        return;
+      }
+      if (tradeDraft) {
+        setTradeDraft(undefined);
+        return;
+      }
+      if (workspaceTab) {
+        setWorkspaceTab(undefined);
+      }
+    };
+
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [adminOpen, selectedPropertyId, tradeDraft, workspaceTab]);
+
+  return (
+    <section className="game-screen">
+      <header className="top-bar">
+        <div>
+          <span className="room-pill">{room ? `Кімната ${room.code}` : 'Локальне демо'}</span>
+          <h1>Українська Монополія</h1>
+        </div>
+        <div className="top-actions">
+          {incomingTrade && (
+            <button className="trade-badge" type="button" onClick={() => setWorkspaceTab('trade')}>
+              <ArrowLeftRight size={15} />
+              Активна угода
+            </button>
+          )}
+          {canUseAdmin && (
+            <button className="trade-badge admin-badge" type="button" onClick={() => setAdminOpen(true)}>
+              <ShieldAlert size={15} />
+              Адмін
+            </button>
+          )}
+          <button
+            className={`sound-toggle ${soundEnabled ? 'enabled' : ''}`}
+            type="button"
+            title={soundEnabled ? 'Вимкнути звуки' : 'Увімкнути звуки'}
+            onClick={toggleSound}
+          >
+            {soundEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+            {soundEnabled ? 'Звук' : 'Тиша'}
+          </button>
+          <span className="turn-status-inline">Ходить {currentPlayer.name}</span>
+          <span className="turn-pill">
+            Коло {game.currentRound ?? 1} · Хід {game.turn}
+          </span>
+          <button className="ghost icon-text" onClick={() => void leaveRoom()}>
+            <LogOut size={18} />
+            Вийти
+          </button>
+        </div>
+      </header>
+
+      <div className="game-layout">
+        <PlayerRail secondsLeft={secondsLeft} />
+        <GameBoard
+          game={game}
+          displayPositions={displayPositions}
+          isDiceRolling={isDiceRolling}
+          rollingKey={rollingKey}
+          isLocalTurn={isLocalTurn}
+          isBoardBusy={isBoardBusy}
+          hasDoubleRoll={hasDoubleRoll}
+          dispatch={dispatch}
+          onOpenWorkspace={setWorkspaceTab}
+          onSelectProperty={handleSelectProperty}
+          tradeDraft={tradeDraft}
+          setTradeDraft={setTradeDraft}
+          tradePlayer={localPlayer}
+          tradePartners={tradePartners}
+          tradePlayerId={localPlayer.id}
+          activeTradeOffer={activeTradeOffer}
+          activeTradeViewerId={activeTradeOffer && !room ? activeTradeOffer.toPlayerId : localPlayer.id}
+          canRespondToActiveTrade={Boolean(activeTradeOffer && (activeTradeOffer.toPlayerId === localPlayer.id || !room))}
+          canResolveCasino={isHost}
+        />
+      </div>
+      {workspaceTab &&
+        createPortal(
+          <WorkspaceDrawer
+            activeTab={workspaceTab}
+            onTabChange={setWorkspaceTab}
+            onClose={() => setWorkspaceTab(undefined)}
+            onStartTrade={handleStartTradeDraft}
+          />,
+          document.body,
+        )}
+      {selectedPropertyId !== undefined &&
+        createPortal(
+          <CityModal
+            game={game}
+            tileId={selectedPropertyId}
+            localPlayerId={localPlayerId}
+            preferLocalPlayer={Boolean(room)}
+            onClose={() => setSelectedPropertyId(undefined)}
+            dispatch={dispatch}
+          />,
+          document.body,
+        )}
+      {adminOpen &&
+        canUseAdmin &&
+        createPortal(
+          <AdminPanel game={game} onClose={() => setAdminOpen(false)} dispatch={dispatch} />,
+          document.body,
+        )}
+    </section>
+  );
+};
+
+const AdminPanel = ({
+  game,
+  onClose,
+  dispatch,
+}: {
+  game: GameState;
+  onClose: () => void;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const [selectedTileId, setSelectedTileId] = useState(currentPlayer.position);
+  const selectedTile = getTile(selectedTileId);
+  const quickTiles = [20, 1, 7, 30, 0]
+    .map((tileId) => getTile(tileId))
+    .filter((tile, index, tiles) => tiles.findIndex((candidate) => candidate.id === tile.id) === index);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    dispatch({ type: 'admin_move_current_player', tileId: selectedTile.id });
+    onClose();
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <motion.form
+        className="admin-modal"
+        role="dialog"
+        aria-modal="true"
+        initial={{ opacity: 0, y: 16, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 16, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+        onMouseDown={(event) => event.stopPropagation()}
+        onSubmit={submit}
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">Тест режим</p>
+            <h2>Адмін-перенесення</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Закрити">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="admin-current-player">
+          <PlayerFigurine player={currentPlayer} />
+          <div>
+            <span>Поточний гравець</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        </div>
+
+        <label className="admin-field">
+          Клітинка
+          <select value={selectedTileId} onChange={(event) => setSelectedTileId(Number(event.target.value))}>
+            {boardTiles.map((tile) => (
+              <option value={tile.id} key={tile.id}>
+                {tile.id}. {tile.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="admin-quick-grid">
+          {quickTiles.map((tile) => (
+            <button
+              className={selectedTile.id === tile.id ? 'secondary compact active' : 'ghost compact'}
+              type="button"
+              onClick={() => setSelectedTileId(tile.id)}
+              key={tile.id}
+            >
+              {tile.name}
+            </button>
+          ))}
+        </div>
+
+        <div className={`admin-tile-preview ${selectedTile.type}`}>
+          <strong>{selectedTile.name}</strong>
+          <span>
+            Клітинка {selectedTile.id}
+            {selectedTile.description ? ` · ${selectedTile.description}` : ''}
+          </span>
+        </div>
+
+        <div className="admin-actions">
+          <button className="primary" type="submit">
+            <ShieldAlert size={18} />
+            Перенаправити
+          </button>
+          <button className="ghost" type="button" onClick={onClose}>
+            Скасувати
+          </button>
+        </div>
+      </motion.form>
+    </div>
+  );
+};
+
+const GameBoard = ({
+  game,
+  displayPositions,
+  isDiceRolling,
+  rollingKey,
+  isLocalTurn,
+  isBoardBusy,
+  hasDoubleRoll,
+  dispatch,
+  onOpenWorkspace,
+  onSelectProperty,
+  tradeDraft,
+  setTradeDraft,
+  tradePlayer,
+  tradePartners,
+  tradePlayerId,
+  activeTradeOffer,
+  activeTradeViewerId,
+  canRespondToActiveTrade,
+  canResolveCasino,
+}: {
+  game: GameState;
+  displayPositions: Record<string, number>;
+  isDiceRolling: boolean;
+  rollingKey: number;
+  isLocalTurn: boolean;
+  isBoardBusy: boolean;
+  hasDoubleRoll: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+  onOpenWorkspace: (tab: WorkspaceTab) => void;
+  onSelectProperty: (tileId: number) => void;
+  tradeDraft?: TradeDraft;
+  setTradeDraft: TradeDraftUpdater;
+  tradePlayer: Player;
+  tradePartners: Player[];
+  tradePlayerId: string;
+  activeTradeOffer?: TradeOffer;
+  activeTradeViewerId: string;
+  canRespondToActiveTrade: boolean;
+  canResolveCasino: boolean;
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
+  const buildingEvents = useBuildingAnimationEvents(game);
+  const hasBuildingShock = buildingEvents.length > 0;
+  const hasHotelShock = buildingEvents.some((event) => event.kind === 'build' && event.toHouses >= 5);
+  const shouldShowCasino = Boolean(game.pendingCasino && (isLocalTurn || game.pendingCasino.spinEndsAt));
+
+  return (
+    <section className="board-wrap">
+      <div className={`board ${hasBuildingShock ? 'building-shock' : ''} ${hasHotelShock ? 'hotel-shock' : ''}`}>
+        <div className="board-center">
+          <div className="board-status-pill" aria-live="polite">
+            <Landmark size={34} />
+          <span>Ходить</span>
+          <strong>{currentPlayer.name}</strong>
+        </div>
+          <CityEventBanner game={game} />
+          {game.phase === 'awaitingJailDecision' && game.pendingJail && isLocalTurn && !isBoardBusy ? (
+            <BoardJailDecisionPrompt game={game} dispatch={dispatch} />
+          ) : game.phase === 'rolling' && currentPlayer.jailTurns > 0 && isLocalTurn && !isBoardBusy ? (
+            <BoardJailTurnPrompt game={game} dispatch={dispatch} />
+          ) : game.phase === 'casino' && shouldShowCasino && !isBoardBusy ? (
+            <BoardCasinoPrompt game={game} canControl={isLocalTurn} canResolve={canResolveCasino} dispatch={dispatch} />
+          ) : game.phase === 'awaitingPurchase' &&
+          pendingTile &&
+          isPropertyTile(pendingTile) &&
+          isLocalTurn &&
+          !isBoardBusy ? (
+            <BoardPurchasePrompt game={game} tile={pendingTile} currentPlayer={currentPlayer} dispatch={dispatch} />
+          ) : game.phase === 'rent' && game.pendingRent && !isBoardBusy ? (
+            <BoardRentPrompt game={game} isLocalTurn={isLocalTurn} dispatch={dispatch} />
+          ) : game.phase === 'payment' && game.pendingPayment && !isBoardBusy ? (
+            <BoardPaymentPrompt game={game} isLocalTurn={isLocalTurn} dispatch={dispatch} />
+          ) : tradeDraft ? (
+            <BoardTradeBuilder
+              game={game}
+              player={tradePlayer}
+              partners={tradePartners}
+              draft={tradeDraft}
+              setDraft={setTradeDraft}
+              dispatch={dispatch}
+            />
+          ) : activeTradeOffer ? (
+            <BoardActiveTrade
+              game={game}
+              offer={activeTradeOffer}
+              tradePlayerId={activeTradeViewerId}
+              canRespond={canRespondToActiveTrade}
+              dispatch={dispatch}
+            />
+          ) : (
+            <BoardLogFeed game={game} deferUpdates={isBoardBusy} />
+          )}
+          <BoardActionDock
+            game={game}
+            isDiceRolling={isDiceRolling}
+            isLocalTurn={isLocalTurn}
+            isBoardBusy={isBoardBusy}
+            hasDoubleRoll={hasDoubleRoll}
+            dispatch={dispatch}
+            onOpenWorkspace={onOpenWorkspace}
+          />
+        </div>
+        {boardTiles.map((tile) => (
+          <TileCell
+            tileId={tile.id}
+            onSelectProperty={onSelectProperty}
+            tradeDraft={tradeDraft}
+            tradePlayerId={tradePlayerId}
+            activeTradeOffer={activeTradeOffer}
+            key={tile.id}
+          />
+        ))}
+        <BuildingAnimationLayer events={buildingEvents} />
+        <BoardPawns game={game} displayPositions={displayPositions} />
+        <DiceRollOverlay game={game} isRolling={isDiceRolling} rollingKey={rollingKey} />
+        <AuctionOverlay game={game} />
+        <CardDrawOverlay game={game} />
+      </div>
+    </section>
+  );
+};
+
+const CityEventBanner = ({ game }: { game: GameState }) => {
+  const activeEvents = game.activeCityEvents ?? [];
+  const activeEventIds = new Set(activeEvents.map((event) => event.id));
+  const visibleEvent =
+    game.pendingCityEvent && activeEventIds.has(game.pendingCityEvent.id)
+      ? game.pendingCityEvent
+      : activeEvents[activeEvents.length - 1];
+  const visibleEventDefinition = visibleEvent ? getCityEventDefinition(visibleEvent.id) : undefined;
+  if (!visibleEventDefinition && activeEvents.length === 0) return null;
+
+  return (
+    <aside className="city-event-banner" aria-live="polite">
+      {visibleEventDefinition && (
+        <div className="city-event-main">
+          <span>Подія міста</span>
+          <strong>{visibleEventDefinition.title}</strong>
+          <p>{visibleEventDefinition.text}</p>
+        </div>
+      )}
+      {activeEvents.length > 0 && (
+        <div className="city-event-chips" aria-label="Активні події міста">
+          {activeEvents.map((event) => {
+            const definition = getCityEventDefinition(event.id);
+            return (
+              <span key={event.id} title={definition.text}>
+                {definition.title}: {event.remainingRounds} {formatRoundWord(event.remainingRounds)}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </aside>
+  );
+};
+
+const BoardActiveTrade = ({
+  game,
+  offer,
+  tradePlayerId,
+  canRespond,
+  dispatch,
+}: {
+  game: GameState;
+  offer: TradeOffer;
+  tradePlayerId: string;
+  canRespond: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const viewer = game.players.find((player) => player.id === tradePlayerId) ?? game.players[0];
+  const responsePlayerId = offer.toPlayerId;
+
+  return (
+    <motion.div
+      className="board-active-trade"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <TradeOfferCard
+        game={game}
+        player={viewer}
+        offer={offer}
+        canRespond={canRespond}
+        responsePlayerId={responsePlayerId}
+        dispatch={dispatch}
+        className="board-trade-card"
+      />
+    </motion.div>
+  );
+};
+
+const BoardJailDecisionPrompt = ({
+  game,
+  dispatch,
+}: {
+  game: GameState;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const canPay = currentPlayer.money >= JAIL_FINE;
+
+  return (
+    <motion.article
+      className="board-jail-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="jail-prompt-head">
+        <div>
+          <p className="eyebrow">До вʼязниці</p>
+          <h3>{currentPlayer.name}</h3>
+        </div>
+        <strong>{formatMoney(JAIL_FINE)}</strong>
+      </div>
+      <p>Можна сплатити штраф і лишитись на полі або вирушити у вʼязницю на 3 ходи без винагороди за Старт.</p>
+      <div className="jail-actions">
+        <button
+          className="primary compact"
+          type="button"
+          disabled={!canPay}
+          title={canPay ? undefined : 'Недостатньо грошей для штрафу.'}
+          onClick={() => dispatch({ type: 'pay_jail_fine', playerId: currentPlayer.id })}
+        >
+          <HandCoins size={16} />
+          Заплатити
+        </button>
+        <button
+          className="secondary danger-soft compact"
+          type="button"
+          onClick={() => dispatch({ type: 'go_to_jail', playerId: currentPlayer.id })}
+        >
+          <ShieldAlert size={16} />
+          У вʼязницю
+        </button>
+      </div>
+    </motion.article>
+  );
+};
+
+const BoardJailTurnPrompt = ({
+  game,
+  dispatch,
+}: {
+  game: GameState;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const hasExitCard = currentPlayer.jailCards > 0;
+  const canPay = hasExitCard || currentPlayer.money >= JAIL_FINE;
+
+  return (
+    <motion.article
+      className="board-jail-prompt jail-turn"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="jail-prompt-head">
+        <div>
+          <p className="eyebrow">Вʼязниця</p>
+          <h3>{currentPlayer.name}</h3>
+        </div>
+        <strong>{currentPlayer.jailTurns}</strong>
+      </div>
+      <p>
+        Залишилось ходів: {currentPlayer.jailTurns}. Сплатіть штраф або киньте кубики: дубль одразу виводить з
+        тюрми і рухає пешку.
+      </p>
+      <div className="jail-actions">
+        <button
+          className="primary compact"
+          type="button"
+          disabled={!canPay}
+          title={canPay ? undefined : 'Недостатньо грошей для штрафу.'}
+          onClick={() => dispatch({ type: 'pay_bail', playerId: currentPlayer.id })}
+        >
+          <HandCoins size={16} />
+          {hasExitCard ? 'Картка виходу' : `Сплатити ${formatMoney(JAIL_FINE)}`}
+        </button>
+        <button
+          className="secondary compact"
+          type="button"
+          onClick={() => dispatch({ type: 'roll', playerId: currentPlayer.id })}
+        >
+          <RotateCcw size={16} />
+          Кинути кубики
+        </button>
+      </div>
+    </motion.article>
+  );
+};
+
+const BoardCasinoPrompt = ({
+  game,
+  canControl,
+  canResolve,
+  dispatch,
+}: {
+  game: GameState;
+  canControl: boolean;
+  canResolve: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const pendingCasino = game.pendingCasino;
+  const maxBet = Math.min(CASINO_MAX_BET, currentPlayer.money);
+  const [bet, setBet] = useState(maxBet > 0 ? Math.min(CASINO_DEFAULT_BET, maxBet) : 0);
+  const [rotation, setRotation] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const segmentAngle = 360 / CASINO_MULTIPLIERS.length;
+  const isSpinning = Boolean(pendingCasino?.spinEndsAt && now < pendingCasino.spinEndsAt);
+  const spinComplete = Boolean(pendingCasino?.spinEndsAt && now >= pendingCasino.spinEndsAt);
+  const revealedMultiplier = spinComplete ? pendingCasino?.multiplier : undefined;
+  const lockedBet = pendingCasino?.amount ?? bet;
+
+  useEffect(() => {
+    setBet((value) => (maxBet > 0 ? Math.min(Math.max(1, value), maxBet) : 0));
+  }, [maxBet]);
+
+  useEffect(() => {
+    setBet(maxBet > 0 ? Math.min(CASINO_DEFAULT_BET, maxBet) : 0);
+    setRotation(0);
+  }, [game.pendingCasino?.playerId, game.pendingCasino?.tileId, maxBet]);
+
+  useEffect(() => {
+    if (!pendingCasino?.spinEndsAt) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [pendingCasino?.spinEndsAt]);
+
+  useEffect(() => {
+    if (!pendingCasino?.spinStartedAt || pendingCasino.multiplier === undefined) return;
+    const targetIndex = CASINO_MULTIPLIERS.indexOf(pendingCasino.multiplier);
+    const centerAngle = targetIndex * segmentAngle + segmentAngle / 2;
+    const seed = Math.abs(pendingCasino.spinSeed ?? 0);
+    const extraTurns = 10 + (seed % 5);
+    const targetRotation = extraTurns * 360 - centerAngle;
+    setRotation(0);
+    const frame = window.requestAnimationFrame(() => setRotation(targetRotation));
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingCasino?.multiplier, pendingCasino?.spinSeed, pendingCasino?.spinStartedAt, segmentAngle]);
+
+  useEffect(() => {
+    if (!canResolve || !pendingCasino?.spinEndsAt || !spinComplete) return;
+    if (pendingCasino.amount === undefined || pendingCasino.multiplier === undefined) return;
+    const timer = window.setTimeout(() => {
+      dispatch({
+        type: 'casino_bet',
+        playerId: pendingCasino.playerId,
+        amount: pendingCasino.amount ?? 0,
+        multiplier: pendingCasino.multiplier ?? 0,
+      });
+    }, CASINO_RESULT_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [canResolve, dispatch, pendingCasino, spinComplete]);
+
+  const updateBet = (value: number) => {
+    if (pendingCasino?.spinEndsAt) return;
+    if (!Number.isFinite(value)) {
+      setBet(maxBet > 0 ? 1 : 0);
+      return;
+    }
+    setBet(maxBet > 0 ? Math.min(maxBet, Math.max(1, Math.floor(value))) : 0);
+  };
+
+  const handleSpin = () => {
+    if (!canControl || pendingCasino?.spinEndsAt || maxBet <= 0) return;
+    const normalizedBet = Math.min(maxBet, Math.max(1, Math.floor(bet)));
+    const multiplier = CASINO_MULTIPLIERS[Math.floor(Math.random() * CASINO_MULTIPLIERS.length)];
+    setBet(normalizedBet);
+    dispatch({
+      type: 'start_casino_spin',
+      playerId: currentPlayer.id,
+      amount: normalizedBet,
+      multiplier,
+      spinSeed: Math.floor(Math.random() * 1_000_000),
+    });
+  };
+
+  const projectedPayout = lockedBet * (revealedMultiplier ?? 0);
+  const netWin = revealedMultiplier === undefined ? 0 : projectedPayout - lockedBet;
+  const hasWin = netWin > 0;
+  const resultLabel = revealedMultiplier === undefined ? (isSpinning ? '...' : 'x?') : `x${revealedMultiplier}`;
+  const resultText =
+    revealedMultiplier === undefined
+      ? isSpinning
+        ? 'Рулетка крутиться'
+        : 'Оберіть ставку й крутіть'
+      : `${resultLabel} = ${formatMoney(projectedPayout)}`;
+  const controlsLocked = !canControl || Boolean(pendingCasino?.spinEndsAt);
+
+  return (
+    <motion.article
+      className={`board-casino-prompt ${hasWin ? 'casino-win' : ''}`}
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="casino-head">
+        <div>
+          <p className="eyebrow">Казино</p>
+          <h3>Рулетка фортуни</h3>
+        </div>
+        <div className="casino-jackpot">
+          <span>Макс.</span>
+          <strong>x6</strong>
+        </div>
+      </div>
+
+      <div className="casino-body">
+        <div className="casino-wheel-wrap" aria-label="Рулетка казино">
+          <span className="casino-pointer" />
+          <div
+            className="casino-wheel"
+            style={{ transform: `rotate(${rotation}deg)`, '--casino-spin-ms': `${CASINO_SPIN_MS}ms` } as CSSProperties}
+          >
+            {CASINO_MULTIPLIERS.map((multiplier, index) => (
+              <span
+                className={multiplier === 0 ? 'zero' : ''}
+                key={multiplier}
+                style={{ '--label-angle': `${index * segmentAngle + segmentAngle / 2}deg` } as CSSProperties}
+              >
+                x{multiplier}
+              </span>
+            ))}
+          </div>
+          <div className="casino-wheel-core">
+            <BadgeDollarSign size={18} />
+            <strong>{resultLabel}</strong>
+          </div>
+          {hasWin && (
+            <div className="casino-win-burst" aria-hidden>
+              {Array.from({ length: 12 }, (_, index) => (
+                <span key={index} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <section className="casino-controls">
+          <div className="casino-multiplier-row">
+            {CASINO_MULTIPLIERS.map((multiplier) => (
+              <span className={revealedMultiplier === multiplier ? 'active' : ''} key={multiplier}>
+                x{multiplier}
+              </span>
+            ))}
+          </div>
+
+          <div className="casino-bet-row">
+            <label>
+              <span>Ставка</span>
+              <div>
+                <input
+                  max={maxBet}
+                  type="number"
+                  value={pendingCasino?.amount ?? bet}
+                  min={maxBet > 0 ? 1 : 0}
+                  disabled={controlsLocked || maxBet <= 0}
+                  onChange={(event) => updateBet(Number(event.target.value))}
+                />
+                <em>₴</em>
+              </div>
+            </label>
+            <strong>макс. {formatMoney(maxBet)}</strong>
+          </div>
+
+          <input
+            className="casino-bet-slider"
+            min={maxBet > 0 ? 1 : 0}
+            max={maxBet}
+            type="range"
+            value={pendingCasino?.amount ?? bet}
+            disabled={controlsLocked || maxBet === 0}
+            onChange={(event) => updateBet(Number(event.target.value))}
+          />
+
+          <div className="casino-result">
+            <span>Можлива виплата</span>
+            <strong>{resultText}</strong>
+          </div>
+
+          <div className="casino-actions">
+            <button
+              className="primary compact"
+              type="button"
+              disabled={controlsLocked || maxBet <= 0}
+              title={maxBet <= 0 ? 'Недостатньо грошей для ставки.' : undefined}
+              onClick={handleSpin}
+            >
+              <BadgeDollarSign size={16} />
+              {isSpinning ? 'Крутиться...' : spinComplete ? 'Результат...' : 'Підтвердити ставку'}
+            </button>
+            <button
+              className="secondary compact"
+              type="button"
+              disabled={controlsLocked}
+              onClick={() => dispatch({ type: 'skip_casino', playerId: currentPlayer.id })}
+            >
+              <X size={16} />
+              Відмовитись
+            </button>
+          </div>
+        </section>
+      </div>
+    </motion.article>
+  );
+};
+
+const SURRENDER_CHARGE_MS = 3200;
+const SURRENDER_CHARGE_STEP_MS = 40;
+
+const BoardRentPrompt = ({
+  game,
+  isLocalTurn,
+  dispatch,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const pendingRent = game.pendingRent;
+  const [isSurrenderCharging, setIsSurrenderCharging] = useState(false);
+  const [surrenderCharge, setSurrenderCharge] = useState(0);
+
+  useEffect(() => {
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  }, [pendingRent?.payerId, pendingRent?.tileId, pendingRent?.amount]);
+
+  useEffect(() => {
+    if (!isSurrenderCharging || surrenderCharge >= 100) return;
+    const timer = window.setTimeout(() => {
+      setSurrenderCharge((value) =>
+        Math.min(100, value + (SURRENDER_CHARGE_STEP_MS / SURRENDER_CHARGE_MS) * 100),
+      );
+    }, SURRENDER_CHARGE_STEP_MS);
+    return () => window.clearTimeout(timer);
+  }, [isSurrenderCharging, surrenderCharge]);
+
+  if (!pendingRent) return null;
+
+  const payer = game.players.find((player) => player.id === pendingRent.payerId);
+  const owner = game.players.find((player) => player.id === pendingRent.ownerId);
+  const tile = getTile(pendingRent.tileId);
+  const canPay = Boolean(payer && payer.money >= pendingRent.amount);
+  const surrenderArmed = surrenderCharge >= 100;
+  const stopSurrenderCharge = () => {
+    if (surrenderArmed) return;
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  };
+  const handleSurrender = () => {
+    if (!isLocalTurn || !surrenderArmed) return;
+    dispatch({ type: 'declare_bankruptcy', playerId: pendingRent.payerId });
+  };
+
+  return (
+    <motion.article
+      className="board-rent-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="rent-prompt-head">
+        <div>
+          <p className="eyebrow">Оренда</p>
+          <h3>{tile.name}</h3>
+        </div>
+        <strong>{formatMoney(pendingRent.amount)}</strong>
+      </div>
+      <p>
+        {payer?.name ?? 'Гравець'} має сплатити {owner?.name ?? 'власнику'}.
+      </p>
+      {pendingRent.originalAmount && (
+        <p className="rent-discount-note">
+          Послуга оренди: {pendingRent.discountPercent}% знижки, замість {formatMoney(pendingRent.originalAmount)}.
+        </p>
+      )}
+      <div className="rent-actions">
+        <button
+          className="primary compact"
+          disabled={!isLocalTurn || !canPay}
+          title={canPay ? undefined : 'Недостатньо грошей для сплати оренди.'}
+          onClick={() => dispatch({ type: 'pay_rent', playerId: pendingRent.payerId })}
+        >
+          <HandCoins size={16} />
+          Заплатити
+        </button>
+        <button
+          className={`surrender-button compact ${isSurrenderCharging ? 'charging' : ''} ${surrenderArmed ? 'armed' : ''}`}
+          disabled={!isLocalTurn}
+          aria-disabled={!isLocalTurn || !surrenderArmed}
+          style={{ '--surrender-charge': `${surrenderCharge}%` } as CSSProperties}
+          title="Наведіть і дочекайтесь заповнення. Після натискання ви програєте партію."
+          onBlur={stopSurrenderCharge}
+          onClick={handleSurrender}
+          onFocus={() => setIsSurrenderCharging(true)}
+          onPointerEnter={() => setIsSurrenderCharging(true)}
+          onPointerLeave={stopSurrenderCharge}
+        >
+          <ShieldAlert size={16} />
+          <span>Здатися</span>
+        </button>
+      </div>
+      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно перейде кредитору.</p>
+    </motion.article>
+  );
+};
+
+const BoardPaymentPrompt = ({
+  game,
+  isLocalTurn,
+  dispatch,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const pendingPayment = game.pendingPayment;
+  const [isSurrenderCharging, setIsSurrenderCharging] = useState(false);
+  const [surrenderCharge, setSurrenderCharge] = useState(0);
+
+  useEffect(() => {
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  }, [pendingPayment?.payerId, pendingPayment?.amount, pendingPayment?.reason]);
+
+  useEffect(() => {
+    if (!isSurrenderCharging || surrenderCharge >= 100) return;
+    const timer = window.setTimeout(() => {
+      setSurrenderCharge((value) =>
+        Math.min(100, value + (SURRENDER_CHARGE_STEP_MS / SURRENDER_CHARGE_MS) * 100),
+      );
+    }, SURRENDER_CHARGE_STEP_MS);
+    return () => window.clearTimeout(timer);
+  }, [isSurrenderCharging, surrenderCharge]);
+
+  if (!pendingPayment) return null;
+
+  const payer = game.players.find((player) => player.id === pendingPayment.payerId);
+  const recipientNames = (pendingPayment.recipients ?? [])
+    .map((recipient) => game.players.find((player) => player.id === recipient.playerId)?.name)
+    .filter(Boolean);
+  const canPay = Boolean(payer && payer.money >= pendingPayment.amount);
+  const surrenderArmed = surrenderCharge >= 100;
+  const stopSurrenderCharge = () => {
+    if (surrenderArmed) return;
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  };
+  const handleSurrender = () => {
+    if (!isLocalTurn || !surrenderArmed) return;
+    dispatch({ type: 'declare_bankruptcy', playerId: pendingPayment.payerId });
+  };
+
+  return (
+    <motion.article
+      className="board-rent-prompt board-payment-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="rent-prompt-head">
+        <div>
+          <p className="eyebrow">Платіж</p>
+          <h3>{pendingPayment.reason}</h3>
+        </div>
+        <strong>{formatMoney(pendingPayment.amount)}</strong>
+      </div>
+      <p>
+        {payer?.name ?? 'Гравець'} має сплатити{' '}
+        {recipientNames.length > 0 ? recipientNames.join(', ') : 'банку'}.
+      </p>
+      <div className="rent-actions">
+        <button
+          className="primary compact"
+          disabled={!isLocalTurn || !canPay}
+          title={canPay ? undefined : 'Недостатньо грошей для сплати.'}
+          onClick={() => dispatch({ type: 'pay_payment', playerId: pendingPayment.payerId })}
+        >
+          <HandCoins size={16} />
+          Сплатити
+        </button>
+        <button
+          className={`surrender-button compact ${isSurrenderCharging ? 'charging' : ''} ${surrenderArmed ? 'armed' : ''}`}
+          disabled={!isLocalTurn}
+          aria-disabled={!isLocalTurn || !surrenderArmed}
+          style={{ '--surrender-charge': `${surrenderCharge}%` } as CSSProperties}
+          title="Наведіть і дочекайтесь заповнення. Після натискання ви програєте партію."
+          onBlur={stopSurrenderCharge}
+          onClick={handleSurrender}
+          onFocus={() => setIsSurrenderCharging(true)}
+          onPointerEnter={() => setIsSurrenderCharging(true)}
+          onPointerLeave={stopSurrenderCharge}
+        >
+          <ShieldAlert size={16} />
+          <span>Здатися</span>
+        </button>
+      </div>
+      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно перейде кредитору або банку.</p>
+    </motion.article>
+  );
+};
+
+const BoardLogFeed = ({ game, deferUpdates }: { game: GameState; deferUpdates: boolean }) => {
+  const [visibleLog, setVisibleLog] = useState(game.log);
+  const entries = useMemo(() => [...visibleLog].reverse(), [visibleLog]);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const [showJumpDown, setShowJumpDown] = useState(false);
+  const [logTip, setLogTip] = useState<{ id: string; text: string; top: number }>();
+
+  const updateScrollState = () => {
+    const element = logRef.current;
+    if (!element) return;
+    const isNearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 18;
+    stickToBottomRef.current = isNearBottom;
+    setShowJumpDown(!isNearBottom);
+  };
+
+  const scrollToBottom = () => {
+    const element = logRef.current;
+    if (!element) return;
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+    stickToBottomRef.current = true;
+    setShowJumpDown(false);
+  };
+
+  useEffect(() => {
+    setVisibleLog(game.log);
+  }, [game.id]);
+
+  useEffect(() => {
+    if (deferUpdates) return;
+    setVisibleLog(game.log);
+  }, [deferUpdates, game.log]);
+
+  const showTip = (entry: GameState['log'][number], element: HTMLElement) => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const shellRect = shell.getBoundingClientRect();
+    const rowRect = element.getBoundingClientRect();
+    setLogTip({ id: entry.id, text: entry.text, top: rowRect.top - shellRect.top - 8 });
+  };
+
+  useEffect(() => {
+    const element = logRef.current;
+    if (!element || !stickToBottomRef.current) return;
+    element.scrollTop = element.scrollHeight;
+    setShowJumpDown(false);
+  }, [entries.length]);
+
+  return (
+    <div className="board-log-shell" ref={shellRef}>
+      <div className="board-log-feed" aria-label="Журнал гри" ref={logRef} onScroll={updateScrollState}>
+        {entries.map((entry) => (
+          <p
+            className={`board-log-line ${entry.tone ?? 'neutral'}`}
+            key={entry.id}
+            tabIndex={0}
+            onBlur={() => setLogTip(undefined)}
+            onFocus={(event) => showTip(entry, event.currentTarget)}
+            onMouseEnter={(event) => showTip(entry, event.currentTarget)}
+            onMouseLeave={() => setLogTip(undefined)}
+          >
+            <span>{entry.text}</span>
+            <time>{entry.createdAt ? formatLogTime(entry.createdAt) : `Хід ${game.turn}`}</time>
+          </p>
+        ))}
+      </div>
+      {logTip && (
+        <div className="log-tooltip" style={{ '--tip-top': `${logTip.top}px` } as CSSProperties}>
+          {logTip.text}
+        </div>
+      )}
+      {showJumpDown && (
+        <button className="log-jump-down" type="button" onClick={scrollToBottom}>
+          <ChevronsDown size={15} />
+          Вниз
+        </button>
+      )}
+    </div>
+  );
+};
+
+const BoardActionDock = ({
+  game,
+  isDiceRolling,
+  isLocalTurn,
+  isBoardBusy,
+  hasDoubleRoll,
+  dispatch,
+  onOpenWorkspace,
+}: {
+  game: GameState;
+  isDiceRolling: boolean;
+  isLocalTurn: boolean;
+  isBoardBusy: boolean;
+  hasDoubleRoll: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+  onOpenWorkspace: (tab: WorkspaceTab) => void;
+}) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
+  const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
+  const pendingCardTile = game.pendingCardDraw ? getTile(game.pendingCardDraw.tileId) : undefined;
+  const diceLabel = isDiceRolling ? '...' : `${game.dice[0]} + ${game.dice[1]}`;
+  const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
+  const isCurrentPlayerJailed = currentPlayer.jailTurns > 0;
+
+  return (
+    <div className="board-action-dock">
+      <div className="dock-dice" aria-label={`Кубики: ${game.dice[0]} і ${game.dice[1]}`}>
+        <DiceIcon />
+        <div>
+          <span>Кубики</span>
+          <strong>{diceLabel}</strong>
+        </div>
+      </div>
+
+      <div className="dock-primary-action">
+        {game.phase === 'rolling' && !isCurrentPlayerJailed && (
+          <button
+            className="primary"
+            disabled={!isLocalTurn || isBoardBusy || hasPendingTrade}
+            title={hasPendingTrade ? 'Спочатку прийміть або відхиліть активну угоду.' : undefined}
+            onClick={() => dispatch({ type: 'roll', playerId: currentPlayer.id })}
+          >
+            <RotateCcw size={18} />
+            Кинути кубики
+          </button>
+        )}
+
+        {game.phase === 'rolling' && isCurrentPlayerJailed && (
+          <span className="dock-note">Вʼязниця: {currentPlayer.jailTurns} ход.</span>
+        )}
+
+        {game.phase === 'awaitingPurchase' && pendingTile && isPropertyTile(pendingTile) && (
+          <span className="dock-note">Рішення щодо {pendingTile.name}</span>
+        )}
+
+        {game.phase === 'awaitingCard' && pendingCardTile && (
+          <button
+            className="primary"
+            disabled={!isLocalTurn || isBoardBusy}
+            onClick={() => dispatch({ type: 'draw_card', playerId: currentPlayer.id })}
+          >
+            <CircleHelp size={18} />
+            Витягнути картку
+          </button>
+        )}
+
+        {game.phase === 'auction' && <span className="dock-note">Аукціон триває</span>}
+
+        {game.phase === 'casino' && <span className="dock-note">Рішення в казино</span>}
+
+        {game.phase === 'awaitingJailDecision' && <span className="dock-note">Рішення щодо вʼязниці</span>}
+
+        {game.phase === 'rent' && game.pendingRent && (
+          <span className="dock-note">Оренда {formatMoney(game.pendingRent.amount)}</span>
+        )}
+
+        {game.phase === 'payment' && game.pendingPayment && (
+          <span className="dock-note">Платіж {formatMoney(game.pendingPayment.amount)}</span>
+        )}
+
+        {game.phase === 'turnEnd' && (
+          <span className="dock-note">
+            {hasPendingTrade
+              ? 'Очікуємо відповідь на угоду'
+              : hasDoubleRoll
+                ? 'Дубль: киньте кубики ще раз'
+                : 'Хід завершується автоматично'}
+          </span>
+        )}
+
+        {(game.phase === 'manage' || game.phase === 'trade') && (
+          <button
+            className="primary"
+            disabled={!isLocalTurn || isBoardBusy || hasPendingTrade}
+            title={hasPendingTrade ? 'Спочатку прийміть або відхиліть активну угоду.' : undefined}
+            onClick={() => dispatch({ type: 'continue_turn', playerId: currentPlayer.id })}
+          >
+            Завершити хід
+          </button>
+        )}
+
+        {game.phase === 'bankruptcy' && (
+          <button className="danger" onClick={() => dispatch({ type: 'declare_bankruptcy', playerId: currentPlayer.id })}>
+            Оголосити банкрутство
+          </button>
+        )}
+      </div>
+
+      <div className="dock-tools">
+        <button className="dock-tool" type="button" onClick={() => onOpenWorkspace('cards')}>
+          <Layers size={18} />
+          Мої картки
+        </button>
+        <button className="dock-tool accent" type="button" onClick={() => onOpenWorkspace('trade')}>
+          <ArrowLeftRight size={18} />
+          Угода
+        </button>
+      </div>
+
+    </div>
+  );
+};
+
+const DiceRollOverlay = ({ game, isRolling, rollingKey }: { game: GameState; isRolling: boolean; rollingKey: number }) => {
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId);
+
+  return (
+    <AnimatePresence>
+      {isRolling && currentPlayer && (
+        <motion.div
+          className="dice-roll-overlay"
+          initial={{ opacity: 0, y: 18, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -14, scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+        >
+          <div className="dice-roll-card">
+            <div className="dice-roll-heading">
+              <PlayerFigurine player={currentPlayer} />
+              <div>
+                <span>Кидає кубики</span>
+                <strong>{currentPlayer.name}</strong>
+              </div>
+            </div>
+            <DiceRoller dice={game.dice} rollingKey={rollingKey} active variant="hero" />
+            <div className="dice-roll-trail" aria-hidden>
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
+
+const CardDrawOverlay = ({ game }: { game: GameState }) => {
+  const card = game.pendingCard;
+  const isDecisionVisible = ['awaitingPurchase', 'rent', 'payment', 'casino', 'awaitingJailDecision'].includes(game.phase);
+
+  return (
+    <AnimatePresence>
+      {card && (
+        <motion.div
+          className={`card-draw-overlay ${isDecisionVisible ? 'behind-decision' : ''}`}
+          key={`${card.deck}-${card.cardId}-${game.turn}`}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+        >
+          <div className="card-draw-stage">
+            <motion.div
+              className={`card-deck ${card.deck}`}
+              initial={{ y: -8, rotate: -4, scale: 0.96 }}
+              animate={{ y: 0, rotate: 0, scale: 1 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 18 }}
+            >
+              <span>{card.deck === 'chance' ? 'Шанс' : 'Громада'}</span>
+            </motion.div>
+            <motion.article
+              className={`drawn-card ${card.deck}`}
+              initial={{ x: -112, y: 22, rotate: -9, rotateY: 54, scale: 0.84, opacity: 0 }}
+              animate={{ x: 0, y: 0, rotate: 0, rotateY: 0, scale: 1, opacity: 1 }}
+              exit={{ y: -20, scale: 0.94, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 190, damping: 18, delay: 0.22 }}
+            >
+              <span className="card-chip">{card.deck === 'chance' ? 'Шанс' : 'Громада'}</span>
+              <h3>{card.title}</h3>
+              <p>{card.text}</p>
+            </motion.article>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
+
+const AuctionOverlay = ({ game }: { game: GameState }) => {
+  const { localPlayerId, room, dispatch } = useGameStore();
+  const auction = game.auction;
+  const [now, setNow] = useState(Date.now());
+  const [demoBidderId, setDemoBidderId] = useState(localPlayerId ?? game.currentPlayerId);
+  const [bidAmount, setBidAmount] = useState(auction?.minimumBid ?? 0);
+  const resolveKey = auction ? `${game.id}:${auction.tileId}:${auction.endsAt}:${auction.highestBid}` : '';
+  const resolvedRef = useRef('');
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const players = game.players.filter((player) => !player.isBankrupt && player.jailTurns <= 0);
+  const bidderId = room ? localPlayerId : demoBidderId;
+  const bidder = players.find((player) => player.id === bidderId);
+  const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
+  const secondsLeft = auction ? Math.max(0, Math.ceil((auction.endsAt - now) / 1000)) : 0;
+  const nextMinimumBid = auction ? (auction.highestBid > 0 ? auction.highestBid + money(10) : auction.minimumBid) : 0;
+
+  useEffect(() => {
+    if (!players.some((player) => player.id === demoBidderId)) {
+      setDemoBidderId(players[0]?.id ?? '');
+    }
+  }, [demoBidderId, players]);
+
+  useEffect(() => {
+    if (!auction) return;
+    setBidAmount((value) => Math.max(value, nextMinimumBid));
+  }, [auction?.tileId, auction?.highestBid, auction?.minimumBid, nextMinimumBid]);
+
+  useEffect(() => {
+    if (!auction || secondsLeft > 0 || !isHost || resolvedRef.current === resolveKey) return;
+    resolvedRef.current = resolveKey;
+    dispatch({ type: 'resolve_auction' });
+  }, [auction, dispatch, isHost, resolveKey, secondsLeft]);
+
+  if (!auction) return null;
+
+  const tile = getTile(auction.tileId);
+  if (!isPropertyTile(tile)) return null;
+
+  const highestBidder = auction.highestBidderId
+    ? game.players.find((player) => player.id === auction.highestBidderId)
+    : undefined;
+  const maxBid = Math.max(auction.minimumBid, auction.highestBid, ...auction.bids.map((bid) => bid.amount));
+  const bidDisabled =
+    !bidder ||
+    bidder.money < bidAmount ||
+    bidAmount < nextMinimumBid ||
+    auction.highestBidderId === bidder.id ||
+    secondsLeft <= 0;
+
+  const submitBid = (event: FormEvent) => {
+    event.preventDefault();
+    if (!bidder || bidDisabled) return;
+    dispatch({ type: 'auction_bid', playerId: bidder.id, amount: bidAmount });
+  };
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="auction-overlay"
+        initial={{ opacity: 0, y: 18, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 18, scale: 0.97 }}
+        transition={{ type: 'spring', stiffness: 240, damping: 22 }}
+      >
+        <div className="auction-head">
+          <div>
+            <p className="eyebrow">Аукціон</p>
+            <h2>{tile.name}</h2>
+          </div>
+          <div className="auction-timer">
+            <span>{secondsLeft}</span>
+            <small>сек</small>
+          </div>
+        </div>
+
+        <div className="auction-clock" aria-hidden>
+          <span style={{ width: `${Math.max(0, Math.min(100, (secondsLeft / 15) * 100))}%` }} />
+        </div>
+
+        <div className="auction-summary">
+          <div>
+            <span>Мінімум</span>
+            <strong>{formatMoney(auction.minimumBid)}</strong>
+          </div>
+          <div>
+            <span>Лідер</span>
+            <strong>{highestBidder ? highestBidder.name : 'Немає'}</strong>
+          </div>
+          <div>
+            <span>Поточна ставка</span>
+            <strong>{auction.highestBid > 0 ? formatMoney(auction.highestBid) : '0₴'}</strong>
+          </div>
+        </div>
+
+        <form className="auction-bid-row" onSubmit={submitBid}>
+          {!room && (
+            <select value={demoBidderId} onChange={(event) => setDemoBidderId(event.target.value)}>
+            {players.map((player) => (
+                <option value={player.id} key={player.id}>
+                  {player.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <input
+            type="number"
+            min={nextMinimumBid}
+            step={money(10)}
+            value={bidAmount}
+            onChange={(event) => setBidAmount(Math.max(0, Number(event.target.value)))}
+          />
+          <button className="primary" type="submit" disabled={bidDisabled}>
+            <BadgeDollarSign size={17} />
+            Ставка
+          </button>
+        </form>
+
+        <div className="auction-quick-actions">
+          {[money(10), money(50), money(100)].map((increment) => (
+            <button
+              className="ghost compact"
+              type="button"
+              onClick={() => setBidAmount(Math.max(nextMinimumBid, auction.highestBid + increment))}
+              key={increment}
+            >
+              +{increment}
+            </button>
+          ))}
+        </div>
+
+        <div className="auction-chart">
+          {players.map((player) => {
+            const playerBest = Math.max(0, ...auction.bids.filter((bid) => bid.playerId === player.id).map((bid) => bid.amount));
+            const width = playerBest > 0 ? Math.max(8, (playerBest / maxBid) * 100) : 3;
+            return (
+              <div className={`auction-chart-row ${auction.highestBidderId === player.id ? 'leading' : ''}`} key={player.id}>
+                <div className="auction-player-name">
+                  <span style={{ background: player.color }} />
+                  {player.name}
+                </div>
+                <div className="auction-bar">
+                  <i style={{ width: `${width}%`, background: player.color }} />
+                </div>
+                <strong>{playerBest > 0 ? formatMoney(playerBest) : '-'}</strong>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="auction-history">
+          {players.length === 0 ? (
+            <p>Усі активні гравці у вʼязниці, тому ставок немає.</p>
+          ) : auction.bids.length === 0 ? (
+            <p>Ставок ще немає. Гравці у вʼязниці не беруть участі.</p>
+          ) : (
+            auction.bids
+              .slice(-4)
+              .reverse()
+              .map((bid) => {
+                const player = game.players.find((candidate) => candidate.id === bid.playerId);
+                return (
+                  <p key={`${bid.playerId}-${bid.placedAt}-${bid.amount}`}>
+                    <span style={{ background: player?.color ?? '#94a3b8' }} />
+                    {player?.name ?? 'Гравець'} поставив {formatMoney(bid.amount)}
+                  </p>
+                );
+              })
+          )}
+        </div>
+      </motion.div>
+    </AnimatePresence>
+  );
+};
+
+const TileCell = ({
+  tileId,
+  onSelectProperty,
+  tradeDraft,
+  tradePlayerId,
+  activeTradeOffer,
+}: {
+  tileId: number;
+  onSelectProperty: (tileId: number) => void;
+  tradeDraft?: TradeDraft;
+  tradePlayerId: string;
+  activeTradeOffer?: TradeOffer;
+}) => {
+  const { game } = useGameStore();
+  const tile = getTile(tileId);
+  const position = boardPosition(tileId);
+  const property = game?.properties[tileId];
+  const owner = property?.ownerId ? game?.players.find((player) => player.id === property.ownerId) : undefined;
+  const isInspectable = isPropertyTile(tile);
+  const rent = game && property?.ownerId && isPropertyTile(tile) ? calculateRent(game, tile, game.dice[0] + game.dice[1]) : undefined;
+  const price = game && isPropertyTile(tile) ? getEffectivePropertyPrice(game, tile) : undefined;
+  const mortgageTurnsLeft = game && property?.mortgaged ? getMortgageTurnsLeft(game, property) : undefined;
+  const tradeState =
+    game && isInspectable
+      ? getTradeTileState(game, tile.id, tradePlayerId, tradeDraft) ?? getActiveTradeTileState(tile.id, activeTradeOffer)
+      : undefined;
+
+  return (
+    <motion.article
+      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${tradeState ? `trade-${tradeState}` : ''}`}
+      role={isInspectable ? 'button' : undefined}
+      tabIndex={isInspectable ? 0 : undefined}
+      style={
+        {
+          left: `${position.left}%`,
+          top: `${position.top}%`,
+          width: `${position.width}%`,
+          height: `${position.height}%`,
+          '--owner-color': owner?.color ?? 'transparent',
+        } as CSSProperties
+      }
+      onClick={() => {
+        if (isInspectable) onSelectProperty(tile.id);
+      }}
+      onKeyDown={(event) => {
+        if (!isInspectable || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        onSelectProperty(tile.id);
+      }}
+      whileHover={{ y: -4, scale: 1.02 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+    >
+      {tile.type === 'city' && (
+        <>
+          <img src={tile.image} alt="" className="tile-image" />
+          <span className="group-band" style={{ background: tile.groupColor }} />
+        </>
+      )}
+      {tile.type === 'bank' && (
+        <div className={`bank-art ${tile.bankKey}`}>
+          <Building2 size={20} />
+        </div>
+      )}
+      {tile.type !== 'city' && tile.type !== 'bank' && <TileIcon tile={tile} />}
+      {owner && (
+        <>
+          <span className="owner-rail" aria-hidden />
+          <span className="owner-chip" title={`Власник: ${owner.name}`}>
+            {owner.name.slice(0, 2)}
+          </span>
+        </>
+      )}
+      {mortgageTurnsLeft !== undefined && (
+        <span
+          className="mortgage-lock-badge"
+          title={
+            mortgageTurnsLeft > 0
+              ? `Заставлено. Залишилось ${mortgageTurnsLeft} ${formatTurnWord(mortgageTurnsLeft)} власника.`
+              : 'Заставлено. Місто скоро повернеться банку.'
+          }
+        >
+          <Lock size={10} />
+          {mortgageTurnsLeft}
+        </span>
+      )}
+      <div className="tile-label">
+        <div className="tile-name">{tile.name}</div>
+        {isPropertyTile(tile) && (
+          <div className="tile-price">
+            {property?.mortgaged ? 'Заставлено' : owner ? `Для інших ${formatMoney(rent ?? 0)}` : formatMoney(price ?? tile.price)}
+          </div>
+        )}
+      </div>
+      {owner && <span className="owner-dot" style={{ background: owner.color }} title={owner.name} />}
+      {tile.type === 'city' && owner && property && property.houses > 0 && (
+        <TileBuildings houses={property.houses} color={owner.color} />
+      )}
+    </motion.article>
+  );
+};
+
+const TileBuildings = ({ houses, color }: { houses: number; color: string }) => {
+  const isHotel = houses >= 5;
+  return (
+    <div
+      className={`tile-buildings ${isHotel ? 'hotel' : ''}`}
+      style={{ '--building-color': color } as CSSProperties}
+      title={isHotel ? 'Готель' : `${houses} буд.`}
+      aria-hidden
+    >
+      {isHotel ? (
+        <span className="tile-hotel" />
+      ) : (
+        Array.from({ length: houses }, (_, index) => <span className="tile-house" key={index} />)
+      )}
+    </div>
+  );
+};
+
+const TileIcon = ({ tile }: { tile: ReturnType<typeof getTile> }) => {
+  const iconProps = { size: 26, strokeWidth: 2.4 };
+  switch (tile.type) {
+    case 'go':
+      return (
+        <div className="tile-icon go-icon">
+          <Flag {...iconProps} />
+        </div>
+      );
+    case 'jail':
+      return (
+        <div className="tile-icon jail-icon">
+          <Landmark {...iconProps} />
+        </div>
+      );
+    case 'casino':
+      return (
+        <div className="tile-icon casino-icon">
+          <BadgeDollarSign {...iconProps} />
+        </div>
+      );
+    case 'goToJail':
+      return (
+        <div className="tile-icon danger-icon">
+          <ShieldAlert {...iconProps} />
+        </div>
+      );
+    case 'chance':
+      return (
+        <div className="tile-icon chance-icon">
+          <CircleHelp {...iconProps} />
+        </div>
+      );
+    case 'community':
+      return (
+        <div className="tile-icon community-icon">
+          <UsersRound {...iconProps} />
+        </div>
+      );
+    case 'tax':
+      return (
+        <div className="tile-icon tax-icon">
+          <BadgePercent {...iconProps} />
+        </div>
+      );
+    default:
+      return null;
+  }
+};
+
+const BoardPawns = ({ game, displayPositions }: { game: GameState; displayPositions: Record<string, number> }) => {
+  const groups = game.players.reduce<Record<number, Player[]>>((acc, player) => {
+    if (player.isBankrupt) return acc;
+    const position = displayPositions[player.id] ?? player.position;
+    acc[position] = [...(acc[position] ?? []), player];
+    return acc;
+  }, {});
+
+  return (
+    <div className="board-pawns" aria-hidden>
+      {Object.entries(groups).flatMap(([tileId, players]) =>
+        players.map((player, index) => {
+          const point = pawnPoint(Number(tileId), index, players.length);
+          return (
+            <motion.div
+              className={`board-pawn ${player.jailTurns > 0 ? 'jailed' : ''}`}
+              layoutId={`token-${player.id}`}
+              data-player-id={player.id}
+              data-jail-turns={player.jailTurns > 0 ? player.jailTurns : undefined}
+              title={player.name}
+              key={player.id}
+              style={
+                {
+                  '--pawn-scale': players.length > 4 ? 0.82 : 1,
+                  left: `${point.x}%`,
+                  top: `${point.y}%`,
+                  zIndex: 40 + index,
+                } as CSSProperties
+              }
+              transition={{ type: 'spring', stiffness: 230, damping: 20 }}
+            >
+              <PlayerFigurine player={player} />
+            </motion.div>
+          );
+        }),
+      )}
+    </div>
+  );
+};
+
+const BuildingAnimationLayer = ({ events }: { events: BuildingAnimationEvent[] }) => (
+  <div className="building-animation-layer" aria-hidden>
+    {events.map((event) => {
+      const point = tileCenterPoint(event.tileId);
+      const isHotel = event.toHouses >= 5 || event.fromHouses >= 5;
+      const isHotelBuild = event.kind === 'build' && event.toHouses >= 5;
+      return (
+        <div
+          className={`building-event ${event.kind} ${isHotel ? 'hotel' : ''} ${isHotelBuild ? 'hotel-build' : ''}`}
+          key={event.id}
+          style={
+            {
+              left: `${point.x}%`,
+              top: `${point.y}%`,
+              '--building-color': event.color,
+            } as CSSProperties
+          }
+        >
+          <span className="building-shadow" />
+          <span className="building-wave" />
+          <span className="building-wave secondary" />
+          {isHotelBuild && <span className="hotel-flare" />}
+          <span className="building-model">
+            <span />
+            <span />
+            <span />
+          </span>
+          {event.kind === 'demolish' && (
+            <span className="building-debris">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+          )}
+        </div>
+      );
+    })}
+  </div>
+);
+
+const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
+  const { game } = useGameStore();
+  if (!game) return null;
+  return (
+    <section className="panel players-panel">
+      <p className="eyebrow">Гравці</p>
+      {game.players.map((player) => {
+        const isActive = player.id === game.currentPlayerId;
+        const isJailed = player.jailTurns > 0;
+        return (
+          <article
+            className={`player-row ${isActive ? 'active' : ''} ${isJailed ? 'jailed' : ''} ${player.isBankrupt ? 'bankrupt' : ''}`}
+            key={player.id}
+            style={{ '--player-color': player.isBankrupt ? '#64748b' : player.color } as CSSProperties}
+          >
+            <div className="player-avatar">
+              <PlayerFigurine player={player} size="large" />
+            </div>
+            <div className="player-meta">
+              <div className="player-name-line">
+                <h3>{player.name}</h3>
+                {isActive && !player.isBankrupt && game.phase !== 'finished' && (
+                  <span className="player-timer">{formatTimer(secondsLeft)}</span>
+                )}
+              </div>
+              <p>{player.isBankrupt ? 'Вибув' : isJailed ? `У вʼязниці: ${player.jailTurns} ход.` : `${player.properties.length} майна`}</p>
+            </div>
+            <strong className="player-money">{formatMoney(player.money)}</strong>
+          </article>
+        );
+      })}
+    </section>
+  );
+};
+
+const WorkspaceDrawer = ({
+  activeTab,
+  onTabChange,
+  onClose,
+  onStartTrade,
+}: {
+  activeTab: WorkspaceTab;
+  onTabChange: (tab: WorkspaceTab) => void;
+  onClose: () => void;
+  onStartTrade: (player: Player, partners: Player[]) => void;
+}) => {
+  const tabs: Array<{ id: WorkspaceTab; label: string; icon: typeof Layers }> = [
+    { id: 'cards', label: 'Мої картки', icon: Layers },
+    { id: 'trade', label: 'Угода', icon: ArrowLeftRight },
+  ];
+
+  return (
+    <div className="workspace-backdrop" role="presentation" onMouseDown={onClose}>
+      <motion.aside
+        className="workspace-drawer"
+        role="dialog"
+        aria-modal="true"
+        initial={{ opacity: 0, x: 28, scale: 0.98 }}
+        animate={{ opacity: 1, x: 0, scale: 1 }}
+        exit={{ opacity: 0, x: 28, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="drawer-head">
+          <div>
+            <p className="eyebrow">Керування</p>
+            <h2>{activeTab === 'cards' ? 'Мої картки' : 'Угода'}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Закрити">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="rail-tabs drawer-tabs" role="tablist" aria-label="Керування грою">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                className={`rail-tab ${activeTab === tab.id ? 'active' : ''}`}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                key={tab.id}
+                onClick={() => onTabChange(tab.id)}
+              >
+                <Icon size={16} />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <AnimatePresence mode="wait">
+          <motion.div
+            className="drawer-body"
+            key={activeTab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.16 }}
+          >
+            {activeTab === 'cards' ? <ManagePanel /> : <TradePanel onStartTrade={onStartTrade} />}
+          </motion.div>
+        </AnimatePresence>
+      </motion.aside>
+    </div>
+  );
+};
+
+const ManagePanel = () => {
+  const { game, localPlayerId, room, dispatch } = useGameStore();
+  const player = useMemo(() => (game ? panelPlayer(game, localPlayerId, Boolean(room)) : undefined), [game, localPlayerId, room]);
+  const ownedTiles = useMemo(() => {
+    if (!game || !player) return [];
+    return player.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
+  }, [game, player]);
+
+  if (!game || !player) return null;
+
+  const cities = ownedTiles.filter((tile): tile is CityTile => tile.type === 'city');
+  const banks = ownedTiles.filter((tile) => tile.type === 'bank');
+  const utilities = ownedTiles.filter((tile) => tile.type === 'utility');
+  const cityGroups = groupCities(cities);
+
+  return (
+    <div className="cards-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Мої картки</p>
+          <h3>{player.name}</h3>
+        </div>
+        <strong>{ownedTiles.length} майна</strong>
+      </div>
+
+      {player.jailCards > 0 && (
+        <div className="bonus-card">
+          <Landmark size={18} />
+          <div>
+            <strong>Картка виходу з вʼязниці</strong>
+            <span>x{player.jailCards}</span>
+          </div>
+        </div>
+      )}
+
+      {ownedTiles.length === 0 && <p className="muted empty-note">Купіть місто або банк, щоб тут зʼявились картки майна.</p>}
+
+      {cityGroups.map((group) => (
+        <section className="asset-group" style={{ '--group-color': group.color } as CSSProperties} key={group.name}>
+          <div className="asset-group-header">
+            <span className="group-dot" />
+            <div>
+              <h4>{group.name}</h4>
+              <p>{ownsAllCities(game, player.id, group.tiles) ? 'Монополія є' : 'Потрібна вся група для будівництва'}</p>
+            </div>
+          </div>
+          <div className="asset-grid">
+            {group.tiles.map((tile) => (
+              <CityAssetCard game={game} player={player} tile={tile} dispatch={dispatch} key={tile.id} />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {(banks.length > 0 || utilities.length > 0) && (
+        <section className="asset-group neutral">
+          <div className="asset-group-header">
+            <span className="group-dot" />
+            <div>
+              <h4>Банки та сервіси</h4>
+              <p>Оренда залежить від комплекту або кидка кубиків.</p>
+            </div>
+          </div>
+          <div className="asset-grid">
+            {[...banks, ...utilities].map((tile) => (
+              <SimpleAssetCard game={game} player={player} tile={tile} dispatch={dispatch} key={tile.id} />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+};
+
+const CityAssetCard = ({
+  game,
+  player,
+  tile,
+  dispatch,
+}: {
+  game: GameState;
+  player: Player;
+  tile: CityTile;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const property = game.properties[tile.id];
+  const rent = calculateRent(game, tile, game.dice[0] + game.dice[1]);
+  const houseCost = getEffectiveHouseCost(game, tile);
+  const buildInfo = getBuildInfo(game, player, tile);
+  const demolishInfo = getDemolishInfo(game, player, tile);
+  const mortgageInfo = getMortgageInfo(game, player, tile);
+
+  return (
+    <article className={`asset-card city-asset ${property.mortgaged ? 'mortgaged' : ''}`}>
+      <img src={tile.image} alt="" />
+      <span className="asset-band" style={{ background: tile.groupColor }} />
+      <div className="asset-card-body">
+        <div>
+          <h5>{tile.name}</h5>
+          <p>Оренда {formatMoney(rent)}</p>
+        </div>
+        <div className="asset-stats">
+          <span title="Поточна забудова">
+            {property.houses === 5 ? <Hotel size={14} /> : <Home size={14} />}
+            {property.houses === 5 ? 'Готель' : `${property.houses} буд.`}
+          </span>
+          <span>Будинок {formatMoney(houseCost)}</span>
+        </div>
+        <CityRentTable
+          tile={tile}
+          currentHouses={property.houses}
+          hasDistrict={ownsAllCities(game, player.id, getCityGroup(tile))}
+          compact
+        />
+        <div className={`build-status ${buildInfo.canBuild ? 'ready' : 'blocked'}`}>{buildInfo.reason}</div>
+        <div className="asset-actions city-asset-actions">
+          <button
+            className="primary compact"
+            disabled={!buildInfo.canBuild}
+            title={buildInfo.reason}
+            onClick={() => dispatch({ type: 'build', playerId: player.id, tileId: tile.id })}
+          >
+            <Hammer size={15} />
+            Будинок
+          </button>
+          <button
+            className="secondary compact"
+            disabled={!demolishInfo.canDemolish}
+            title={demolishInfo.reason}
+            onClick={() => dispatch({ type: 'sell_building', playerId: player.id, tileId: tile.id })}
+          >
+            <Trash2 size={15} />
+            Знести
+          </button>
+          <button
+            className="icon-button"
+            disabled={mortgageInfo.disabled}
+            title={mortgageInfo.reason}
+            onClick={() => dispatch({ type: property.mortgaged ? 'unmortgage' : 'mortgage', playerId: player.id, tileId: tile.id })}
+          >
+            <BadgeDollarSign size={16} />
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+};
+
+const SimpleAssetCard = ({
+  game,
+  player,
+  tile,
+  dispatch,
+}: {
+  game: GameState;
+  player: Player;
+  tile: Exclude<PropertyTile, CityTile>;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const property = game.properties[tile.id];
+  const rent = calculateRent(game, tile, game.dice[0] + game.dice[1]);
+  const mortgageInfo = getMortgageInfo(game, player, tile);
+
+  return (
+    <article className={`asset-card service-asset ${property.mortgaged ? 'mortgaged' : ''}`}>
+      <div className={`service-icon ${tile.type === 'bank' ? tile.bankKey : tile.utilityKey}`}>
+        {tile.type === 'bank' ? <Building2 size={20} /> : <Layers size={20} />}
+      </div>
+      <div className="asset-card-body">
+        <div>
+          <h5>{tile.name}</h5>
+          <p>Оренда {formatMoney(rent)}</p>
+        </div>
+        <div className="asset-stats">
+          <span>Застава {formatMoney(tile.mortgage)}</span>
+          <span>{property.mortgaged ? 'Заставлено' : 'Активне'}</span>
+        </div>
+        <div className="asset-actions">
+          <button
+            className="secondary compact"
+            disabled={mortgageInfo.disabled}
+            title={mortgageInfo.reason}
+            onClick={() => dispatch({ type: property.mortgaged ? 'unmortgage' : 'mortgage', playerId: player.id, tileId: tile.id })}
+          >
+            <BadgeDollarSign size={15} />
+            {property.mortgaged ? 'Викупити' : 'Застава'}
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+};
+
+const TradePanel = ({ onStartTrade }: { onStartTrade: (player: Player, partners: Player[]) => void }) => {
+  const { game, localPlayerId, room, dispatch } = useGameStore();
+  const player = useMemo(() => (game ? panelPlayer(game, localPlayerId, Boolean(room)) : undefined), [game, localPlayerId, room]);
+  const partners = useMemo(
+    () => (game && player ? game.players.filter((candidate) => candidate.id !== player.id && !candidate.isBankrupt) : []),
+    [game, player],
+  );
+
+  if (!game || !player) return null;
+
+  const isCurrentPlayer = player.id === game.currentPlayerId;
+  const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
+  const canCreateTrade = isCurrentPlayer && partners.length > 0 && !hasPendingTrade;
+  const pendingOffers = game.tradeOffers.filter(
+    (offer) =>
+      offer.status === 'pending' &&
+      (!room || offer.fromPlayerId === player.id || offer.toPlayerId === player.id),
+  );
+  const visibleServices = (game.rentServices ?? []).filter(
+    (service) => service.ownerId === player.id || service.beneficiaryId === player.id,
+  );
+  const createDisabledReason = !isCurrentPlayer
+    ? 'Створити угоду може тільки гравець, який зараз ходить.'
+    : hasPendingTrade
+      ? 'Спочатку адресат має прийняти або відхилити активну угоду.'
+      : partners.length === 0
+        ? 'Немає доступного адресата.'
+        : '';
+
+  return (
+    <div className="trade-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Угода</p>
+          <h3>Обмін майном</h3>
+        </div>
+        <button
+          className="primary compact"
+          disabled={!canCreateTrade}
+          title={createDisabledReason}
+          onClick={() => onStartTrade(player, partners)}
+        >
+          <ArrowLeftRight size={16} />
+          Створити
+        </button>
+      </div>
+
+      {pendingOffers.length === 0 && (
+        <p className="muted empty-note">{createDisabledReason || 'Активних пропозицій немає.'}</p>
+      )}
+      {pendingOffers.map((offer) => (
+        <TradeOfferCard
+          game={game}
+          player={player}
+          offer={offer}
+          canRespond={offer.toPlayerId === player.id || !room}
+          responsePlayerId={offer.toPlayerId === player.id ? player.id : offer.toPlayerId}
+          dispatch={dispatch}
+          key={offer.id}
+        />
+      ))}
+
+      {visibleServices.length > 0 && <RentServicesStatusPanel game={game} player={player} services={visibleServices} />}
+
+    </div>
+  );
+};
+
+const RentServicesStatusPanel = ({
+  game,
+  player,
+  services,
+}: {
+  game: GameState;
+  player: Player;
+  services: GameState['rentServices'];
+}) => (
+  <section className="rent-services-panel">
+    <div className="rent-services-head">
+      <BadgePercent size={16} />
+      <div>
+        <strong>Активні послуги</strong>
+        <span>Діють тільки протягом ходів отримувача.</span>
+      </div>
+    </div>
+    <div className="rent-services-list">
+      {services.map((service) => {
+        const owner = game.players.find((candidate) => candidate.id === service.ownerId);
+        const beneficiary = game.players.find((candidate) => candidate.id === service.beneficiaryId);
+        const tile = getTile(service.tileId);
+        const isBeneficiary = service.beneficiaryId === player.id;
+        return (
+          <article className={isBeneficiary ? 'receiving' : 'giving'} key={service.id}>
+            <strong>{tile.name}</strong>
+            <span>
+              {isBeneficiary
+                ? `${owner?.name ?? 'Власник'} дав вам ${formatRentServiceDiscount(service)}.`
+                : `Ви дали ${beneficiary?.name ?? 'гравцю'} ${formatRentServiceDiscount(service)}.`}
+            </span>
+            <small>
+              Залишилось {service.remainingTurns} {formatTurnWord(service.remainingTurns)} з {service.duration}{' '}
+              {formatTurnWord(service.duration)} отримувача. Перезарядка до ходу {service.cooldownUntilTurn}.
+            </small>
+          </article>
+        );
+      })}
+    </div>
+  </section>
+);
+
+const TradeOfferCard = ({
+  game,
+  player,
+  offer,
+  canRespond,
+  responsePlayerId,
+  dispatch,
+  className = '',
+}: {
+  game: GameState;
+  player: Player;
+  offer: TradeOffer;
+  canRespond: boolean;
+  responsePlayerId: string;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+  className?: string;
+}) => {
+  const from = game.players.find((candidate) => candidate.id === offer.fromPlayerId);
+  const to = game.players.find((candidate) => candidate.id === offer.toPlayerId);
+  const incoming = offer.toPlayerId === player.id;
+
+  return (
+    <article className={`pending-trade ${className}`}>
+      <div className="pending-trade-head">
+        <strong>
+          {incoming
+            ? `${from?.name ?? 'Гравець'} пропонує угоду`
+            : canRespond
+              ? `${to?.name ?? 'Адресат'} має відповісти`
+              : `Очікуємо ${to?.name ?? 'гравця'}`}
+        </strong>
+        <span>{offer.status}</span>
+      </div>
+      <div className="trade-summary-grid">
+        <div>
+          <small>{from?.name ?? 'Автор'} віддає</small>
+          <p>{formatTradeSide(offer.offerMoney, offer.offerProperties, offer.offerRentServices ?? [])}</p>
+        </div>
+        <div>
+          <small>{to?.name ?? 'Адресат'} віддає</small>
+          <p>{formatTradeSide(offer.requestMoney, offer.requestProperties, offer.requestRentServices ?? [])}</p>
+        </div>
+      </div>
+      {canRespond && (
+        <div className="split-actions">
+          <button className="primary compact" onClick={() => dispatch({ type: 'accept_trade', playerId: responsePlayerId, offerId: offer.id })}>
+            <Check size={16} />
+            Прийняти
+          </button>
+          <button className="secondary compact" onClick={() => dispatch({ type: 'decline_trade', playerId: responsePlayerId, offerId: offer.id })}>
+            <X size={16} />
+            Відхилити
+          </button>
+        </div>
+      )}
+    </article>
+  );
+};
+
+const BoardPurchasePrompt = ({
+  game,
+  tile,
+  currentPlayer,
+  dispatch,
+}: {
+  game: GameState;
+  tile: PropertyTile;
+  currentPlayer: Player;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const isCity = tile.type === 'city';
+  const purchasePrice = getEffectivePropertyPrice(game, tile);
+  const projectedRent = getProjectedRent(game, tile, currentPlayer.id);
+  const mortgageTiles = currentPlayer.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
+  const canUseMortgageHelp = currentPlayer.money < purchasePrice && mortgageTiles.length > 0;
+
+  return (
+    <motion.article
+      className="board-purchase-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">Нічийне майно</p>
+            <h2>{tile.name}</h2>
+          </div>
+          <div className="purchase-price">{formatMoney(purchasePrice)}</div>
+        </div>
+
+        <div className={`purchase-hero ${tile.type}`} style={isCity ? ({ '--group-color': tile.groupColor } as CSSProperties) : undefined}>
+          {isCity && <img src={tile.image} alt="" />}
+          {isCity && <span className="asset-band" />}
+          {!isCity && (
+            <div className={`purchase-icon ${tile.type === 'bank' ? tile.bankKey : tile.utilityKey}`}>
+              {tile.type === 'bank' ? <Building2 size={34} /> : <Layers size={34} />}
+            </div>
+          )}
+          <div className="purchase-hero-copy">
+            <span>{currentPlayer.name} зупинився на полі</span>
+            <strong>{tile.name}</strong>
+          </div>
+        </div>
+
+        <div className="purchase-summary">
+          <div>
+            <span>Ціна</span>
+            <strong>{formatMoney(purchasePrice)}</strong>
+          </div>
+          <div>
+            <span>Застава</span>
+            <strong>{formatMoney(tile.mortgage)}</strong>
+          </div>
+          <div>
+            <span>Баланс гравця</span>
+            <strong>{formatMoney(currentPlayer.money)}</strong>
+          </div>
+          <div>
+            <span>Для інших</span>
+            <strong>{formatMoney(projectedRent)}</strong>
+          </div>
+        </div>
+
+        {currentPlayer.money < purchasePrice && (
+          <p className="purchase-status bad">
+            Недостатньо грошей для прямої купівлі. Можна закласти майно або запустити аукціон.
+          </p>
+        )}
+
+        {canUseMortgageHelp && (
+          <section className="purchase-mortgage-panel">
+            <div className="purchase-mortgage-head">
+              <div>
+                <strong>Потрібно ще {formatMoney(Math.max(0, purchasePrice - currentPlayer.money))}</strong>
+                <span>Закладіть своє майно, не виходячи з вибору купівлі.</span>
+              </div>
+            </div>
+            <div className="purchase-mortgage-list">
+              {mortgageTiles.map((ownedTile) => {
+                const mortgageInfo = getMortgageInfo(game, currentPlayer, ownedTile);
+                const property = game.properties[ownedTile.id];
+                const disabled = mortgageInfo.disabled || property.mortgaged;
+                return (
+                  <button
+                    className="purchase-mortgage-item"
+                    type="button"
+                    disabled={disabled}
+                    title={property.mortgaged ? 'Майно вже заставлене.' : mortgageInfo.reason}
+                    onClick={() => dispatch({ type: 'mortgage', playerId: currentPlayer.id, tileId: ownedTile.id })}
+                    key={ownedTile.id}
+                  >
+                    <span>{ownedTile.name}</span>
+                    <strong>{formatMoney(ownedTile.mortgage)}</strong>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        <div className="purchase-actions">
+          <button
+            className="primary"
+            disabled={currentPlayer.money < purchasePrice}
+            onClick={() => dispatch({ type: 'buy', playerId: currentPlayer.id })}
+          >
+            <HandCoins size={18} />
+            Купити
+          </button>
+          <button
+            className="secondary"
+            onClick={() => dispatch({ type: 'decline_buy', playerId: currentPlayer.id })}
+          >
+            <BadgeDollarSign size={18} />
+            Аукціон
+          </button>
+        </div>
+    </motion.article>
+  );
+};
+
+const BoardTradeBuilder = ({
+  game,
+  player,
+  partners,
+  draft,
+  setDraft,
+  dispatch,
+}: {
+  game: GameState;
+  player: Player;
+  partners: Player[];
+  draft: TradeDraft;
+  setDraft: TradeDraftUpdater;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const target = partners.find((candidate) => candidate.id === draft.targetId);
+  const offerTiles = draft.offerProperties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
+  const requestTiles = draft.requestProperties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
+  const offerServiceTiles = player.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
+  const requestServiceTiles = target ? target.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile) : [];
+  const valueCheck = getTradeValueCheck(draft);
+  const hasContent =
+    draft.offerMoney > 0 ||
+    draft.requestMoney > 0 ||
+    draft.offerProperties.length > 0 ||
+    draft.requestProperties.length > 0 ||
+    draft.offerRentServices.length > 0 ||
+    draft.requestRentServices.length > 0;
+  const offerMoneyTooHigh = draft.offerMoney > player.money;
+  const requestMoneyTooHigh = target ? draft.requestMoney > target.money : false;
+  const canSubmit = Boolean(target) && hasContent && !offerMoneyTooHigh && !requestMoneyTooHigh && valueCheck.valid;
+
+  useEffect(() => {
+    if (partners.some((partner) => partner.id === draft.targetId)) return;
+    setDraft((current) => {
+      if (!current) return current;
+      return { ...current, targetId: partners[0]?.id ?? '', requestProperties: [], requestRentServices: [] };
+    });
+  }, [draft.targetId, partners, setDraft]);
+
+  const updateDraft = (patch: Partial<TradeDraft>) => {
+    setDraft((current) => (current ? { ...current, ...patch } : current));
+  };
+
+  const handleTargetChange = (targetId: string) => {
+    setDraft((current) => {
+      if (!current) return current;
+      return { ...current, targetId, requestProperties: [], requestRentServices: [] };
+    });
+  };
+
+  const closeDraft = () => setDraft(undefined);
+
+  const submitTrade = (event: FormEvent) => {
+    event.preventDefault();
+    if (!target || !canSubmit) return;
+    dispatch({
+      type: 'propose_trade',
+      offer: {
+        fromPlayerId: player.id,
+        toPlayerId: target.id,
+        offerMoney: draft.offerMoney,
+        requestMoney: draft.requestMoney,
+        offerProperties: draft.offerProperties,
+        requestProperties: draft.requestProperties,
+        offerRentServices: draft.offerRentServices,
+        requestRentServices: draft.requestRentServices,
+      },
+    });
+    closeDraft();
+  };
+
+  const statusMessage = !hasContent
+    ? 'Додайте гроші або майно'
+    : offerMoneyTooHigh
+      ? 'Недостатньо грошей у автора'
+      : requestMoneyTooHigh
+        ? 'Недостатньо грошей у адресата'
+        : valueCheck.valid
+          ? 'Пропозиція готова'
+          : valueCheck.message;
+
+  return (
+    <motion.form
+      className="board-trade-builder"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+      onSubmit={submitTrade}
+    >
+      <div className="board-trade-builder-head">
+        <div>
+          <p className="eyebrow">Нова угода</p>
+          <h3>Обмін</h3>
+        </div>
+        <label className="board-trade-target">
+          <span>З ким</span>
+          <select value={draft.targetId} onChange={(event) => handleTargetChange(event.target.value)}>
+            {partners.map((partner) => (
+              <option value={partner.id} key={partner.id}>
+                {partner.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="icon-button" type="button" onClick={closeDraft} aria-label="Закрити">
+          <X size={18} />
+        </button>
+      </div>
+
+      <div className="board-trade-sides">
+        <TradeDraftSide
+          title="Я віддаю"
+          money={draft.offerMoney}
+          moneyLimit={player.money}
+          tiles={offerTiles}
+          services={draft.offerRentServices}
+          serviceTiles={offerServiceTiles}
+          serviceOwnerId={player.id}
+          serviceBeneficiaryId={target?.id ?? ''}
+          game={game}
+          selectedTileIds={draft.offerProperties}
+          onMoneyChange={(offerMoney) => updateDraft({ offerMoney })}
+          onToggleTile={(tileId) => updateDraft({ offerProperties: toggleTile(draft.offerProperties, tileId) })}
+          onAddService={(service) => updateDraft({ offerRentServices: [...draft.offerRentServices, service] })}
+          onRemoveService={(index) =>
+            updateDraft({ offerRentServices: draft.offerRentServices.filter((_, candidateIndex) => candidateIndex !== index) })
+          }
+        />
+        <TradeDraftSide
+          title="Я прошу"
+          money={draft.requestMoney}
+          moneyLimit={target?.money ?? 0}
+          tiles={requestTiles}
+          services={draft.requestRentServices}
+          serviceTiles={requestServiceTiles}
+          serviceOwnerId={target?.id ?? ''}
+          serviceBeneficiaryId={player.id}
+          game={game}
+          selectedTileIds={draft.requestProperties}
+          onMoneyChange={(requestMoney) => updateDraft({ requestMoney })}
+          onToggleTile={(tileId) => updateDraft({ requestProperties: toggleTile(draft.requestProperties, tileId) })}
+          onAddService={(service) => updateDraft({ requestRentServices: [...draft.requestRentServices, service] })}
+          onRemoveService={(index) =>
+            updateDraft({ requestRentServices: draft.requestRentServices.filter((_, candidateIndex) => candidateIndex !== index) })
+          }
+        />
+      </div>
+
+      {(draft.offerProperties.length > 0 || draft.requestProperties.length > 0) && (
+        <div className={`trade-value-check ${valueCheck.valid ? 'ready' : 'blocked'}`}>
+          <span>
+            Баланс: {formatMoney(valueCheck.offerValue)} / {formatMoney(valueCheck.requestValue)}
+          </span>
+          <strong>{valueCheck.message}</strong>
+        </div>
+      )}
+
+      <div className="board-trade-footer">
+        <span className={canSubmit ? 'ready' : 'blocked'}>{statusMessage}</span>
+        <button className="primary compact" type="submit" disabled={!canSubmit}>
+          Надіслати
+        </button>
+      </div>
+    </motion.form>
+  );
+};
+
+const TradeDraftSide = ({
+  title,
+  money,
+  moneyLimit,
+  tiles,
+  services,
+  serviceTiles,
+  serviceOwnerId,
+  serviceBeneficiaryId,
+  game,
+  selectedTileIds,
+  onMoneyChange,
+  onToggleTile,
+  onAddService,
+  onRemoveService,
+}: {
+  title: string;
+  money: number;
+  moneyLimit: number;
+  tiles: PropertyTile[];
+  services: RentServiceOffer[];
+  serviceTiles: PropertyTile[];
+  serviceOwnerId: string;
+  serviceBeneficiaryId: string;
+  game: GameState;
+  selectedTileIds: number[];
+  onMoneyChange: (money: number) => void;
+  onToggleTile: (tileId: number) => void;
+  onAddService: (service: RentServiceOffer) => void;
+  onRemoveService: (index: number) => void;
+}) => {
+  const moneyTooHigh = money > moneyLimit;
+  const [serviceTileId, setServiceTileId] = useState(serviceTiles[0]?.id ?? 0);
+  const [serviceTurns, setServiceTurns] = useState(1);
+  const [discountPercent, setDiscountPercent] = useState<50 | 100>(50);
+  const selectedServiceTile = serviceTiles.find((tile) => tile.id === serviceTileId) ?? serviceTiles[0];
+  const serviceBlockedReason =
+    selectedServiceTile && selectedTileIds.includes(selectedServiceTile.id)
+      ? 'Не можна одночасно передати майно і послугу на це поле.'
+      : selectedServiceTile && serviceOwnerId && serviceBeneficiaryId
+        ? getRentServiceBlockedReason(game, serviceOwnerId, serviceBeneficiaryId, selectedServiceTile.id)
+      : 'Немає поля для послуги.';
+  const canAddService =
+    Boolean(selectedServiceTile && serviceOwnerId && serviceBeneficiaryId) &&
+    !serviceBlockedReason &&
+    !services.some((service) => service.tileId === selectedServiceTile?.id);
+
+  useEffect(() => {
+    if (serviceTiles.some((tile) => tile.id === serviceTileId)) return;
+    setServiceTileId(serviceTiles[0]?.id ?? 0);
+  }, [serviceTileId, serviceTiles]);
+
+  const addService = () => {
+    if (!selectedServiceTile || !canAddService) return;
+    onAddService({
+      tileId: selectedServiceTile.id,
+      turns: serviceTurns,
+      discountPercent,
+    });
+  };
+
+  return (
+    <section className="board-trade-side">
+      <div className="board-trade-side-head">
+        <h4>{title}</h4>
+        <label className={`trade-money-field ${moneyTooHigh ? 'invalid' : ''}`}>
+          <span>Гроші</span>
+          <div>
+            <MoneyInput value={money} onChange={onMoneyChange} />
+            <em>₴</em>
+          </div>
+        </label>
+      </div>
+      <div className="trade-selected-list">
+        {tiles.length === 0 && services.length === 0 && <span className="trade-empty-slot">Поки нічого</span>}
+        {tiles.map((tile) => (
+          <button className="trade-selected-chip" type="button" onClick={() => onToggleTile(tile.id)} key={tile.id}>
+            {tile.name}
+            <X size={13} />
+          </button>
+        ))}
+        {services.map((service, index) => (
+          <button className="trade-selected-chip service" type="button" onClick={() => onRemoveService(index)} key={`${service.tileId}-${index}`}>
+            {formatRentServiceOffer(service)}
+            <X size={13} />
+          </button>
+        ))}
+      </div>
+      {selectedTileIds.length > tiles.length && <p className="trade-side-note">Частину майна не можна додати до угоди.</p>}
+      <div className="trade-service-builder">
+        <span>Послуга</span>
+        <div>
+          <select value={selectedServiceTile?.id ?? 0} onChange={(event) => setServiceTileId(Number(event.target.value))}>
+            {serviceTiles.length === 0 ? (
+              <option value={0}>Немає полів</option>
+            ) : (
+              serviceTiles.map((tile) => (
+                <option value={tile.id} key={tile.id}>
+                  {tile.name}
+                </option>
+              ))
+            )}
+          </select>
+          <select value={discountPercent} onChange={(event) => setDiscountPercent(Number(event.target.value) as 50 | 100)}>
+            <option value={50}>50%</option>
+            <option value={100}>0₴</option>
+          </select>
+          <select value={serviceTurns} onChange={(event) => setServiceTurns(Number(event.target.value))}>
+            <option value={1}>1 хід</option>
+            <option value={2}>2 ходи</option>
+            <option value={3}>3 ходи</option>
+          </select>
+          <button className="ghost compact" type="button" disabled={!canAddService} title={serviceBlockedReason} onClick={addService}>
+            Додати
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+};
+
+const MoneyInput = ({ value, onChange }: { value: number; onChange: (money: number) => void }) => (
+  <input
+    inputMode="numeric"
+    pattern="[0-9]*"
+    placeholder="0"
+    type="text"
+    value={value === 0 ? '' : String(value)}
+    onChange={(event) => {
+      const digits = event.currentTarget.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+      onChange(digits ? Number(digits) : 0);
+    }}
+  />
+);
+
+const CityRentTable = ({
+  tile,
+  currentHouses,
+  hasDistrict = false,
+  compact = false,
+}: {
+  tile: CityTile;
+  currentHouses?: number;
+  hasDistrict?: boolean;
+  compact?: boolean;
+}) => {
+  const activeKey =
+    currentHouses === undefined
+      ? undefined
+      : currentHouses === 0
+        ? hasDistrict
+          ? 'district'
+          : 'base'
+        : currentHouses === 5
+          ? 'hotel'
+          : `house-${currentHouses}`;
+  const rows = getCityRentRows(tile);
+
+  return (
+    <section className={`city-rent-table ${compact ? 'compact' : ''}`} aria-label={`Таблиця оренди ${tile.name}`}>
+      <div className="city-rent-table-head">
+        <h4>Оренда</h4>
+        <span>Район: {formatMoney(tile.rents[0] * 2)}</span>
+      </div>
+      <div className="city-rent-grid">
+        {rows.map((row) => (
+          <div className={`city-rent-item ${row.key === activeKey ? 'active' : ''}`} key={row.key}>
+            <span>{row.label}</span>
+            <strong>{formatMoney(row.amount)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+};
+
+const getCityRentRows = (tile: CityTile) => [
+  { key: 'base', label: 'Без району', amount: tile.rents[0] },
+  { key: 'district', label: 'Район', amount: tile.rents[0] * 2 },
+  { key: 'house-1', label: '1 буд.', amount: tile.rents[1] },
+  { key: 'house-2', label: '2 буд.', amount: tile.rents[2] },
+  { key: 'house-3', label: '3 буд.', amount: tile.rents[3] },
+  { key: 'house-4', label: '4 буд.', amount: tile.rents[4] },
+  { key: 'hotel', label: 'Готель', amount: tile.rents[5] },
+];
+
+const CityModal = ({
+  game,
+  tileId,
+  localPlayerId,
+  preferLocalPlayer,
+  onClose,
+  dispatch,
+}: {
+  game: GameState;
+  tileId: number;
+  localPlayerId: string | undefined;
+  preferLocalPlayer: boolean;
+  onClose: () => void;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const tile = getTile(tileId);
+  if (!isPropertyTile(tile)) return null;
+
+  const property = game.properties[tile.id];
+  const manager = panelPlayer(game, localPlayerId, preferLocalPlayer);
+  const owner = property.ownerId ? game.players.find((player) => player.id === property.ownerId) : undefined;
+  const canManage = owner?.id === manager.id;
+  const rent = calculateRent(game, tile, game.dice[0] + game.dice[1]);
+  if (tile.type !== 'city') {
+    return (
+      <ServicePropertyModal
+        game={game}
+        tile={tile}
+        manager={manager}
+        owner={owner}
+        canManage={canManage}
+        rent={rent}
+        onClose={onClose}
+        dispatch={dispatch}
+      />
+    );
+  }
+
+  const group = getCityGroup(tile);
+  const buildInfo = getBuildInfo(game, manager, tile);
+  const demolishInfo = getDemolishInfo(game, manager, tile);
+  const mortgageInfo = getMortgageInfo(game, manager, tile);
+  const purchasePrice = getEffectivePropertyPrice(game, tile);
+  const houseCost = getEffectiveHouseCost(game, tile);
+  const unmortgageCost = getEffectiveUnmortgageCost(game, tile);
+  const mortgageTurnsLeft = getMortgageTurnsLeft(game, property);
+  const missingCities = group.filter((groupTile) => game.properties[groupTile.id]?.ownerId !== manager.id);
+  const ownerHasDistrict = owner ? ownsAllCities(game, owner.id, group) : false;
+
+  const handleMortgage = () => {
+    if (!canManage || mortgageInfo.disabled) return;
+    dispatch({ type: property.mortgaged ? 'unmortgage' : 'mortgage', playerId: manager.id, tileId: tile.id });
+  };
+
+  const handleBuild = () => {
+    if (!canManage || !buildInfo.canBuild) return;
+    dispatch({ type: 'build', playerId: manager.id, tileId: tile.id });
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <motion.article
+        className="city-modal"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 18, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 240, damping: 22 }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">Місто</p>
+            <h2>{tile.name}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Закрити">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="city-modal-hero" style={{ '--group-color': tile.groupColor } as CSSProperties}>
+          <img src={tile.image} alt="" />
+          <span className="asset-band" />
+          <div>
+            <p>{owner ? `Власник: ${owner.name}` : 'Місто нічийне'}</p>
+            <strong>{formatMoney(purchasePrice)}</strong>
+          </div>
+        </div>
+
+        <div className={`city-owner-card ${owner ? 'owned' : 'empty'}`} style={{ '--owner-color': owner?.color ?? '#64748b' } as CSSProperties}>
+          {owner ? <PlayerFigurine player={owner} /> : <Landmark size={24} />}
+          <div>
+            <span>Власник</span>
+            <strong>{owner ? owner.name : 'Немає власника'}</strong>
+          </div>
+        </div>
+
+        <div className="city-modal-grid">
+          <section className="city-modal-section">
+            <h3>Фінанси</h3>
+            <dl className="city-stats">
+              <div>
+                <dt>Поточна оренда</dt>
+                <dd>{formatMoney(rent)}</dd>
+              </div>
+              <div>
+                <dt>Застава</dt>
+                <dd>{formatMoney(tile.mortgage)}</dd>
+              </div>
+              <div>
+                <dt>Викуп</dt>
+                <dd>{formatMoney(unmortgageCost)}</dd>
+              </div>
+              <div>
+                <dt>Будинок</dt>
+                <dd>{formatMoney(houseCost)}</dd>
+              </div>
+            </dl>
+
+            <CityRentTable tile={tile} currentHouses={property.houses} hasDistrict={ownerHasDistrict} />
+
+            {property.mortgaged && (
+              <div className="mortgage-deadline">
+                <strong>Заставлено</strong>
+                <span>
+                  {mortgageTurnsLeft > 0
+                    ? `Залишилось ${mortgageTurnsLeft} ${formatTurnWord(mortgageTurnsLeft)} власника до повернення банку.`
+                    : 'Після наступної перевірки місто повернеться банку.'}
+                </span>
+              </div>
+            )}
+
+            {canManage ? (
+              <button className="secondary full" disabled={mortgageInfo.disabled} title={mortgageInfo.reason} onClick={handleMortgage}>
+                <BadgeDollarSign size={16} />
+                {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(tile.mortgage)}`}
+              </button>
+            ) : (
+              <p className="muted">
+                {owner ? 'Керувати заставою може тільки власник міста.' : 'Купівля доступна, коли гравець зупиняється на цьому місті.'}
+              </p>
+            )}
+          </section>
+
+          <section className="city-modal-section">
+            <h3>Будівництво</h3>
+            <p className={`build-status ${buildInfo.canBuild && canManage ? 'ready' : 'blocked'}`}>
+              {canManage ? buildInfo.reason : 'Будувати може тільки власник повної кольорової групи.'}
+            </p>
+            {missingCities.length > 0 ? (
+              <p className="rule-note">
+                Для будівництва {manager.name} ще потрібно: {missingCities.map((groupTile) => groupTile.name).join(', ')}.
+              </p>
+            ) : (
+              <p className="rule-note">Уся група зібрана. Будинки треба піднімати рівномірно по всіх містах групи.</p>
+            )}
+            <div className="city-group-list">
+              {group.map((groupTile) => {
+                const groupProperty = game.properties[groupTile.id];
+                const groupOwner = groupProperty.ownerId
+                  ? game.players.find((player) => player.id === groupProperty.ownerId)
+                  : undefined;
+                const isMissing = groupProperty.ownerId !== manager.id;
+                return (
+                  <article
+                    className={`city-group-item ${groupTile.id === tile.id ? 'current' : ''} ${isMissing ? 'missing' : ''}`}
+                    key={groupTile.id}
+                  >
+                    <span className="group-stripe" style={{ background: groupTile.groupColor }} />
+                    <div>
+                      <strong>{groupTile.name}</strong>
+                      <small>{groupOwner ? groupOwner.name : 'Нічийне'}</small>
+                    </div>
+                    <em>{groupProperty.houses === 5 ? 'Готель' : `${groupProperty.houses} буд.`}</em>
+                  </article>
+                );
+              })}
+            </div>
+            <div className="building-actions">
+              <button className="primary full" disabled={!canManage || !buildInfo.canBuild} title={buildInfo.reason} onClick={handleBuild}>
+                <Hammer size={16} />
+                Побудувати рівень
+              </button>
+              <button
+                className="secondary full"
+                disabled={!canManage || !demolishInfo.canDemolish}
+                title={demolishInfo.reason}
+                onClick={() => dispatch({ type: 'sell_building', playerId: manager.id, tileId: tile.id })}
+              >
+                <Trash2 size={16} />
+                Знести рівень
+              </button>
+            </div>
+          </section>
+        </div>
+      </motion.article>
+    </div>
+  );
+};
+
+const ServicePropertyModal = ({
+  game,
+  tile,
+  manager,
+  owner,
+  canManage,
+  rent,
+  onClose,
+  dispatch,
+}: {
+  game: GameState;
+  tile: Exclude<PropertyTile, CityTile>;
+  manager: Player;
+  owner: Player | undefined;
+  canManage: boolean;
+  rent: number;
+  onClose: () => void;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const property = game.properties[tile.id];
+  const mortgageInfo = getMortgageInfo(game, manager, tile);
+  const purchasePrice = getEffectivePropertyPrice(game, tile);
+  const unmortgageCost = getEffectiveUnmortgageCost(game, tile);
+  const ownedSameTypeCount = owner
+    ? owner.properties.map((tileId) => getTile(tileId)).filter((ownedTile) => ownedTile.type === tile.type).length
+    : 0;
+  const serviceLabel = tile.type === 'bank' ? 'Банк' : 'Сервіс';
+
+  const handleMortgage = () => {
+    if (!canManage || mortgageInfo.disabled) return;
+    dispatch({ type: property.mortgaged ? 'unmortgage' : 'mortgage', playerId: manager.id, tileId: tile.id });
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <motion.article
+        className="city-modal service-modal"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 18, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 240, damping: 22 }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <div>
+            <p className="eyebrow">{serviceLabel}</p>
+            <h2>{tile.name}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Закрити">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className={`service-modal-hero ${tile.type === 'bank' ? tile.bankKey : tile.utilityKey}`}>
+          <div className={`purchase-icon ${tile.type === 'bank' ? tile.bankKey : tile.utilityKey}`}>
+            {tile.type === 'bank' ? <Building2 size={34} /> : <Layers size={34} />}
+          </div>
+          <div>
+            <p>{owner ? `Власник: ${owner.name}` : `${serviceLabel} нічийний`}</p>
+            <strong>{formatMoney(purchasePrice)}</strong>
+          </div>
+        </div>
+
+        <div className={`city-owner-card ${owner ? 'owned' : 'empty'}`} style={{ '--owner-color': owner?.color ?? '#64748b' } as CSSProperties}>
+          {owner ? <PlayerFigurine player={owner} /> : <Building2 size={24} />}
+          <div>
+            <span>Власник</span>
+            <strong>{owner ? owner.name : 'Немає власника'}</strong>
+          </div>
+        </div>
+
+        <section className="city-modal-section">
+          <h3>Оренда</h3>
+          <dl className="city-stats">
+            <div>
+              <dt>Для інших</dt>
+              <dd>{property.mortgaged ? '0₴' : formatMoney(rent)}</dd>
+            </div>
+            <div>
+              <dt>{tile.type === 'bank' ? 'Банків у власника' : 'Сервісів у власника'}</dt>
+              <dd>{owner ? ownedSameTypeCount : 0}</dd>
+            </div>
+            <div>
+              <dt>Застава</dt>
+              <dd>{formatMoney(tile.mortgage)}</dd>
+            </div>
+            <div>
+              <dt>Викуп</dt>
+              <dd>{formatMoney(unmortgageCost)}</dd>
+            </div>
+          </dl>
+
+          {tile.type === 'bank' ? (
+            <div className="bank-rent-table">
+              {[money(25), money(50), money(100), money(200)].map((amount, index) => (
+                <span className={ownedSameTypeCount === index + 1 ? 'active' : ''} key={amount}>
+                  {index + 1} банк: {formatMoney(amount)}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="rule-note">
+              Оренда сервісу залежить від кидка: один сервіс бере x4 від суми кубиків, два сервіси - x10.
+            </p>
+          )}
+
+          {canManage ? (
+            <button className="secondary full" disabled={mortgageInfo.disabled} title={mortgageInfo.reason} onClick={handleMortgage}>
+              <BadgeDollarSign size={16} />
+              {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(tile.mortgage)}`}
+            </button>
+          ) : (
+            <p className="muted">{owner ? 'Керувати заставою може тільки власник.' : 'Купівля доступна, коли гравець зупиняється на цьому полі.'}</p>
+          )}
+        </section>
+      </motion.article>
+    </div>
+  );
+};
+
+const panelPlayer = (game: GameState, localPlayerId: string | undefined, preferLocalPlayer: boolean): Player =>
+  (preferLocalPlayer ? game.players.find((player) => player.id === localPlayerId) : undefined) ??
+  game.players.find((player) => player.id === game.currentPlayerId) ??
+  game.players[0];
+
+const groupCities = (cities: CityTile[]) => {
+  const groups = new Map<string, CityTile[]>();
+  cities.forEach((tile) => groups.set(tile.group, [...(groups.get(tile.group) ?? []), tile]));
+  return Array.from(groups.entries()).map(([name, tiles]) => ({ name, color: tiles[0].groupColor, tiles }));
+};
+
+const ownsAllCities = (game: GameState, playerId: string, tiles: CityTile[]) =>
+  tiles.length > 0 && getCityGroup(tiles[0]).every((tile) => game.properties[tile.id]?.ownerId === playerId);
+
+const getCityGroup = (tile: CityTile): CityTile[] =>
+  boardTiles.filter((candidate): candidate is CityTile => candidate.type === 'city' && candidate.group === tile.group);
+
+const getBuildInfo = (game: GameState, player: Player, tile: CityTile) => {
+  const property = game.properties[tile.id];
+  const group = getCityGroup(tile);
+  const houseCost = getEffectiveHouseCost(game, tile);
+  if (game.currentPlayerId !== player.id) {
+    return { canBuild: false, reason: 'Будувати можна лише під час власного ходу.' };
+  }
+  if (game.phase !== 'rolling') {
+    return { canBuild: false, reason: 'Будувати можна лише до кидка кубиків.' };
+  }
+  if (!group.every((groupTile) => game.properties[groupTile.id]?.ownerId === player.id)) {
+    return { canBuild: false, reason: 'Потрібна вся кольорова група.' };
+  }
+  if (property.mortgaged) return { canBuild: false, reason: 'Спочатку викупіть заставу.' };
+  if (game.builtThisRoll?.playerId === player.id && game.builtThisRoll.diceRollId === game.diceRollId) {
+    return { canBuild: false, reason: 'За цей кидок уже побудовано один будинок.' };
+  }
+  if (property.houses >= 5) return { canBuild: false, reason: 'Максимум: готель уже збудовано.' };
+  if (player.money < houseCost) return { canBuild: false, reason: `Недостатньо грошей: треба ${formatMoney(houseCost)}.` };
+
+  const minHouses = Math.min(...group.map((groupTile) => game.properties[groupTile.id].houses));
+  if (property.houses > minHouses) return { canBuild: false, reason: 'Треба будувати рівномірно по групі.' };
+
+  return { canBuild: true, reason: 'Можна будувати.' };
+};
+
+const canUseEmergencyMoneyManagement = (game: GameState, playerId: string): boolean =>
+  game.phase === 'rolling' ||
+  game.phase === 'awaitingPurchase' ||
+  (game.phase === 'rent' && game.pendingRent?.payerId === playerId) ||
+  (game.phase === 'payment' && game.pendingPayment?.payerId === playerId);
+
+const getDemolishInfo = (game: GameState, player: Player, tile: CityTile) => {
+  const property = game.properties[tile.id];
+  if (property.ownerId !== player.id) return { canDemolish: false, reason: 'Зносити може тільки власник.' };
+  if (game.currentPlayerId !== player.id) {
+    return { canDemolish: false, reason: 'Зносити можна лише під час власного ходу.' };
+  }
+  if (!canUseEmergencyMoneyManagement(game, player.id)) {
+    return { canDemolish: false, reason: 'Зносити можна до кидка або під час платежу/купівлі.' };
+  }
+  if (property.mortgaged) return { canDemolish: false, reason: 'Заставлене місто не можна змінювати.' };
+  if (property.houses <= 0) return { canDemolish: false, reason: 'У місті немає будівель.' };
+
+  const group = getCityGroup(tile);
+  const nextCounts = group.map((groupTile) =>
+    groupTile.id === tile.id ? property.houses - 1 : game.properties[groupTile.id].houses,
+  );
+  if (Math.max(...nextCounts) - Math.min(...nextCounts) > 1) {
+    return { canDemolish: false, reason: 'Зносити треба рівномірно по групі.' };
+  }
+
+  return { canDemolish: true, reason: `Знести і повернути ${formatMoney(Math.floor(tile.houseCost / 2))}.` };
+};
+
+const getMortgageInfo = (game: GameState, player: Player, tile: PropertyTile) => {
+  const property = game.properties[tile.id];
+  if (game.currentPlayerId !== player.id) return { disabled: true, reason: 'Застава доступна лише під час власного ходу.' };
+  if (!canUseEmergencyMoneyManagement(game, player.id)) {
+    return { disabled: true, reason: 'Застава доступна до кидка або під час платежу/купівлі.' };
+  }
+  if (property.houses > 0) return { disabled: true, reason: 'Спочатку продайте будинки.' };
+  if (!property.mortgaged) return { disabled: false, reason: `Отримати ${formatMoney(tile.mortgage)} застави.` };
+  if (game.phase !== 'rolling') {
+    return { disabled: true, reason: 'Викуп застави доступний тільки до кидка кубиків.' };
+  }
+
+  const cost = getEffectiveUnmortgageCost(game, tile);
+  if (player.money < cost) return { disabled: true, reason: `Для викупу треба ${formatMoney(cost)}.` };
+  return { disabled: false, reason: `Викупити за ${formatMoney(cost)}.` };
+};
+
+const formatTradeSide = (money: number, tileIds: number[], services: RentServiceOffer[] = []) => {
+  const parts = [
+    ...(money > 0 ? [formatMoney(money)] : []),
+    ...tileIds.map((tileId) => getTile(tileId).name),
+    ...services.map((service) => formatRentServiceOffer(service)),
+  ];
+  return parts.length > 0 ? parts.join(', ') : 'Нічого';
+};
+
+const formatRentServiceOffer = (service: RentServiceOffer) =>
+  `${getTile(service.tileId).name}: ${formatRentServiceDiscount(service)} на ${service.turns} ${formatTurnWord(
+    service.turns,
+  )} отримувача; перезарядка ${service.turns * 2} ${formatTurnWord(service.turns * 2)}.`;
+
+const formatRentServiceDiscount = (service: RentServiceOffer) =>
+  service.discountPercent === 100 ? 'без оренди' : '50% оренди';
+
+const getTradeValueCheck = (draft: TradeDraft) => {
+  const offerValue = draft.offerMoney + draft.offerProperties.reduce((sum, tileId) => sum + getPropertyPrice(tileId), 0);
+  const requestValue = draft.requestMoney + draft.requestProperties.reduce((sum, tileId) => sum + getPropertyPrice(tileId), 0);
+  const hasProperties = draft.offerProperties.length > 0 || draft.requestProperties.length > 0;
+  if (!hasProperties) return { valid: true, offerValue, requestValue, message: 'Послуги оцінюються довільно' };
+  if (requestValue <= 0) {
+    return { valid: false, offerValue, requestValue, message: 'Майно має мати цінність з обох сторін' };
+  }
+  const maximum = Math.floor(requestValue * 3);
+  if (offerValue > maximum) {
+    return { valid: false, offerValue, requestValue, message: `Максимум ${formatMoney(maximum)}` };
+  }
+  return { valid: true, offerValue, requestValue, message: 'Баланс угоди в межах правил' };
+};
+
+const getPropertyPrice = (tileId: number) => {
+  const tile = getTile(tileId);
+  return isPropertyTile(tile) ? tile.price : 0;
+};
+
+const getRentServiceBlockedReason = (
+  game: GameState,
+  ownerId: string,
+  beneficiaryId: string,
+  tileId: number,
+): string => {
+  const property = game.properties[tileId];
+  if (property?.ownerId !== ownerId) return 'Послугу може дати тільки власник поля.';
+  const active = (game.rentServices ?? []).some(
+    (service) =>
+      service.ownerId === ownerId &&
+      service.beneficiaryId === beneficiaryId &&
+      service.tileId === tileId &&
+      service.remainingTurns > 0,
+  );
+  if (active) return 'Послуга на це поле вже активна.';
+  const cooldownUntil = (game.rentServiceCooldowns ?? {})[`${ownerId}:${beneficiaryId}:${tileId}`] ?? 0;
+  if (cooldownUntil > game.turn) return `Перезарядка до ходу ${cooldownUntil}.`;
+  return '';
+};
+
+const toggleTile = (tileIds: number[], tileId: number) =>
+  tileIds.includes(tileId) ? tileIds.filter((candidate) => candidate !== tileId) : [...tileIds, tileId];
+
+const getTradeTileState = (
+  game: GameState,
+  tileId: number,
+  playerId: string,
+  draft: TradeDraft | undefined,
+): TradeTileState | undefined => {
+  if (!draft) return undefined;
+  const tile = getTile(tileId);
+  if (!isPropertyTile(tile)) return undefined;
+  const property = game.properties[tileId];
+  if (!property.ownerId || property.houses > 0) return 'disabled';
+  if (property.ownerId === playerId) {
+    return draft.offerProperties.includes(tileId) ? 'offer-selected' : 'offer';
+  }
+  if (property.ownerId === draft.targetId) {
+    return draft.requestProperties.includes(tileId) ? 'request-selected' : 'request';
+  }
+  return 'disabled';
+};
+
+const getActiveTradeTileState = (tileId: number, offer: TradeOffer | undefined): TradeTileState | undefined => {
+  if (!offer) return undefined;
+  if (offer.offerProperties.includes(tileId)) return 'offer-selected';
+  if (offer.requestProperties.includes(tileId)) return 'request-selected';
+  return undefined;
+};
+
+const toggleTradeDraftTile = (game: GameState, playerId: string, draft: TradeDraft, tileId: number): TradeDraft => {
+  const state = getTradeTileState(game, tileId, playerId, draft);
+  if (state === 'offer' || state === 'offer-selected') {
+    return { ...draft, offerProperties: toggleTile(draft.offerProperties, tileId) };
+  }
+  if (state === 'request' || state === 'request-selected') {
+    return { ...draft, requestProperties: toggleTile(draft.requestProperties, tileId) };
+  }
+  return draft;
+};
+
+const getProjectedRent = (game: GameState, tile: PropertyTile, playerId: string) => {
+  const next: GameState = {
+    ...game,
+    properties: {
+      ...game.properties,
+      [tile.id]: {
+        ...game.properties[tile.id],
+        ownerId: playerId,
+        mortgaged: false,
+        mortgagedAtTurn: undefined,
+        mortgageTurnsLeft: undefined,
+      },
+    },
+    players: game.players.map((player) =>
+      player.id === playerId ? { ...player, properties: Array.from(new Set([...player.properties, tile.id])) } : player,
+    ),
+  };
+
+  return calculateRent(next, tile, game.dice[0] + game.dice[1]);
+};
+
+const formatMoney = (amount: number) => `${amount}₴`;
+
+const formatTurnWord = (turns: number) => (turns === 1 ? 'хід' : turns >= 2 && turns <= 4 ? 'ходи' : 'ходів');
+
+const formatRoundWord = (rounds: number) =>
+  rounds === 1 ? 'раунд' : rounds >= 2 && rounds <= 4 ? 'раунди' : 'раундів';
+
+const getMortgageTurnsLeft = (game: GameState, property: { mortgagedAtTurn?: number; mortgageTurnsLeft?: number }) => {
+  if (property.mortgageTurnsLeft !== undefined) return property.mortgageTurnsLeft;
+  const elapsed = property.mortgagedAtTurn === undefined ? 0 : game.turn - property.mortgagedAtTurn;
+  return Math.max(0, MORTGAGE_GRACE_TURNS - elapsed);
+};
+
+const useBuildingAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<BuildingAnimationEvent[]>([]);
+  const previousSnapshotRef = useRef(createBuildingSnapshot(game));
+  const timersRef = useRef<number[]>([]);
+  const buildingKey = boardTiles
+    .filter((tile): tile is CityTile => tile.type === 'city')
+    .map((tile) => {
+      const property = game.properties[tile.id];
+      return `${tile.id}:${property.houses}:${property.ownerId ?? ''}`;
+    })
+    .join('|');
+
+  useEffect(() => {
+    previousSnapshotRef.current = createBuildingSnapshot(game);
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const previousSnapshot = previousSnapshotRef.current;
+    const nextSnapshot = createBuildingSnapshot(game);
+    const nextEvents: BuildingAnimationEvent[] = [];
+
+    Object.entries(nextSnapshot).forEach(([tileIdText, next]) => {
+      const tileId = Number(tileIdText);
+      const previous = previousSnapshot[tileId] ?? { houses: 0, ownerId: next.ownerId };
+      if (previous.houses === next.houses) return;
+
+      const ownerId = next.ownerId ?? previous.ownerId;
+      const owner = ownerId ? game.players.find((player) => player.id === ownerId) : undefined;
+      nextEvents.push({
+        id: crypto.randomUUID(),
+        tileId,
+        kind: next.houses > previous.houses ? 'build' : 'demolish',
+        fromHouses: previous.houses,
+        toHouses: next.houses,
+        color: owner?.color ?? '#f8c24e',
+      });
+    });
+
+    previousSnapshotRef.current = nextSnapshot;
+    if (nextEvents.length === 0) return;
+
+    setEvents((current) => [...current, ...nextEvents].slice(-8));
+    nextEvents.forEach((event) => {
+      const timer = window.setTimeout(() => {
+        setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+      }, BUILDING_ANIMATION_MS);
+      timersRef.current.push(timer);
+    });
+  }, [buildingKey, game]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
+const createBuildingSnapshot = (game: GameState): Record<number, { houses: number; ownerId?: string }> =>
+  Object.fromEntries(
+    boardTiles
+      .filter((tile): tile is CityTile => tile.type === 'city')
+      .map((tile) => [tile.id, { houses: game.properties[tile.id].houses, ownerId: game.properties[tile.id].ownerId }]),
+  );
+
+type SoundSnapshot = {
+  auctionBidCount: number;
+  cityEventKey: string;
+  casinoSpinKey: string;
+  currentPlayerId: string;
+  diceRollId: number;
+  gameId: string;
+  logId: string;
+  pendingCardKey: string;
+  pendingTradeCount: number;
+  phase: GameState['phase'];
+  resolvedTradeCount: number;
+};
+
+const useGameSounds = (game: GameState, enabled: boolean) => {
+  const audioRef = useRef<AudioContext | undefined>(undefined);
+  const snapshotRef = useRef<SoundSnapshot | undefined>(undefined);
+  const buildingSnapshotRef = useRef(createSoundBuildingSnapshot(game));
+
+  const getAudioContext = () => {
+    if (typeof window === 'undefined') return undefined;
+    const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+    const AudioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
+    if (!AudioContextConstructor) return undefined;
+    audioRef.current ??= new AudioContextConstructor();
+    return audioRef.current;
+  };
+
+  useEffect(() => {
+    if (!enabled) return;
+    const unlockAudio = () => {
+      const context = getAudioContext();
+      if (context?.state === 'suspended') void context.resume();
+    };
+
+    window.addEventListener('pointerdown', unlockAudio, true);
+    window.addEventListener('keydown', unlockAudio, true);
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio, true);
+      window.removeEventListener('keydown', unlockAudio, true);
+    };
+  }, [enabled]);
+
+  useEffect(
+    () => () => {
+      void audioRef.current?.close();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const nextSnapshot = createGameSoundSnapshot(game);
+    const previousSnapshot = snapshotRef.current;
+    const nextBuildings = createSoundBuildingSnapshot(game);
+    const previousBuildings = buildingSnapshotRef.current;
+    snapshotRef.current = nextSnapshot;
+    buildingSnapshotRef.current = nextBuildings;
+
+    if (!previousSnapshot || previousSnapshot.gameId !== game.id || !enabled) return;
+
+    const sounds: GameSoundKind[] = [];
+    if (nextSnapshot.diceRollId > previousSnapshot.diceRollId) sounds.push('dice');
+    if (nextSnapshot.currentPlayerId !== previousSnapshot.currentPlayerId) sounds.push('turn');
+    if (nextSnapshot.pendingCardKey && nextSnapshot.pendingCardKey !== previousSnapshot.pendingCardKey) sounds.push('card');
+    if (nextSnapshot.cityEventKey && nextSnapshot.cityEventKey !== previousSnapshot.cityEventKey) sounds.push('card');
+    if (nextSnapshot.casinoSpinKey && nextSnapshot.casinoSpinKey !== previousSnapshot.casinoSpinKey) sounds.push('casino');
+    if (nextSnapshot.auctionBidCount > previousSnapshot.auctionBidCount) sounds.push('bid');
+    if (nextSnapshot.pendingTradeCount > previousSnapshot.pendingTradeCount) sounds.push('trade');
+    if (nextSnapshot.resolvedTradeCount > previousSnapshot.resolvedTradeCount) sounds.push('trade');
+
+    if (nextSnapshot.phase !== previousSnapshot.phase) {
+      if (nextSnapshot.phase === 'auction') sounds.push('auction');
+      if (nextSnapshot.phase === 'awaitingPurchase') sounds.push('purchase');
+      if (nextSnapshot.phase === 'rent') sounds.push('rent');
+      if (nextSnapshot.phase === 'payment') sounds.push('loss');
+      if (nextSnapshot.phase === 'awaitingJailDecision') sounds.push('jail');
+      if (nextSnapshot.phase === 'casino') sounds.push('casino');
+    }
+
+    Object.entries(nextBuildings).forEach(([tileId, houses]) => {
+      const previousHouses = previousBuildings[Number(tileId)] ?? houses;
+      if (houses > previousHouses) sounds.push(houses >= 5 ? 'hotel' : 'build');
+      if (houses < previousHouses) sounds.push('demolish');
+    });
+
+    const newestLog = game.log[0];
+    if (newestLog && newestLog.id !== previousSnapshot.logId) {
+      const text = newestLog.text.toLowerCase();
+      if (text.includes('виграє') || text.includes('виплата')) sounds.push('win');
+      else if (text.includes('купує')) sounds.push('purchase');
+      else if (text.includes('отримує')) sounds.push('cash');
+      else if (text.includes('сплачує') || text.includes('втрачає') || text.includes('програє')) sounds.push('loss');
+    }
+
+    const context = getAudioContext();
+    if (!context || context.state !== 'running') return;
+    uniqueSounds(sounds)
+      .slice(0, 4)
+      .forEach((sound, index) => playGameSound(context, sound, index * 80));
+  }, [enabled, game]);
+};
+
+const createGameSoundSnapshot = (game: GameState): SoundSnapshot => ({
+  auctionBidCount: game.auction?.bids.length ?? 0,
+  cityEventKey: game.pendingCityEvent ? `${game.pendingCityEvent.id}:${game.pendingCityEvent.round}` : '',
+  casinoSpinKey: game.pendingCasino?.spinStartedAt ? `${game.pendingCasino.playerId}:${game.pendingCasino.spinStartedAt}` : '',
+  currentPlayerId: game.currentPlayerId,
+  diceRollId: game.diceRollId ?? 0,
+  gameId: game.id,
+  logId: game.log[0]?.id ?? '',
+  pendingCardKey: game.pendingCard ? `${game.pendingCard.deck}:${game.pendingCard.cardId}:${game.turn}` : '',
+  pendingTradeCount: game.tradeOffers.filter((offer) => offer.status === 'pending').length,
+  phase: game.phase,
+  resolvedTradeCount: game.tradeOffers.filter((offer) => offer.status === 'accepted' || offer.status === 'declined').length,
+});
+
+const createSoundBuildingSnapshot = (game: GameState): Record<number, number> =>
+  Object.fromEntries(
+    boardTiles.filter((tile): tile is CityTile => tile.type === 'city').map((tile) => [tile.id, game.properties[tile.id].houses]),
+  );
+
+const uniqueSounds = (sounds: GameSoundKind[]) => {
+  const seen = new Set<GameSoundKind>();
+  return sounds.filter((sound) => {
+    if (seen.has(sound)) return false;
+    seen.add(sound);
+    return true;
+  });
+};
+
+const playGameSound = (context: AudioContext, sound: GameSoundKind, delayMs = 0) => {
+  switch (sound) {
+    case 'auction':
+      playTone(context, 880, 0.1, 'triangle', 0.055, delayMs);
+      playTone(context, 660, 0.16, 'triangle', 0.045, delayMs + 110);
+      break;
+    case 'bid':
+      playTone(context, 540, 0.08, 'square', 0.035, delayMs);
+      playTone(context, 720, 0.08, 'triangle', 0.035, delayMs + 70);
+      break;
+    case 'build':
+      playNoise(context, 0.16, 0.045, 180, delayMs);
+      playTone(context, 220, 0.18, 'sawtooth', 0.04, delayMs + 40);
+      break;
+    case 'hotel':
+      playNoise(context, 0.24, 0.055, 140, delayMs);
+      [330, 494, 659, 880].forEach((frequency, index) => playTone(context, frequency, 0.13, 'triangle', 0.04, delayMs + index * 70));
+      break;
+    case 'card':
+      [620, 830, 1040].forEach((frequency, index) => playTone(context, frequency, 0.09, 'sine', 0.034, delayMs + index * 55));
+      break;
+    case 'casino':
+      playNoise(context, 0.18, 0.032, 900, delayMs);
+      [392, 523, 784].forEach((frequency, index) => playTone(context, frequency, 0.11, 'triangle', 0.035, delayMs + index * 75));
+      break;
+    case 'cash':
+      playTone(context, 1046, 0.08, 'triangle', 0.038, delayMs);
+      playTone(context, 1318, 0.1, 'triangle', 0.032, delayMs + 70);
+      break;
+    case 'demolish':
+      playNoise(context, 0.26, 0.05, 120, delayMs);
+      playTone(context, 180, 0.18, 'sawtooth', 0.035, delayMs + 80);
+      break;
+    case 'dice':
+      playNoise(context, 0.28, 0.048, 1150, delayMs);
+      playTone(context, 170, 0.08, 'square', 0.024, delayMs + 70);
+      playTone(context, 230, 0.07, 'square', 0.02, delayMs + 150);
+      break;
+    case 'jail':
+      playTone(context, 196, 0.22, 'sawtooth', 0.044, delayMs);
+      playTone(context, 147, 0.24, 'sawtooth', 0.036, delayMs + 130);
+      break;
+    case 'loss':
+    case 'rent':
+      playTone(context, 330, 0.12, 'triangle', 0.038, delayMs);
+      playTone(context, 220, 0.18, 'triangle', 0.034, delayMs + 95);
+      break;
+    case 'purchase':
+      [392, 523, 659].forEach((frequency, index) => playTone(context, frequency, 0.11, 'triangle', 0.04, delayMs + index * 70));
+      break;
+    case 'trade':
+      playTone(context, 440, 0.08, 'sine', 0.032, delayMs);
+      playTone(context, 660, 0.1, 'sine', 0.032, delayMs + 85);
+      break;
+    case 'turn':
+      playTone(context, 480, 0.08, 'sine', 0.026, delayMs);
+      break;
+    case 'win':
+      [523, 659, 784, 1046].forEach((frequency, index) => playTone(context, frequency, 0.1, 'triangle', 0.04, delayMs + index * 60));
+      break;
+  }
+};
+
+const playTone = (
+  context: AudioContext,
+  frequency: number,
+  duration: number,
+  type: OscillatorType,
+  volume: number,
+  delayMs = 0,
+) => {
+  const start = context.currentTime + delayMs / 1000;
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.02);
+};
+
+const playNoise = (context: AudioContext, duration: number, volume: number, filterFrequency: number, delayMs = 0) => {
+  const start = context.currentTime + delayMs / 1000;
+  const frameCount = Math.max(1, Math.floor(context.sampleRate * duration));
+  const buffer = context.createBuffer(1, frameCount, context.sampleRate);
+  const output = buffer.getChannelData(0);
+  for (let index = 0; index < frameCount; index += 1) {
+    const fade = 1 - index / frameCount;
+    output[index] = (Math.random() * 2 - 1) * fade;
+  }
+
+  const source = context.createBufferSource();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+  source.buffer = buffer;
+  filter.type = 'bandpass';
+  filter.frequency.setValueAtTime(filterFrequency, start);
+  filter.Q.setValueAtTime(0.9, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(context.destination);
+  source.start(start);
+  source.stop(start + duration + 0.02);
+};
+
+const useTurnTimer = (
+  game: GameState,
+  isLocalTurn: boolean,
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
+) => {
+  const [secondsLeft, setSecondsLeft] = useState(TURN_SECONDS);
+  const turnKey = `${game.id}:${game.turn}:${game.currentPlayerId}`;
+  const expiredRef = useRef('');
+
+  useEffect(() => {
+    setSecondsLeft(TURN_SECONDS);
+    expiredRef.current = '';
+  }, [turnKey]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setSecondsLeft((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [turnKey]);
+
+  useEffect(() => {
+    if (secondsLeft > 0 || expiredRef.current === turnKey || !isLocalTurn) return;
+    expiredRef.current = turnKey;
+
+    if (game.phase === 'rolling') {
+      dispatch({ type: 'roll', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if (game.phase === 'awaitingPurchase') {
+      dispatch({ type: 'decline_buy', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if (game.phase === 'awaitingCard') {
+      dispatch({ type: 'draw_card', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if (game.phase === 'casino') {
+      if (game.pendingCasino?.spinEndsAt) return;
+      dispatch({ type: 'skip_casino', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if (game.phase === 'awaitingJailDecision') {
+      dispatch({ type: 'go_to_jail', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if ((game.phase === 'turnEnd' || game.phase === 'manage' || game.phase === 'trade') && !game.tradeOffers.some((offer) => offer.status === 'pending')) {
+      dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
+    }
+  }, [dispatch, game, isLocalTurn, secondsLeft, turnKey]);
+
+  return secondsLeft;
+};
+
+const useAutoContinueTurn = (
+  game: GameState,
+  isLocalTurn: boolean,
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
+  isBoardBusy: boolean,
+) => {
+  const autoKey = `${game.id}:${game.turn}:${game.currentPlayerId}:${game.phase}:${game.lastDice?.join('-') ?? 'no-roll'}:${game.pendingCard?.cardId ?? 'no-card'}`;
+  const sentRef = useRef('');
+  const jailSentRef = useRef('');
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId);
+  const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
+  const isJailRollEnd = Boolean(
+    game.phase === 'turnEnd' &&
+      currentPlayer?.position === 10 &&
+      game.lastDice &&
+      game.lastDice[0] !== game.lastDice[1] &&
+      game.diceRollId > 0,
+  );
+
+  useEffect(() => {
+    if (!isLocalTurn || !isJailRollEnd || hasPendingTrade || jailSentRef.current === autoKey) return;
+    jailSentRef.current = autoKey;
+    const timer = window.setTimeout(() => {
+      dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
+    }, DICE_ROLL_ANIMATION_MS + 450);
+
+    return () => window.clearTimeout(timer);
+  }, [autoKey, dispatch, game.currentPlayerId, hasPendingTrade, isJailRollEnd, isLocalTurn]);
+
+  useEffect(() => {
+    if (
+      !isLocalTurn ||
+      game.phase !== 'turnEnd' ||
+      isJailRollEnd ||
+      isBoardBusy ||
+      hasPendingTrade ||
+      sentRef.current === autoKey
+    ) {
+      return;
+    }
+    sentRef.current = autoKey;
+
+    const hasDoubleRoll = Boolean(game.lastDice && game.lastDice[0] === game.lastDice[1] && game.doublesInRow > 0);
+    const delay = game.pendingCard ? CARD_REVEAL_MS : hasDoubleRoll ? 900 : AUTO_CONTINUE_MS;
+    const timer = window.setTimeout(() => {
+      dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [autoKey, dispatch, game, hasPendingTrade, isBoardBusy, isJailRollEnd, isLocalTurn]);
+};
+
+const useDiceRollAnimation = (game: GameState) => {
+  const [activeRollId, setActiveRollId] = useState<number | undefined>();
+  const lastRollIdRef = useRef(game.diceRollId ?? 0);
+
+  useEffect(() => {
+    lastRollIdRef.current = game.diceRollId ?? 0;
+    setActiveRollId(undefined);
+  }, [game.id]);
+
+  useEffect(() => {
+    const rollId = game.diceRollId ?? 0;
+    if (rollId === 0 || rollId === lastRollIdRef.current) return;
+
+    lastRollIdRef.current = rollId;
+    setActiveRollId(rollId);
+    const timer = window.setTimeout(() => {
+      setActiveRollId((current) => (current === rollId ? undefined : current));
+    }, DICE_ROLL_ANIMATION_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [game.diceRollId]);
+
+  return activeRollId === (game.diceRollId ?? 0);
+};
+
+const useAnimatedPositions = (game: GameState) => {
+  const positionKey = game.players.map((player) => `${player.id}:${player.position}`).join('|');
+  const targetPositions = useMemo(
+    () => Object.fromEntries(game.players.map((player) => [player.id, player.position])),
+    [positionKey],
+  );
+  const initialPositions = useMemo(
+    () => Object.fromEntries(game.players.map((player) => [player.id, player.position])),
+    [game.id],
+  );
+  const [displayPositions, setDisplayPositions] = useState<Record<string, number>>(initialPositions);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const positionsRef = useRef<Record<string, number>>(initialPositions);
+  const previousRollIdRef = useRef(game.diceRollId ?? 0);
+  const timersRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    positionsRef.current = initialPositions;
+    previousRollIdRef.current = game.diceRollId ?? 0;
+    setDisplayPositions(initialPositions);
+    setIsAnimating(false);
+  }, [initialPositions]);
+
+  useEffect(() => {
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+    let maxDelay = 0;
+    let hasMovement = false;
+    const rollId = game.diceRollId ?? 0;
+    const shouldWaitForDice = rollId > 0 && rollId !== previousRollIdRef.current;
+    const movementStartDelay = shouldWaitForDice ? DICE_ROLL_ANIMATION_MS : 0;
+    previousRollIdRef.current = rollId;
+
+    Object.entries(targetPositions).forEach(([playerId, target]) => {
+      const current = positionsRef.current[playerId] ?? target;
+      if (current === target) {
+        positionsRef.current[playerId] = target;
+        return;
+      }
+
+      buildForwardPath(current, target).forEach((position, index) => {
+        hasMovement = true;
+        const delay = movementStartDelay + (index + 1) * PAWN_STEP_ANIMATION_MS;
+        maxDelay = Math.max(maxDelay, delay);
+        const timer = window.setTimeout(() => {
+          positionsRef.current = { ...positionsRef.current, [playerId]: position };
+          setDisplayPositions(positionsRef.current);
+        }, delay);
+        timersRef.current.push(timer);
+      });
+    });
+
+    setIsAnimating(hasMovement);
+    if (hasMovement) {
+      const timer = window.setTimeout(() => setIsAnimating(false), maxDelay + 60);
+      timersRef.current.push(timer);
+    }
+
+    return () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+      timersRef.current = [];
+    };
+  }, [game.diceRollId, targetPositions]);
+
+  const hasPendingMovement = Object.entries(targetPositions).some(
+    ([playerId, position]) => (displayPositions[playerId] ?? position) !== position,
+  );
+  return { displayPositions, isAnimating: isAnimating || hasPendingMovement };
+};
+
+const buildForwardPath = (from: number, to: number) => {
+  const path: number[] = [];
+  let cursor = from;
+  while (cursor !== to && path.length < boardTiles.length) {
+    cursor = (cursor + 1) % boardTiles.length;
+    path.push(cursor);
+  }
+  return path;
+};
+
+const BOARD_EDGE_X = 12;
+const BOARD_EDGE_Y = 18;
+const BOARD_MIDDLE_TILE_W = (100 - BOARD_EDGE_X * 2) / 9;
+const BOARD_MIDDLE_TILE_H = (100 - BOARD_EDGE_Y * 2) / 9;
+
+const boardPosition = (id: number) => {
+  if (id === 0) return { side: 'bottom', left: 100 - BOARD_EDGE_X, top: 100 - BOARD_EDGE_Y, width: BOARD_EDGE_X, height: BOARD_EDGE_Y };
+  if (id > 0 && id < 10) {
+    return {
+      side: 'bottom',
+      left: BOARD_EDGE_X + (9 - id) * BOARD_MIDDLE_TILE_W,
+      top: 100 - BOARD_EDGE_Y,
+      width: BOARD_MIDDLE_TILE_W,
+      height: BOARD_EDGE_Y,
+    };
+  }
+  if (id === 10) return { side: 'bottom', left: 0, top: 100 - BOARD_EDGE_Y, width: BOARD_EDGE_X, height: BOARD_EDGE_Y };
+  if (id > 10 && id < 20) {
+    return {
+      side: 'left',
+      left: 0,
+      top: BOARD_EDGE_Y + (19 - id) * BOARD_MIDDLE_TILE_H,
+      width: BOARD_EDGE_X,
+      height: BOARD_MIDDLE_TILE_H,
+    };
+  }
+  if (id === 20) return { side: 'top', left: 0, top: 0, width: BOARD_EDGE_X, height: BOARD_EDGE_Y };
+  if (id > 20 && id < 30) {
+    return {
+      side: 'top',
+      left: BOARD_EDGE_X + (id - 21) * BOARD_MIDDLE_TILE_W,
+      top: 0,
+      width: BOARD_MIDDLE_TILE_W,
+      height: BOARD_EDGE_Y,
+    };
+  }
+  if (id === 30) return { side: 'top', left: 100 - BOARD_EDGE_X, top: 0, width: BOARD_EDGE_X, height: BOARD_EDGE_Y };
+  return {
+    side: 'right',
+    left: 100 - BOARD_EDGE_X,
+    top: BOARD_EDGE_Y + (id - 31) * BOARD_MIDDLE_TILE_H,
+    width: BOARD_EDGE_X,
+    height: BOARD_MIDDLE_TILE_H,
+  };
+};
+
+const pawnPoint = (tileId: number, index: number, total: number) => {
+  const position = boardPosition(tileId);
+  const baseX = position.left + position.width / 2;
+  const baseY = position.top + position.height / 2;
+  const offsets = pawnOffsets(total)[index] ?? { x: 0, y: 0 };
+
+  if (position.side === 'bottom') return { x: baseX + offsets.x, y: baseY - 2.35 + offsets.y };
+  if (position.side === 'top') return { x: baseX + offsets.x, y: baseY + 2.35 + offsets.y };
+  if (position.side === 'left') return { x: baseX + 2.35 + offsets.x, y: baseY + offsets.y };
+  return { x: baseX - 2.35 + offsets.x, y: baseY + offsets.y };
+};
+
+const tileCenterPoint = (tileId: number) => {
+  const position = boardPosition(tileId);
+  return {
+    x: position.left + position.width / 2,
+    y: position.top + position.height / 2,
+  };
+};
+
+const pawnOffsets = (total: number) => {
+  if (total <= 1) return [{ x: 0, y: 0 }];
+  if (total === 2) return [{ x: -1.15, y: 0 }, { x: 1.15, y: 0 }];
+  if (total === 3) return [{ x: -1.15, y: 0.75 }, { x: 1.15, y: 0.75 }, { x: 0, y: -1 }];
+  if (total === 5) {
+    return [
+      { x: -2, y: 0.9 },
+      { x: 0, y: 0.9 },
+      { x: 2, y: 0.9 },
+      { x: -1, y: -1 },
+      { x: 1, y: -1 },
+    ];
+  }
+  if (total >= 6) {
+    return [
+      { x: -2, y: 0.9 },
+      { x: 0, y: 0.9 },
+      { x: 2, y: 0.9 },
+      { x: -2, y: -1 },
+      { x: 0, y: -1 },
+      { x: 2, y: -1 },
+    ];
+  }
+  return [
+    { x: -1.15, y: 0.9 },
+    { x: 1.15, y: 0.9 },
+    { x: -1.15, y: -1 },
+    { x: 1.15, y: -1 },
+  ];
+};
+
+const PlayerFigurine = ({ player, size = 'normal' }: { player: Player; size?: 'small' | 'normal' | 'large' }) => (
+  <span className={`pawn pawn-${size}`} style={{ '--pawn-color': player.color } as CSSProperties} aria-label={player.name}>
+    <span className="pawn-head" />
+    <span className="pawn-body" />
+    <span className="pawn-base" />
+  </span>
+);
+
+const formatTimer = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+const formatLogTime = (timestamp: number) => LOG_TIME_FORMATTER.format(timestamp);
+
+const DiceIcon = () => (
+  <div className="dice-icon" aria-hidden>
+    <span />
+    <span />
+    <span />
+    <span />
+  </div>
+);

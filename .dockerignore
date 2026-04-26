@@ -1,0 +1,12 @@
+.codex-run/
+client/node_modules/
+client/dist/
+client/.vite-dev*.log
+server/bin/
+server/obj/
+server.Tests/bin/
+server.Tests/obj/
+**/.git/
+**/.vs/
+**/.vscode/
+**/*.user
