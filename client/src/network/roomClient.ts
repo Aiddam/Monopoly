@@ -73,12 +73,22 @@ export class RoomClient {
 
   async createRoom(playerName: string, testMode = false, playerId?: string) {
     await this.connect();
-    return this.connection!.invoke<RoomSnapshot>('CreateRoom', playerName, testMode, playerId);
+    try {
+      return await this.connection!.invoke<RoomSnapshot>('CreateRoom', playerName, testMode, playerId);
+    } catch (error) {
+      if (!isHubInvokeVersionError(error) || !playerId) throw error;
+      return this.connection!.invoke<RoomSnapshot>('CreateRoom', playerName, testMode);
+    }
   }
 
   async joinRoom(code: string, playerName: string, playerId?: string) {
     await this.connect();
-    return this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName, playerId);
+    try {
+      return await this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName, playerId);
+    } catch (error) {
+      if (!isHubInvokeVersionError(error) || !playerId) throw error;
+      return this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName);
+    }
   }
 
   async setReady(code: string, ready: boolean) {
@@ -99,3 +109,6 @@ export class RoomClient {
     await this.connection?.invoke('CloseRoom', code.toUpperCase());
   }
 }
+
+const isHubInvokeVersionError = (error: unknown): boolean =>
+  error instanceof Error && error.message.includes("Failed to invoke");

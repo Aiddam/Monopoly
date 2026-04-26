@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("UkraineMonopoly.Server.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8660815b100e31af7306ea9a918ec7087add7752")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9305b7f0b19292308a06675f1b0f92af7040ba96")]
 [assembly: System.Reflection.AssemblyProductAttribute("UkraineMonopoly.Server.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("UkraineMonopoly.Server.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

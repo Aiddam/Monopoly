@@ -98,11 +98,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
     try {
       const room = await roomClient.joinRoom(saved.room.code, saved.playerName ?? 'Гравець', saved.localPlayerId);
-      const peerMesh = configurePeerMesh(saved.localPlayerId, roomClient, room.code);
+      const localPlayerId = resolveLocalPlayerId(room, saved.localPlayerId);
+      const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
       const nextScreen = saved.game ? 'game' : 'lobby';
-      set({ screen: nextScreen, room, peerMesh, connection: { signalr: 'connected', p2p: {} } });
-      saveSession({ ...saved, screen: nextScreen, room });
+      set({ screen: nextScreen, room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      saveSession({ ...saved, screen: nextScreen, localPlayerId, room });
 
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 800);
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 2_000);
@@ -117,9 +118,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
     try {
       const room = await roomClient.createRoom(playerName, testMode, localPlayerId);
-      const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
+      const resolvedLocalPlayerId = resolveLocalPlayerId(room, localPlayerId);
+      const peerMesh = configurePeerMesh(resolvedLocalPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
-      set({ screen: 'lobby', room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      set({ screen: 'lobby', room, localPlayerId: resolvedLocalPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
       persistCurrentSession(get());
     } catch (error) {
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
@@ -132,9 +134,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName, localPlayerId });
     try {
       const room = await roomClient.joinRoom(code, playerName, localPlayerId);
-      const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
+      const resolvedLocalPlayerId = resolveLocalPlayerId(room, localPlayerId, room.players.at(-1)?.id);
+      const peerMesh = configurePeerMesh(resolvedLocalPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
-      set({ screen: 'lobby', room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
+      set({ screen: 'lobby', room, localPlayerId: resolvedLocalPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
       persistCurrentSession(get());
     } catch (error) {
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
@@ -270,6 +273,9 @@ const configurePeerMesh = (localPlayerId: string, roomClient: RoomClient, roomCo
   });
   return peerMesh;
 };
+
+const resolveLocalPlayerId = (room: RoomSnapshot, preferredId: string, fallbackId?: string): string =>
+  room.players.some((player) => player.id === preferredId) ? preferredId : fallbackId ?? room.players[0]?.id ?? preferredId;
 
 const createStablePlayerId = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
