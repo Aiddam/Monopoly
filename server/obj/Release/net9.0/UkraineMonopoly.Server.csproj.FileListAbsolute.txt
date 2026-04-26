@@ -25,3 +25,4 @@ D:\Projects\Monopoly\server\obj\Release\net9.0\refint\UkraineMonopoly.Server.dll
 D:\Projects\Monopoly\server\obj\Release\net9.0\UkraineMonopoly.Server.pdb
 D:\Projects\Monopoly\server\obj\Release\net9.0\UkraineMonopoly.Server.genruntimeconfig.cache
 D:\Projects\Monopoly\server\obj\Release\net9.0\ref\UkraineMonopoly.Server.dll
+D:\Projects\Monopoly\server\obj\Release\net9.0\UkraineMonopoly.Server.sourcelink.json

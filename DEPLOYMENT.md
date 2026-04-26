@@ -30,6 +30,8 @@ Environment variables:
 
 ```text
 ASPNETCORE_ENVIRONMENT=Production
+DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
+DOTNET_USE_POLLING_FILE_WATCHER=true
 ClientOrigins=https://your-client-domain.onrender.com
 ```
 
