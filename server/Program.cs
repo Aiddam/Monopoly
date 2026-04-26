@@ -2,7 +2,10 @@ using UkraineMonopoly.Server.Rooms;
 
 var builder = WebApplication.CreateBuilder(args);
 var clientOrigins = (builder.Configuration["ClientOrigins"] ?? string.Empty)
-    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    .Select(origin => origin.TrimEnd('/'))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 
 if (clientOrigins.Length == 0)
 {
