@@ -35,14 +35,27 @@ type RoomHandlerMap = {
   ErrorMessage: (message: string) => void;
 };
 
+export type RoomConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+
+type ConnectionStateHandler = (status: RoomConnectionStatus, error?: Error) => void;
+
+const ROOM_CONNECTION_NOT_READY_MESSAGE = 'Немає підключення до кімнати. Зачекайте перепідключення.';
+
 export class RoomClient {
   private connection?: signalR.HubConnection;
+  private connectPromise?: Promise<void>;
   private readonly handlers: Partial<{ [K in keyof RoomHandlerMap]: RoomHandlerMap[K][] }> = {};
+  private readonly connectionStateHandlers: ConnectionStateHandler[] = [];
+  private readonly reconnectedHandlers: Array<() => void> = [];
 
   constructor(private readonly serverUrl = SIGNALR_SERVER_URL) {}
 
   get connectionId() {
     return this.connection?.connectionId;
+  }
+
+  get isConnected() {
+    return this.connection?.state === signalR.HubConnectionState.Connected;
   }
 
   on<K extends keyof RoomHandlerMap>(event: K, handler: RoomHandlerMap[K]) {
@@ -53,13 +66,35 @@ export class RoomClient {
     this.handlers[event] = (this.handlers[event] ?? []).filter((candidate) => candidate !== handler) as typeof this.handlers[K];
   }
 
+  onConnectionState(handler: ConnectionStateHandler) {
+    this.connectionStateHandlers.push(handler);
+  }
+
+  onReconnected(handler: () => void) {
+    this.reconnectedHandlers.push(handler);
+  }
+
   async connect() {
     if (this.connection?.state === signalR.HubConnectionState.Connected) return;
+    if (this.connectPromise) return this.connectPromise;
+    if (
+      this.connection?.state === signalR.HubConnectionState.Connecting ||
+      this.connection?.state === signalR.HubConnectionState.Reconnecting
+    ) {
+      throw new Error(ROOM_CONNECTION_NOT_READY_MESSAGE);
+    }
 
     this.connection = new signalR.HubConnectionBuilder()
       .withUrl(`${this.serverUrl}/hubs/rooms`)
       .withAutomaticReconnect()
       .build();
+
+    this.connection.onreconnecting((error) => this.emitConnectionState('reconnecting', error));
+    this.connection.onreconnected(() => {
+      this.emitConnectionState('connected');
+      this.reconnectedHandlers.forEach((handler) => handler());
+    });
+    this.connection.onclose((error) => this.emitConnectionState('disconnected', error));
 
     (Object.keys(this.handlers) as (keyof RoomHandlerMap)[]).forEach((event) => {
       this.connection?.on(event, (...args: unknown[]) => {
@@ -69,7 +104,14 @@ export class RoomClient {
       });
     });
 
-    await this.connection.start();
+    this.emitConnectionState('connecting');
+    this.connectPromise = this.connection
+      .start()
+      .then(() => this.emitConnectionState('connected'))
+      .finally(() => {
+        this.connectPromise = undefined;
+      });
+    return this.connectPromise;
   }
 
   async createRoom(playerName: string, testMode = false, playerId?: string) {
@@ -84,40 +126,58 @@ export class RoomClient {
 
   async joinRoom(code: string, playerName: string, playerId?: string) {
     await this.connect();
+    const roomCode = normalizeRoomCode(code);
     try {
-      return await this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName, playerId);
+      return await this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName, playerId);
     } catch (error) {
       if (!isHubInvokeVersionError(error) || !playerId) throw error;
-      return this.connection!.invoke<RoomSnapshot>('JoinRoom', code.toUpperCase(), playerName);
+      return this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName);
     }
   }
 
   async setReady(code: string, ready: boolean) {
-    await this.connection?.invoke('SetReady', code.toUpperCase(), ready);
+    await this.invokeConnected('SetReady', normalizeRoomCode(code), ready);
   }
 
   async relaySignal(code: string, toPeerId: string, kind: SignalPayload['kind'], payload: unknown) {
-    await this.connection?.invoke('RelaySignal', code.toUpperCase(), toPeerId, kind, payload);
+    await this.invokeConnected('RelaySignal', normalizeRoomCode(code), toPeerId, kind, payload);
   }
 
   async broadcastGameMessage(code: string, message: unknown) {
-    await this.connection?.invoke('BroadcastGameMessage', code.toUpperCase(), message);
+    await this.invokeConnected('BroadcastGameMessage', normalizeRoomCode(code), message);
   }
 
   async leaveRoom(code?: string) {
     if (code) {
-      await this.connection?.invoke('LeaveRoom', code.toUpperCase());
+      await this.invokeConnected('LeaveRoom', normalizeRoomCode(code));
     }
   }
 
   async closeRoom(code: string) {
-    await this.connection?.invoke('CloseRoom', code.toUpperCase());
+    await this.invokeConnected('CloseRoom', normalizeRoomCode(code));
+  }
+
+  private async invokeConnected<T = void>(methodName: string, ...args: unknown[]): Promise<T> {
+    if (!this.connection || !this.isConnected) {
+      throw new Error(ROOM_CONNECTION_NOT_READY_MESSAGE);
+    }
+    return this.connection.invoke<T>(methodName, ...args);
+  }
+
+  private emitConnectionState(status: RoomConnectionStatus, error?: Error) {
+    this.connectionStateHandlers.forEach((handler) => handler(status, error));
   }
 }
 
+export const isRoomConnectionNotReadyError = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.message === ROOM_CONNECTION_NOT_READY_MESSAGE ||
+    error.message.includes("Cannot send data if the connection is not in the 'Connected' State"));
+
+const normalizeRoomCode = (code: string) => code.trim().toUpperCase();
+
 const isHubInvokeVersionError = (error: unknown): boolean =>
   error instanceof Error &&
-  (error.message.includes('Failed to invoke') ||
-    error.message.includes('An unexpected error occurred invoking') ||
-    error.message.includes('Invocation provides') ||
-    error.message.includes('could not be resolved'));
+  (error.message.includes('Invocation provides') ||
+    error.message.includes('could not be resolved') ||
+    error.message.includes('does not exist'));

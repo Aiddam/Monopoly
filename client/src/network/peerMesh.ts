@@ -60,7 +60,7 @@ export class PeerMesh {
       await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      await this.sendSignal(peerId, 'answer', answer);
+      await this.sendSignal(peerId, 'answer', answer).catch(() => undefined);
     }
 
     if (signal.kind === 'answer') {
@@ -106,7 +106,7 @@ export class PeerMesh {
     this.peers.set(peerId, peer);
 
     peer.onicecandidate = (event) => {
-      if (event.candidate) void this.sendSignal(peerId, 'ice', event.candidate.toJSON());
+      if (event.candidate) void this.sendSignal(peerId, 'ice', event.candidate.toJSON()).catch(() => undefined);
     };
     peer.onconnectionstatechange = () => {
       this.onStatusHandlers.forEach((handler) => handler(peerId, peer.connectionState === 'connected'));
@@ -118,7 +118,7 @@ export class PeerMesh {
       this.bindChannel(peerId, channel);
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
-      await this.sendSignal(peerId, 'offer', offer);
+      await this.sendSignal(peerId, 'offer', offer).catch(() => undefined);
     }
 
     return peer;

@@ -5,11 +5,15 @@ import { MAX_PLAYERS } from '../engine/gameEngine';
 import { SIGNALR_SERVER_URL } from '../network/roomClient';
 import { useGameStore } from '../store/useGameStore';
 
+const PLAYER_NAME_COOKIE = 'ukraine-monopoly-player-name';
+const DEFAULT_PLAYER_NAME = 'Гравець';
+
 export const RoomScreen = () => {
-  const [name, setName] = useState('Гравець');
+  const [name, setName] = useState(readSavedPlayerName);
   const [code, setCode] = useState('');
   const [testMode, setTestMode] = useState(false);
   const { createRoom, joinRoom, startLocalDemo, connection } = useGameStore();
+  const playerName = name.trim() || DEFAULT_PLAYER_NAME;
 
   return (
     <motion.section
@@ -31,7 +35,12 @@ export const RoomScreen = () => {
       <div className="home-panel">
         <label>
           Ваше ім'я
-          <input value={name} maxLength={18} onChange={(event) => setName(event.target.value)} />
+          <input
+            value={name}
+            maxLength={18}
+            onBlur={() => savePlayerName(playerName)}
+            onChange={(event) => setName(event.target.value)}
+          />
         </label>
         <label className="test-mode-toggle">
           <input type="checkbox" checked={testMode} onChange={(event) => setTestMode(event.target.checked)} />
@@ -41,7 +50,13 @@ export const RoomScreen = () => {
           </span>
         </label>
         <div className="home-actions">
-          <button className="primary" onClick={() => void createRoom(name || 'Гравець', testMode)}>
+          <button
+            className="primary"
+            onClick={() => {
+              savePlayerName(playerName);
+              void createRoom(playerName, testMode);
+            }}
+          >
             <UsersRound size={18} />
             Створити кімнату
           </button>
@@ -52,7 +67,14 @@ export const RoomScreen = () => {
               placeholder="Код"
               onChange={(event) => setCode(event.target.value.toUpperCase())}
             />
-            <button className="secondary" disabled={!code} onClick={() => void joinRoom(code, name || 'Гравець')}>
+            <button
+              className="secondary"
+              disabled={!code.trim()}
+              onClick={() => {
+                savePlayerName(playerName);
+                void joinRoom(code, playerName);
+              }}
+            >
               <DoorOpen size={18} />
               Приєднатись
             </button>
@@ -68,4 +90,24 @@ export const RoomScreen = () => {
       </div>
     </motion.section>
   );
+};
+
+const readSavedPlayerName = () => {
+  if (typeof document === 'undefined') return DEFAULT_PLAYER_NAME;
+  const cookie = document.cookie
+    .split('; ')
+    .find((candidate) => candidate.startsWith(`${PLAYER_NAME_COOKIE}=`));
+  if (!cookie) return DEFAULT_PLAYER_NAME;
+  const value = cookie.slice(PLAYER_NAME_COOKIE.length + 1);
+  try {
+    return decodeURIComponent(value) || DEFAULT_PLAYER_NAME;
+  } catch {
+    return DEFAULT_PLAYER_NAME;
+  }
+};
+
+const savePlayerName = (name: string) => {
+  if (typeof document === 'undefined') return;
+  const value = encodeURIComponent(name.trim() || DEFAULT_PLAYER_NAME);
+  document.cookie = `${PLAYER_NAME_COOKIE}=${value}; Max-Age=31536000; Path=/; SameSite=Lax`;
 };

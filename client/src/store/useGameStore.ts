@@ -2,7 +2,13 @@ import { create } from 'zustand';
 import { createInitialGame, MAX_PLAYERS, MIN_PLAYERS, reduceGame } from '../engine/gameEngine';
 import type { GameAction, GameState } from '../engine/types';
 import { PeerMesh, type PeerMessage } from '../network/peerMesh';
-import { RoomClient, type RoomPlayer, type RoomSnapshot, type SignalPayload } from '../network/roomClient';
+import {
+  isRoomConnectionNotReadyError,
+  RoomClient,
+  type RoomPlayer,
+  type RoomSnapshot,
+  type SignalPayload,
+} from '../network/roomClient';
 
 type Screen = 'home' | 'lobby' | 'game' | 'finished';
 
@@ -44,6 +50,7 @@ interface SavedSession {
 }
 
 const SESSION_STORAGE_KEY = 'ukraine-monopoly-session-v1';
+const ROOM_NOT_FOUND_MESSAGE = 'Кімнату не знайдено. Якщо сервер Render перезапустився, створіть нову кімнату.';
 
 function readSavedSession(): SavedSession | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -108,6 +115,16 @@ export const useGameStore = create<GameStore>((set, get) => ({
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 800);
       window.setTimeout(() => peerMesh.broadcast({ type: 'sync:request' }), 2_000);
     } catch (error) {
+      if (isRoomNotFoundError(error)) {
+        clearSavedSession();
+        set({
+          screen: 'home',
+          room: undefined,
+          game: undefined,
+          connection: { signalr: 'error', p2p: {}, error: ROOM_NOT_FOUND_MESSAGE },
+        });
+        return;
+      }
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
     }
   },
@@ -140,13 +157,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
       set({ screen: 'lobby', room, localPlayerId: resolvedLocalPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
       persistCurrentSession(get());
     } catch (error) {
+      if (isRoomNotFoundError(error)) {
+        clearSavedSession();
+        set({ connection: { signalr: 'error', p2p: {}, error: ROOM_NOT_FOUND_MESSAGE } });
+        return;
+      }
       set({ connection: { signalr: 'error', p2p: {}, error: errorMessage(error) } });
     }
   },
 
   async setReady(ready) {
     const { room, roomClient } = get();
-    if (room) await roomClient?.setReady(room.code, ready);
+    try {
+      if (room) await roomClient?.setReady(room.code, ready);
+    } catch (error) {
+      setConnectionError(error);
+    }
   },
 
   startLocalDemo() {
@@ -191,7 +217,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
   },
 
-  applyRemoteMessage(message, fromPeerId) {
+  applyRemoteMessage(message, _fromPeerId) {
     const { game, room, localPlayerId, peerMesh } = get();
     const isHost = room?.players.find((player) => player.id === localPlayerId)?.isHost;
     if (message.type === 'game:init' || message.type === 'game:state') {
@@ -202,7 +228,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       get().dispatch(message.action, true);
     }
     if (message.type === 'sync:request' && isHost && game) {
-      peerMesh?.send(fromPeerId, { type: 'sync:response', state: game });
+      broadcastRoomMessage(room, get().roomClient, peerMesh, { type: 'sync:response', state: game });
     }
     if (message.type === 'sync:response') {
       set({ game: message.state, screen: 'game' });
@@ -213,7 +239,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   async leaveRoom() {
     const { room, roomClient, peerMesh } = get();
     peerMesh?.close();
-    await roomClient?.leaveRoom(room?.code);
+    try {
+      await roomClient?.leaveRoom(room?.code);
+    } catch {
+      // If SignalR is already gone, local cleanup still needs to complete.
+    }
     set({
       screen: 'home',
       room: undefined,
@@ -229,6 +259,27 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
 const configureRoomClient = () => {
   const roomClient = new RoomClient();
+  roomClient.onConnectionState((status, error) => {
+    const connection = useGameStore.getState().connection;
+    if (status === 'connected') {
+      useGameStore.setState({ connection: { signalr: 'connected', p2p: connection.p2p } });
+      return;
+    }
+    if (status === 'connecting' || status === 'reconnecting') {
+      useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
+      return;
+    }
+    useGameStore.setState({
+      connection: {
+        signalr: 'error',
+        p2p: connection.p2p,
+        error: error ? errorMessage(error) : 'Зʼєднання з кімнатою втрачено.',
+      },
+    });
+  });
+  roomClient.onReconnected(() => {
+    void rejoinCurrentRoom(roomClient);
+  });
   roomClient.on('RoomSnapshot', (room) => {
     const { peerMesh } = useGameStore.getState();
     void peerMesh?.syncPeers(room.players);
@@ -239,7 +290,12 @@ const configureRoomClient = () => {
     useGameStore.getState().peerMesh?.removePeer(playerId);
   });
   roomClient.on('SignalReceived', (signal: SignalPayload) => {
-    void useGameStore.getState().peerMesh?.handleSignal(signal);
+    void useGameStore
+      .getState()
+      .peerMesh?.handleSignal(signal)
+      .catch((error) => {
+        if (!isRoomConnectionNotReadyError(error)) setConnectionError(error);
+      });
   });
   roomClient.on('GameMessage', (fromPeerId, message) => {
     useGameStore.getState().applyRemoteMessage(message as PeerMessage, fromPeerId);
@@ -265,6 +321,30 @@ const configureRoomClient = () => {
   return roomClient;
 };
 
+const rejoinCurrentRoom = async (roomClient: RoomClient) => {
+  const { room, localPlayerId, playerName, peerMesh, game } = useGameStore.getState();
+  if (!room || !localPlayerId) return;
+
+  try {
+    const nextRoom = await roomClient.joinRoom(room.code, playerName ?? 'Гравець', localPlayerId);
+    const nextPeerMesh = peerMesh ?? configurePeerMesh(localPlayerId, roomClient, nextRoom.code);
+    await nextPeerMesh.syncPeers(nextRoom.players);
+    useGameStore.setState({
+      room: nextRoom,
+      peerMesh: nextPeerMesh,
+      connection: { signalr: 'connected', p2p: useGameStore.getState().connection.p2p },
+    });
+    persistCurrentSession(useGameStore.getState());
+
+    const localPlayer = nextRoom.players.find((player) => player.id === localPlayerId);
+    if (localPlayer?.isHost && game) {
+      broadcastRoomMessage(nextRoom, roomClient, nextPeerMesh, { type: 'game:state', state: game });
+    }
+  } catch (error) {
+    setConnectionError(isRoomNotFoundError(error) ? new Error(ROOM_NOT_FOUND_MESSAGE) : error);
+  }
+};
+
 const configurePeerMesh = (localPlayerId: string, roomClient: RoomClient, roomCode: string) => {
   const peerMesh = new PeerMesh(localPlayerId, (toPeerId, kind, payload) =>
     roomClient.relaySignal(roomCode, toPeerId, kind, payload),
@@ -284,9 +364,21 @@ const broadcastRoomMessage = (
   message: PeerMessage,
 ) => {
   if (room && roomClient) {
-    void roomClient.broadcastGameMessage(room.code, message).catch((error) => {
-      useGameStore.setState({ connection: { ...useGameStore.getState().connection, error: errorMessage(error) } });
+    if (!roomClient.isConnected) {
       peerMesh?.broadcast(message);
+      const connection = useGameStore.getState().connection;
+      useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
+      return;
+    }
+
+    void roomClient.broadcastGameMessage(room.code, message).catch((error) => {
+      peerMesh?.broadcast(message);
+      if (isRoomConnectionNotReadyError(error)) {
+        const connection = useGameStore.getState().connection;
+        useGameStore.setState({ connection: { signalr: 'connecting', p2p: connection.p2p } });
+        return;
+      }
+      setConnectionError(error);
     });
     return;
   }
@@ -350,6 +442,21 @@ const clearSavedSession = () => {
     // Ignore storage cleanup failures.
   }
 };
+
+const setConnectionError = (error: unknown) => {
+  const connection = useGameStore.getState().connection;
+  useGameStore.setState({
+    connection: {
+      signalr: isRoomConnectionNotReadyError(error) ? 'connecting' : connection.signalr,
+      p2p: connection.p2p,
+      error: errorMessage(error),
+    },
+  });
+};
+
+const isRoomNotFoundError = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.message.includes('Кімнату не знайдено') || error.message.includes("Failed to invoke 'JoinRoom' due to an error on the server"));
 
 export const canStartRoom = (players: RoomPlayer[]) =>
   players.length >= MIN_PLAYERS &&

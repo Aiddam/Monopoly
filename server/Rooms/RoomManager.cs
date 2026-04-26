@@ -30,7 +30,8 @@ public sealed class RoomManager
     {
         lock (_gate)
         {
-            if (!_rooms.TryGetValue(code, out var room) || room.Closed)
+            var roomCode = CleanCode(code);
+            if (!_rooms.TryGetValue(roomCode, out var room) || room.Closed)
             {
                 throw new InvalidOperationException("Кімнату не знайдено.");
             }
@@ -125,7 +126,7 @@ public sealed class RoomManager
             }
 
             room.Closed = true;
-            _rooms.TryRemove(code, out _);
+            _rooms.TryRemove(room.Code, out _);
             foreach (var roomPlayer in room.Players)
             {
                 if (!string.IsNullOrWhiteSpace(roomPlayer.ConnectionId))
@@ -165,7 +166,7 @@ public sealed class RoomManager
     {
         lock (_gate)
         {
-            if (!_rooms.TryGetValue(code, out var room))
+            if (!_rooms.TryGetValue(CleanCode(code), out var room))
             {
                 return null;
             }
@@ -199,14 +200,14 @@ public sealed class RoomManager
     {
         lock (_gate)
         {
-            return _rooms.TryGetValue(code, out var room) &&
+            return _rooms.TryGetValue(CleanCode(code), out var room) &&
                 room.Players.Any(player => player.Id == peerId && !string.IsNullOrWhiteSpace(player.ConnectionId));
         }
     }
 
     private Room GetRoom(string code)
     {
-        if (!_rooms.TryGetValue(code, out var room) || room.Closed)
+        if (!_rooms.TryGetValue(CleanCode(code), out var room) || room.Closed)
         {
             throw new InvalidOperationException("Кімнату не знайдено.");
         }
@@ -237,6 +238,8 @@ public sealed class RoomManager
         var trimmed = string.IsNullOrWhiteSpace(name) ? "Гравець" : name.Trim();
         return trimmed.Length > 18 ? trimmed[..18] : trimmed;
     }
+
+    private static string CleanCode(string code) => (code ?? string.Empty).Trim().ToUpperInvariant();
 
     private static string CleanPlayerId(string? playerId, string fallback)
     {

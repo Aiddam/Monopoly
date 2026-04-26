@@ -56,9 +56,10 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     public async Task RelaySignal(string code, string toPeerId, string kind, object? payload)
     {
+        var normalizedCode = CleanCode(code);
         var fromPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
-        var toConnectionId = rooms.GetConnectionIdForPeer(code, toPeerId);
-        if (fromPeerId is null || toConnectionId is null || !rooms.ContainsPeer(code, fromPeerId) || !rooms.ContainsPeer(code, toPeerId))
+        var toConnectionId = rooms.GetConnectionIdForPeer(normalizedCode, toPeerId);
+        if (fromPeerId is null || toConnectionId is null || !rooms.ContainsPeer(normalizedCode, fromPeerId) || !rooms.ContainsPeer(normalizedCode, toPeerId))
         {
             await Clients.Caller.SendAsync("ErrorMessage", "SignalR relay відхилено: peer не в кімнаті.");
             return;
@@ -70,7 +71,7 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     public async Task BroadcastGameMessage(string code, object? payload)
     {
-        var normalizedCode = code.Trim().ToUpperInvariant();
+        var normalizedCode = CleanCode(code);
         var fromPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
         if (fromPeerId is null || !rooms.ContainsPeer(normalizedCode, fromPeerId))
         {
@@ -112,9 +113,10 @@ public sealed class RoomHub(RoomManager rooms) : Hub
 
     private async Task LeaveCurrentRoom(string code)
     {
+        var normalizedCode = CleanCode(code);
         var peerId = rooms.GetPeerIdForConnection(Context.ConnectionId) ?? Context.ConnectionId;
         var snapshot = rooms.LeaveRoom(Context.ConnectionId);
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, code);
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, normalizedCode);
         if (snapshot is null)
         {
             return;
@@ -128,4 +130,6 @@ public sealed class RoomHub(RoomManager rooms) : Hub
             await Clients.Group(snapshot.Code).SendAsync("HostChanged", host.Id);
         }
     }
+
+    private static string CleanCode(string code) => (code ?? string.Empty).Trim().ToUpperInvariant();
 }
