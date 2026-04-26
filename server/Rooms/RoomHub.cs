@@ -68,6 +68,19 @@ public sealed class RoomHub(RoomManager rooms) : Hub
         await Clients.Client(toConnectionId).SendAsync("SignalReceived", signal);
     }
 
+    public async Task BroadcastGameMessage(string code, object? payload)
+    {
+        var normalizedCode = code.Trim().ToUpperInvariant();
+        var fromPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
+        if (fromPeerId is null || !rooms.ContainsPeer(normalizedCode, fromPeerId))
+        {
+            await Clients.Caller.SendAsync("ErrorMessage", "Синхронізацію гри відхилено: гравець не в кімнаті.");
+            return;
+        }
+
+        await Clients.OthersInGroup(normalizedCode).SendAsync("GameMessage", fromPeerId, payload);
+    }
+
     public async Task LeaveRoom(string code)
     {
         await LeaveCurrentRoom(code);

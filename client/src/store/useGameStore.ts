@@ -156,7 +156,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   startRoomGame() {
-    const { room, localPlayerId, peerMesh } = get();
+    const { room, localPlayerId, peerMesh, roomClient } = get();
     if (!room || !localPlayerId) return;
     const localPlayer = room.players.find((player) => player.id === localPlayerId);
     if (!localPlayer?.isHost) return;
@@ -166,24 +166,24 @@ export const useGameStore = create<GameStore>((set, get) => ({
       players: game.players.map((player, index) => ({ ...player, id: room.players[index].id })),
       currentPlayerId: room.players[0].id,
     };
-    peerMesh?.broadcast({ type: 'game:init', state: remapped });
+    broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:init', state: remapped });
     set({ game: remapped, screen: 'game' });
     persistCurrentSession(get());
   },
 
   dispatch(action, fromPeer = false) {
-    const { game, peerMesh, room, localPlayerId } = get();
+    const { game, peerMesh, room, roomClient, localPlayerId } = get();
     if (!game) return;
     const isHost = !room || room.players.find((player) => player.id === localPlayerId)?.isHost;
 
     if (!isHost && !fromPeer) {
-      peerMesh?.broadcast({ type: 'game:action', action });
+      broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:action', action });
       return;
     }
 
     try {
       const next = reduceGame(game, action);
-      peerMesh?.broadcast({ type: 'game:state', state: next });
+      broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:state', state: next });
       set({ game: next, screen: next.phase === 'finished' ? 'finished' : 'game' });
       persistCurrentSession(get());
     } catch (error) {
@@ -241,6 +241,9 @@ const configureRoomClient = () => {
   roomClient.on('SignalReceived', (signal: SignalPayload) => {
     void useGameStore.getState().peerMesh?.handleSignal(signal);
   });
+  roomClient.on('GameMessage', (fromPeerId, message) => {
+    useGameStore.getState().applyRemoteMessage(message as PeerMessage, fromPeerId);
+  });
   roomClient.on('HostChanged', (hostPeerId) => {
     const { room } = useGameStore.getState();
     if (!room) return;
@@ -272,6 +275,23 @@ const configurePeerMesh = (localPlayerId: string, roomClient: RoomClient, roomCo
     useGameStore.setState({ connection: { ...connection, p2p: { ...connection.p2p, [peerId]: connected } } });
   });
   return peerMesh;
+};
+
+const broadcastRoomMessage = (
+  room: RoomSnapshot | undefined,
+  roomClient: RoomClient | undefined,
+  peerMesh: PeerMesh | undefined,
+  message: PeerMessage,
+) => {
+  if (room && roomClient) {
+    void roomClient.broadcastGameMessage(room.code, message).catch((error) => {
+      useGameStore.setState({ connection: { ...useGameStore.getState().connection, error: errorMessage(error) } });
+      peerMesh?.broadcast(message);
+    });
+    return;
+  }
+
+  peerMesh?.broadcast(message);
 };
 
 const resolveLocalPlayerId = (room: RoomSnapshot, preferredId: string, fallbackId?: string): string =>

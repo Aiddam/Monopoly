@@ -29,6 +29,7 @@ type RoomHandlerMap = {
   PeerJoined: (player: RoomPlayer) => void;
   PeerLeft: (playerId: string) => void;
   SignalReceived: (signal: SignalPayload) => void;
+  GameMessage: (fromPeerId: string, message: unknown) => void;
   HostChanged: (hostPeerId: string) => void;
   RoomClosed: () => void;
   ErrorMessage: (message: string) => void;
@@ -97,6 +98,10 @@ export class RoomClient {
 
   async relaySignal(code: string, toPeerId: string, kind: SignalPayload['kind'], payload: unknown) {
     await this.connection?.invoke('RelaySignal', code.toUpperCase(), toPeerId, kind, payload);
+  }
+
+  async broadcastGameMessage(code: string, message: unknown) {
+    await this.connection?.invoke('BroadcastGameMessage', code.toUpperCase(), message);
   }
 
   async leaveRoom(code?: string) {
