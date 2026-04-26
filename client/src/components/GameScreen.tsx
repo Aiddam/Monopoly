@@ -1837,7 +1837,7 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
             </div>
             <div className="player-meta">
               <div className="player-name-line">
-                <h3>{player.name}</h3>
+                <h3 title={player.name}>{player.name}</h3>
                 {isActive && !player.isBankrupt && game.phase !== 'finished' && (
                   <span className="player-timer">{formatTimer(secondsLeft)}</span>
                 )}

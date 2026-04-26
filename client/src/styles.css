@@ -5665,6 +5665,8 @@ input:focus {
     height: clamp(92px, 15vh, 132px);
     min-height: 0;
     grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-items: center;
     gap: 8px 12px;
     border-radius: 16px;
     padding: 12px;
@@ -5689,7 +5691,27 @@ input:focus {
   }
 
   .game-screen .player-money {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+    justify-self: start;
     font-size: clamp(21px, 2.2vw, 30px);
+    text-align: left;
+  }
+
+  .game-screen .player-meta {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    justify-items: start;
+    text-align: left;
+  }
+
+  .game-screen .player-name-line {
+    width: 100%;
+    min-width: 0;
+    justify-self: start;
+    justify-content: flex-start;
   }
 
   .game-screen .board-wrap {
@@ -5741,6 +5763,8 @@ input:focus {
     height: 98px;
     min-height: 0;
     grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-items: center;
     border-radius: 14px;
     padding: 10px;
   }
@@ -5764,7 +5788,27 @@ input:focus {
   }
 
   .game-screen .player-money {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+    justify-self: start;
     font-size: 22px;
+    text-align: left;
+  }
+
+  .game-screen .player-meta {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    justify-items: start;
+    text-align: left;
+  }
+
+  .game-screen .player-name-line {
+    width: 100%;
+    min-width: 0;
+    justify-self: start;
+    justify-content: flex-start;
   }
 
   .game-screen .board-wrap {
