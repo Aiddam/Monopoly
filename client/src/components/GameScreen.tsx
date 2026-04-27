@@ -4782,24 +4782,28 @@ const useTurnTimer = (
   isLocalTurn: boolean,
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
 ) => {
-  const [secondsLeft, setSecondsLeft] = useState(TURN_SECONDS);
   const timerPhaseKey = game.phase === 'orderRoll' ? 'orderRoll' : 'turn';
   const turnKey = `${game.id}:${game.turn}:${game.currentPlayerId}:${timerPhaseKey}`;
+  const [timerState, setTimerState] = useState(() => ({ secondsLeft: TURN_SECONDS, turnKey }));
+  const secondsLeft = timerState.turnKey === turnKey ? timerState.secondsLeft : TURN_SECONDS;
   const expiredRef = useRef('');
 
   useEffect(() => {
-    setSecondsLeft(TURN_SECONDS);
+    setTimerState({ secondsLeft: TURN_SECONDS, turnKey });
     expiredRef.current = '';
   }, [turnKey]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setSecondsLeft((value) => Math.max(0, value - 1));
+      setTimerState((state) =>
+        state.turnKey === turnKey ? { ...state, secondsLeft: Math.max(0, state.secondsLeft - 1) } : state,
+      );
     }, 1000);
     return () => window.clearInterval(timer);
   }, [turnKey]);
 
   useEffect(() => {
+    if (timerState.turnKey !== turnKey) return;
     if (secondsLeft > 0 || expiredRef.current === turnKey || !isLocalTurn) return;
     expiredRef.current = turnKey;
 
@@ -4837,7 +4841,7 @@ const useTurnTimer = (
     if ((game.phase === 'turnEnd' || game.phase === 'manage' || game.phase === 'trade') && !game.tradeOffers.some((offer) => offer.status === 'pending')) {
       dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
     }
-  }, [dispatch, game, isLocalTurn, secondsLeft, turnKey]);
+  }, [dispatch, game, isLocalTurn, secondsLeft, timerState.turnKey, turnKey]);
 
   return secondsLeft;
 };
