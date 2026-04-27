@@ -3,10 +3,13 @@ import {
   ArrowLeftRight,
   BadgeDollarSign,
   BadgePercent,
+  Building,
   Building2,
+  Castle,
   Check,
   ChevronsDown,
   CircleHelp,
+  Factory,
   Flag,
   Hammer,
   HandCoins,
@@ -16,13 +19,18 @@ import {
   Layers,
   Lock,
   LogOut,
+  MapPinned,
+  Mountain,
   RotateCcw,
+  Sailboat,
   ShieldAlert,
   Trash2,
   TrendingUp,
+  Trees,
   UsersRound,
   Volume2,
   VolumeX,
+  Waves,
   X,
 } from 'lucide-react';
 import type { CSSProperties, Dispatch, FormEvent, SetStateAction } from 'react';
@@ -39,7 +47,16 @@ import {
   getEffectivePropertyPrice,
   getEffectiveUnmortgageCost,
 } from '../engine/gameEngine';
-import type { CityTile, GameState, MoneyHistoryPoint, Player, PropertyTile, RentServiceOffer, TradeOffer } from '../engine/types';
+import type {
+  CityTile,
+  GameState,
+  MoneyHistoryPoint,
+  PendingCityEvent,
+  Player,
+  PropertyTile,
+  RentServiceOffer,
+  TradeOffer,
+} from '../engine/types';
 import { useGameStore } from '../store/useGameStore';
 import { DiceRoller } from './DiceRoller';
 
@@ -47,7 +64,7 @@ const TURN_SECONDS = 120;
 const AUTO_CONTINUE_MS = 1300;
 const CARD_REVEAL_MS = 3600;
 const DICE_ROLL_ANIMATION_MS = 4200;
-const PAWN_STEP_ANIMATION_MS = 180;
+const PAWN_STEP_ANIMATION_MS = 220;
 const MORTGAGE_GRACE_TURNS = 10;
 const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit' });
 const CASINO_MAX_BET = money(300);
@@ -57,6 +74,7 @@ const CASINO_SPIN_MS = 5400;
 const CASINO_RESULT_HOLD_MS = 850;
 const JAIL_FINE = money(100);
 const BUILDING_ANIMATION_MS = 2600;
+const CITY_EVENT_REVEAL_MS = 5200;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
 type WorkspaceTab = 'cards' | 'trade' | 'chart';
 type GameSoundKind =
@@ -88,6 +106,7 @@ type TradeDraft = {
 };
 type TradeDraftUpdater = Dispatch<SetStateAction<TradeDraft | undefined>>;
 type TradeTileState = 'offer' | 'request' | 'offer-selected' | 'request-selected' | 'disabled';
+type CityArtKind = 'capital' | 'castle' | 'civic' | 'coast' | 'forest' | 'industrial' | 'mountain' | 'river' | 'urban';
 type BuildingAnimationEvent = {
   id: string;
   tileId: number;
@@ -95,6 +114,31 @@ type BuildingAnimationEvent = {
   fromHouses: number;
   toHouses: number;
   color: string;
+};
+
+const CITY_TILE_ART: Record<string, CityArtKind> = {
+  pavlohrad: 'industrial',
+  ternivka: 'industrial',
+  kropyvnytskyi: 'civic',
+  cherkasy: 'river',
+  zhytomyr: 'forest',
+  sumy: 'forest',
+  poltava: 'civic',
+  chernihiv: 'castle',
+  khmelnytskyi: 'urban',
+  rivne: 'forest',
+  lutsk: 'castle',
+  zaporizhzhia: 'industrial',
+  mykolaiv: 'coast',
+  vinnytsia: 'river',
+  dnipro: 'river',
+  kharkiv: 'urban',
+  odesa: 'coast',
+  'ivano-frankivsk': 'mountain',
+  uzhhorod: 'mountain',
+  chernivtsi: 'castle',
+  lviv: 'castle',
+  kyiv: 'capital',
 };
 
 export const GameScreen = () => {
@@ -129,7 +173,7 @@ export const GameScreen = () => {
   );
   const rollingKey = game.diceRollId || game.turn * 10 + game.dice[0] + game.dice[1];
   const secondsLeft = useTurnTimer(game, isLocalTurn, dispatch);
-  const hasDoubleRoll = Boolean(game.lastDice && game.lastDice[0] === game.lastDice[1] && game.doublesInRow > 0);
+  const hasDoubleRoll = Boolean(game.lastDice && isDoubleDiceRoll(game.lastDice) && game.doublesInRow > 0);
   const shouldAnimateDiceRoll =
     game.phase !== 'orderRoll' || !room || game.lastOrderRollPlayerId === localPlayer.id;
   const isDiceRolling = useDiceRollAnimation(game, shouldAnimateDiceRoll);
@@ -137,7 +181,7 @@ export const GameScreen = () => {
   const isBoardBusy = isDiceRolling || isPawnAnimating;
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const canUseAdmin = Boolean(room?.testMode);
-  useAutoContinueTurn(game, isLocalTurn, dispatch, isBoardBusy);
+  useAutoContinueTurn(game, isHost, dispatch, isBoardBusy);
   useGameSounds(game, soundEnabled, localPlayer.id, Boolean(room));
 
   const toggleSound = () => {
@@ -457,6 +501,14 @@ const GameBoard = ({
   const hasBuildingShock = buildingEvents.length > 0;
   const hasHotelShock = buildingEvents.some((event) => event.kind === 'build' && event.toHouses >= 5);
   const shouldShowCasino = Boolean(game.pendingCasino && (isLocalTurn || game.pendingCasino.spinEndsAt));
+  const occupiedTileIds = useMemo(() => {
+    const tileIds = new Set<number>();
+    game.players.forEach((player) => {
+      if (player.isBankrupt) return;
+      tileIds.add(displayPositions[player.id] ?? player.position);
+    });
+    return tileIds;
+  }, [displayPositions, game.players]);
 
   return (
     <section className="board-wrap">
@@ -530,6 +582,7 @@ const GameBoard = ({
             tradeDraft={tradeDraft}
             tradePlayerId={tradePlayerId}
             activeTradeOffer={activeTradeOffer}
+            hasPawn={occupiedTileIds.has(tile.id)}
             key={tile.id}
           />
         ))}
@@ -538,6 +591,7 @@ const GameBoard = ({
         <DiceRollOverlay game={game} isRolling={isDiceRolling} rollingKey={rollingKey} />
         <AuctionOverlay game={game} />
         <CardDrawOverlay game={game} />
+        <CityEventReveal event={game.pendingCityEvent} />
       </div>
     </section>
   );
@@ -545,16 +599,19 @@ const GameBoard = ({
 
 const CityEventBanner = ({ game }: { game: GameState }) => {
   const activeEvents = game.activeCityEvents ?? [];
-  const activeEventIds = new Set(activeEvents.map((event) => event.id));
-  const visibleEvent =
-    game.pendingCityEvent && activeEventIds.has(game.pendingCityEvent.id)
-      ? game.pendingCityEvent
-      : activeEvents[activeEvents.length - 1];
+  const visibleEvent = game.pendingCityEvent ?? activeEvents[activeEvents.length - 1];
   const visibleEventDefinition = visibleEvent ? getCityEventDefinition(visibleEvent.id) : undefined;
   if (!visibleEventDefinition && activeEvents.length === 0) return null;
 
   return (
-    <aside className="city-event-banner" aria-live="polite">
+    <motion.aside
+      className="city-event-banner"
+      key={`${visibleEventDefinition?.id ?? 'city-events'}-${game.pendingCityEvent?.round ?? 'active'}`}
+      aria-live="polite"
+      initial={{ opacity: 0, y: -10, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
       {visibleEventDefinition && (
         <div className="city-event-main">
           <span>Подія міста</span>
@@ -574,7 +631,7 @@ const CityEventBanner = ({ game }: { game: GameState }) => {
           })}
         </div>
       )}
-    </aside>
+    </motion.aside>
   );
 };
 
@@ -737,6 +794,7 @@ const BoardJailTurnPrompt = ({
   const hasExitCard = currentPlayer.jailCards > 0;
   const jailFine = getEffectiveFineAmount(game, JAIL_FINE);
   const canPay = hasExitCard || currentPlayer.money >= jailFine;
+  const singleDieRolls = hasSingleDieCityEvent(game);
 
   return (
     <motion.article
@@ -754,8 +812,9 @@ const BoardJailTurnPrompt = ({
         <strong>{currentPlayer.jailTurns}</strong>
       </div>
       <p>
-        Залишилось ходів: {currentPlayer.jailTurns}. Сплатіть штраф або киньте кубики: дубль одразу виводить з
-        тюрми і рухає пешку.
+        {singleDieRolls
+          ? `Залишилось ходів: ${currentPlayer.jailTurns}. Через ремонт доріг зараз кидається 1 кубик, тому дубль не може вивести з тюрми.`
+          : `Залишилось ходів: ${currentPlayer.jailTurns}. Сплатіть штраф або киньте кубики: дубль одразу виводить з тюрми і рухає пешку.`}
       </p>
       <div className="jail-actions">
         <button
@@ -1307,16 +1366,16 @@ const BoardActionDock = ({
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
   const pendingCardTile = game.pendingCardDraw ? getTile(game.pendingCardDraw.tileId) : undefined;
-  const diceLabel = isDiceRolling ? '...' : `${game.dice[0]} + ${game.dice[1]}`;
+  const diceLabel = isDiceRolling ? '...' : formatDiceRoll(game.dice);
   const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
   const isCurrentPlayerJailed = currentPlayer.jailTurns > 0;
 
   return (
     <div className="board-action-dock">
-      <div className="dock-dice" aria-label={`Кубики: ${game.dice[0]} і ${game.dice[1]}`}>
+      <div className="dock-dice" aria-label={formatDiceAria(game.dice)}>
         <DiceIcon />
         <div>
-          <span>Кубики</span>
+          <span>{visibleDiceValues(game.dice).length === 1 ? 'Кубик' : 'Кубики'}</span>
           <strong>{diceLabel}</strong>
         </div>
       </div>
@@ -1378,15 +1437,21 @@ const BoardActionDock = ({
           <span className="dock-note">Платіж {formatMoney(game.pendingPayment.amount)}</span>
         )}
 
-        {game.phase === 'turnEnd' && (
-          <span className="dock-note">
-            {hasPendingTrade
-              ? 'Очікуємо відповідь на угоду'
-              : hasDoubleRoll
-                ? 'Дубль: киньте кубики ще раз'
-                : 'Хід завершується автоматично'}
-          </span>
-        )}
+        {game.phase === 'turnEnd' &&
+          (hasDoubleRoll && !hasPendingTrade ? (
+            <button
+              className="primary"
+              disabled={!isLocalTurn}
+              onClick={() => dispatch({ type: 'continue_turn', playerId: currentPlayer.id })}
+            >
+              <RotateCcw size={18} />
+              Кинути ще раз
+            </button>
+          ) : (
+            <span className="dock-note">
+              {hasPendingTrade ? 'Очікуємо відповідь на угоду' : 'Хід завершується автоматично'}
+            </span>
+          ))}
 
         {(game.phase === 'manage' || game.phase === 'trade') && (
           <button
@@ -1433,6 +1498,7 @@ const BoardActionDock = ({
 const DiceRollOverlay = ({ game, isRolling, rollingKey }: { game: GameState; isRolling: boolean; rollingKey: number }) => {
   const rollingPlayerId = game.phase === 'orderRoll' ? game.lastOrderRollPlayerId : game.currentPlayerId;
   const currentPlayer = game.players.find((player) => player.id === rollingPlayerId);
+  const isSingleDieRoll = visibleDiceValues(game.dice).length === 1;
 
   return (
     <AnimatePresence>
@@ -1448,7 +1514,7 @@ const DiceRollOverlay = ({ game, isRolling, rollingKey }: { game: GameState; isR
             <div className="dice-roll-heading">
               <PlayerFigurine player={currentPlayer} />
               <div>
-                <span>Кидає кубики</span>
+                <span>{isSingleDieRoll ? 'Кидає кубик' : 'Кидає кубики'}</span>
                 <strong>{currentPlayer.name}</strong>
               </div>
             </div>
@@ -1501,6 +1567,61 @@ const CardDrawOverlay = ({ game }: { game: GameState }) => {
               <p>{card.text}</p>
             </motion.article>
           </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
+
+const CityEventReveal = ({ event }: { event?: PendingCityEvent }) => {
+  const [visibleEvent, setVisibleEvent] = useState<PendingCityEvent | undefined>();
+  const eventKey = event ? `${event.id}:${event.round}` : '';
+  const lastEventKeyRef = useRef(eventKey);
+
+  useEffect(() => {
+    if (!event || !eventKey) {
+      lastEventKeyRef.current = '';
+      setVisibleEvent(undefined);
+      return;
+    }
+    if (eventKey === lastEventKeyRef.current) return;
+    lastEventKeyRef.current = eventKey;
+    setVisibleEvent(event);
+
+    const timer = window.setTimeout(() => {
+      setVisibleEvent((current) => (current?.id === event.id && current.round === event.round ? undefined : current));
+    }, CITY_EVENT_REVEAL_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [event, eventKey]);
+
+  return (
+    <AnimatePresence>
+      {visibleEvent && (
+        <motion.div
+          className="city-event-reveal"
+          key={`${visibleEvent.id}-${visibleEvent.round}`}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.24 }}
+          aria-live="assertive"
+        >
+          <motion.article
+            className="city-event-reveal-card"
+            initial={{ opacity: 0, y: 26, scale: 0.82 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 210, damping: 18 }}
+          >
+            <span className="city-event-reveal-glow" aria-hidden />
+            <span className="city-event-reveal-sweep" aria-hidden />
+            <div>
+              <span>Подія міста</span>
+              <strong>{visibleEvent.title}</strong>
+              <p>{visibleEvent.text}</p>
+            </div>
+          </motion.article>
         </motion.div>
       )}
     </AnimatePresence>
@@ -1692,12 +1813,14 @@ const TileCell = ({
   tradeDraft,
   tradePlayerId,
   activeTradeOffer,
+  hasPawn,
 }: {
   tileId: number;
   onSelectProperty: (tileId: number) => void;
   tradeDraft?: TradeDraft;
   tradePlayerId: string;
   activeTradeOffer?: TradeOffer;
+  hasPawn: boolean;
 }) => {
   const { game } = useGameStore();
   const tile = getTile(tileId);
@@ -1715,7 +1838,7 @@ const TileCell = ({
 
   return (
     <motion.article
-      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${tradeState ? `trade-${tradeState}` : ''}`}
+      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${tradeState ? `trade-${tradeState}` : ''} ${hasPawn ? 'occupied' : ''}`}
       role={isInspectable ? 'button' : undefined}
       tabIndex={isInspectable ? 0 : undefined}
       style={
@@ -1725,6 +1848,7 @@ const TileCell = ({
           width: `${position.width}%`,
           height: `${position.height}%`,
           '--owner-color': owner?.color ?? 'transparent',
+          '--group-color': tile.type === 'city' ? tile.groupColor : 'rgba(148, 163, 184, 0.42)',
         } as CSSProperties
       }
       onClick={() => {
@@ -1738,9 +1862,10 @@ const TileCell = ({
       whileHover={{ y: -4, scale: 1.02 }}
       transition={{ type: 'spring', stiffness: 260, damping: 20 }}
     >
+      <span className="tile-pawn-zone" aria-hidden />
       {tile.type === 'city' && (
         <>
-          <img src={tile.image} alt="" className="tile-image" />
+          <CityTileArt tile={tile} />
           <span className="group-band" style={{ background: tile.groupColor }} />
         </>
       )}
@@ -1775,7 +1900,7 @@ const TileCell = ({
         <div className="tile-name">{tile.name}</div>
         {isPropertyTile(tile) && (
           <div className="tile-price">
-            {property?.mortgaged ? 'Заставлено' : owner ? `Для інших ${formatMoney(rent ?? 0)}` : formatMoney(price ?? tile.price)}
+            {property?.mortgaged ? 'Заставлено' : owner ? formatMoney(rent ?? 0) : formatMoney(price ?? tile.price)}
           </div>
         )}
       </div>
@@ -1785,6 +1910,50 @@ const TileCell = ({
       )}
     </motion.article>
   );
+};
+
+const CityTileArt = ({ tile }: { tile: CityTile }) => {
+  const artKind = CITY_TILE_ART[tile.citySlug] ?? 'urban';
+  const Icon = getCityTileIcon(artKind);
+
+  return (
+    <div className={`city-tile-art city-art-${artKind}`} aria-hidden>
+      <span className="city-art-wash" />
+      <span className="city-art-pattern" />
+      <span className="city-art-skyline">
+        <i />
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className="city-art-icon">
+        <Icon size={22} strokeWidth={2.35} />
+      </span>
+    </div>
+  );
+};
+
+const getCityTileIcon = (artKind: CityArtKind) => {
+  switch (artKind) {
+    case 'capital':
+      return Landmark;
+    case 'castle':
+      return Castle;
+    case 'coast':
+      return Sailboat;
+    case 'forest':
+      return Trees;
+    case 'industrial':
+      return Factory;
+    case 'mountain':
+      return Mountain;
+    case 'river':
+      return Waves;
+    case 'civic':
+      return MapPinned;
+    default:
+      return Building;
+  }
 };
 
 const TileBuildings = ({ houses, color }: { houses: number; color: string }) => {
@@ -1850,6 +2019,12 @@ const TileIcon = ({ tile }: { tile: ReturnType<typeof getTile> }) => {
           <BadgePercent {...iconProps} />
         </div>
       );
+    case 'utility':
+      return (
+        <div className={`tile-icon utility-icon ${tile.utilityKey}`}>
+          <Layers {...iconProps} />
+        </div>
+      );
     default:
       return null;
   }
@@ -1873,21 +2048,20 @@ const BoardPawns = ({ game, displayPositions }: { game: GameState; displayPositi
           return (
             <motion.div
               className={`board-pawn ${player.jailTurns > 0 ? 'jailed' : ''} ${isTurnStartPawn ? 'turn-start' : ''}`}
-              layoutId={`token-${player.id}`}
               data-player-id={player.id}
               data-jail-turns={player.jailTurns > 0 ? player.jailTurns : undefined}
               title={player.name}
               key={player.id}
+              initial={false}
+              animate={{ left: `${point.x}%`, top: `${point.y}%` }}
+              transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
               style={
                 {
                   '--pawn-color': player.color,
                   '--pawn-scale': isTurnStartPawn ? baseScale * 1.28 : baseScale,
-                  left: `${point.x}%`,
-                  top: `${point.y}%`,
                   zIndex: 40 + index + (isTurnStartPawn ? 20 : 0),
                 } as CSSProperties
               }
-              transition={{ type: 'spring', stiffness: 230, damping: 20 }}
             >
               <PlayerFigurine player={player} />
             </motion.div>
@@ -3426,6 +3600,9 @@ const getBuildInfo = (game: GameState, player: Player, tile: CityTile) => {
   if (game.phase !== 'rolling') {
     return { canBuild: false, reason: 'Будувати можна лише до кидка кубиків.' };
   }
+  if (hasBuildingBlockedCityEvent(game)) {
+    return { canBuild: false, reason: 'Будівництво заборонене через подію міста.' };
+  }
   if (!group.every((groupTile) => game.properties[groupTile.id]?.ownerId === player.id)) {
     return { canBuild: false, reason: 'Потрібна вся кольорова група.' };
   }
@@ -3607,6 +3784,26 @@ const getProjectedRent = (game: GameState, tile: PropertyTile, playerId: string)
 
   return calculateRent(next, tile, game.dice[0] + game.dice[1]);
 };
+
+const visibleDiceValues = (dice: [number, number]) => {
+  const values = dice.filter((value) => value > 0);
+  return values.length > 0 ? values : [1];
+};
+
+const formatDiceRoll = (dice: [number, number]) => visibleDiceValues(dice).join(' + ');
+
+const formatDiceAria = (dice: [number, number]) => {
+  const values = visibleDiceValues(dice);
+  return values.length === 1 ? `Кубик: ${values[0]}` : `Кубики: ${values[0]} і ${values[1]}`;
+};
+
+const isDoubleDiceRoll = (dice: [number, number]) => dice[1] > 0 && dice[0] === dice[1];
+
+const hasSingleDieCityEvent = (game: GameState) =>
+  (game.activeCityEvents ?? []).some((event) => getCityEventDefinition(event.id).effects.singleDieRolls);
+
+const hasBuildingBlockedCityEvent = (game: GameState) =>
+  (game.activeCityEvents ?? []).some((event) => getCityEventDefinition(event.id).effects.buildingBlocked);
 
 const formatMoney = (amount: number) => `${amount}₴`;
 
@@ -4009,7 +4206,7 @@ const useTurnTimer = (
 
 const useAutoContinueTurn = (
   game: GameState,
-  isLocalTurn: boolean,
+  canAutoContinue: boolean,
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
   isBoardBusy: boolean,
 ) => {
@@ -4022,23 +4219,23 @@ const useAutoContinueTurn = (
     game.phase === 'turnEnd' &&
       currentPlayer?.position === 10 &&
       game.lastDice &&
-      game.lastDice[0] !== game.lastDice[1] &&
+      !isDoubleDiceRoll(game.lastDice) &&
       game.diceRollId > 0,
   );
 
   useEffect(() => {
-    if (!isLocalTurn || !isJailRollEnd || hasPendingTrade || jailSentRef.current === autoKey) return;
+    if (!canAutoContinue || !isJailRollEnd || hasPendingTrade || jailSentRef.current === autoKey) return;
     jailSentRef.current = autoKey;
     const timer = window.setTimeout(() => {
       dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
     }, DICE_ROLL_ANIMATION_MS + 450);
 
     return () => window.clearTimeout(timer);
-  }, [autoKey, dispatch, game.currentPlayerId, hasPendingTrade, isJailRollEnd, isLocalTurn]);
+  }, [autoKey, canAutoContinue, dispatch, game.currentPlayerId, hasPendingTrade, isJailRollEnd]);
 
   useEffect(() => {
     if (
-      !isLocalTurn ||
+      !canAutoContinue ||
       game.phase !== 'turnEnd' ||
       isJailRollEnd ||
       isBoardBusy ||
@@ -4056,7 +4253,7 @@ const useAutoContinueTurn = (
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [autoKey, dispatch, game, hasPendingTrade, isBoardBusy, isJailRollEnd, isLocalTurn]);
+  }, [autoKey, canAutoContinue, dispatch, game, hasPendingTrade, isBoardBusy, isJailRollEnd]);
 };
 
 const useDiceRollAnimation = (game: GameState, enabled = true) => {
@@ -4217,14 +4414,17 @@ const boardPosition = (id: number) => {
 
 const pawnPoint = (tileId: number, index: number, total: number) => {
   const position = boardPosition(tileId);
-  const baseX = position.left + position.width / 2;
-  const baseY = position.top + position.height / 2;
-  const offsets = pawnOffsets(total)[index] ?? { x: 0, y: 0 };
+  const base = pawnBasePoint(position);
+  const offsets = pawnOffsets(total, position)[index] ?? { x: 0, y: 0 };
 
-  if (position.side === 'bottom') return { x: baseX + offsets.x, y: baseY - 2.35 + offsets.y };
-  if (position.side === 'top') return { x: baseX + offsets.x, y: baseY + 2.35 + offsets.y };
-  if (position.side === 'left') return { x: baseX + 2.35 + offsets.x, y: baseY + offsets.y };
-  return { x: baseX - 2.35 + offsets.x, y: baseY + offsets.y };
+  return { x: base.x + offsets.x, y: base.y + offsets.y };
+};
+
+const pawnBasePoint = (position: ReturnType<typeof boardPosition>) => {
+  if (position.side === 'bottom') return { x: position.left + position.width / 2, y: position.top + position.height * 0.37 };
+  if (position.side === 'top') return { x: position.left + position.width / 2, y: position.top + position.height * 0.63 };
+  if (position.side === 'left') return { x: position.left + position.width * 0.62, y: position.top + position.height / 2 };
+  return { x: position.left + position.width * 0.38, y: position.top + position.height / 2 };
 };
 
 const tileCenterPoint = (tileId: number) => {
@@ -4235,34 +4435,39 @@ const tileCenterPoint = (tileId: number) => {
   };
 };
 
-const pawnOffsets = (total: number) => {
-  if (total <= 1) return [{ x: 0, y: 0 }];
-  if (total === 2) return [{ x: -1.15, y: 0 }, { x: 1.15, y: 0 }];
-  if (total === 3) return [{ x: -1.15, y: 0.75 }, { x: 1.15, y: 0.75 }, { x: 0, y: -1 }];
+const pawnOffsets = (total: number, position: ReturnType<typeof boardPosition>) => {
+  const isHorizontal = position.side === 'top' || position.side === 'bottom';
+  const stepX = isHorizontal ? Math.min(position.width * 0.24, 2.05) : Math.min(position.width * 0.085, 1.05);
+  const stepY = isHorizontal ? Math.min(position.height * 0.085, 1.25) : Math.min(position.height * 0.24, 1.58);
+  const make = (x: number, y: number) => ({ x: x * stepX, y: y * stepY });
+
+  if (total <= 1) return [make(0, 0)];
+  if (total === 2) return [make(-0.62, 0), make(0.62, 0)];
+  if (total === 3) return [make(-0.72, 0.62), make(0.72, 0.62), make(0, -0.72)];
   if (total === 5) {
     return [
-      { x: -2, y: 0.9 },
-      { x: 0, y: 0.9 },
-      { x: 2, y: 0.9 },
-      { x: -1, y: -1 },
-      { x: 1, y: -1 },
+      make(-1, 0.72),
+      make(0, 0.72),
+      make(1, 0.72),
+      make(-0.58, -0.72),
+      make(0.58, -0.72),
     ];
   }
   if (total >= 6) {
     return [
-      { x: -2, y: 0.9 },
-      { x: 0, y: 0.9 },
-      { x: 2, y: 0.9 },
-      { x: -2, y: -1 },
-      { x: 0, y: -1 },
-      { x: 2, y: -1 },
+      make(-1, 0.72),
+      make(0, 0.72),
+      make(1, 0.72),
+      make(-1, -0.72),
+      make(0, -0.72),
+      make(1, -0.72),
     ];
   }
   return [
-    { x: -1.15, y: 0.9 },
-    { x: 1.15, y: 0.9 },
-    { x: -1.15, y: -1 },
-    { x: 1.15, y: -1 },
+    make(-0.7, 0.72),
+    make(0.7, 0.72),
+    make(-0.7, -0.72),
+    make(0.7, -0.72),
   ];
 };
 

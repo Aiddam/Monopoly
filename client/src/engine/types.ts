@@ -25,6 +25,9 @@ export type CityEventId =
   | 'night-market'
   | 'construction-permit'
   | 'bank-audit'
+  | 'bank-inspection'
+  | 'road-repair'
+  | 'mass-protest'
   | 'regional-festival'
   | 'transport-strike'
   | 'utility-modernization'
@@ -182,6 +185,9 @@ export interface CityEventEffect {
   fineMultiplier?: number;
   startAuctionOnUnowned?: boolean;
   auctionMinimumMultiplier?: number;
+  cashPaymentPercent?: number;
+  singleDieRolls?: boolean;
+  buildingBlocked?: boolean;
 }
 
 export interface CityEventDefinition {

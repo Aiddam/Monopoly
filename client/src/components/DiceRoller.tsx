@@ -10,6 +10,7 @@ interface DiceRollerProps {
 
 export const DiceRoller = ({ dice, rollingKey, active = false, variant = 'panel' }: DiceRollerProps) => {
   const boxId = useMemo(() => `dice-box-${Math.random().toString(36).slice(2)}`, []);
+  const diceValues = visibleDiceValues(dice);
   const boxRef = useRef<DiceBox | null>(null);
   const lastRollKeyRef = useRef<number | undefined>(undefined);
   const initialDiceRef = useRef(dice);
@@ -86,21 +87,33 @@ export const DiceRoller = ({ dice, rollingKey, active = false, variant = 'panel'
   return (
     <div
       className={`dice-stage dice-stage-${variant} dice-box-stage ${active || rolling ? 'is-rolling' : 'is-settled'}`}
-      aria-label={`Кубики: ${dice[0]} і ${dice[1]}`}
+      aria-label={formatDiceAria(diceValues)}
     >
       <div className="dice-box-mount" id={boxId} />
       {!initialized && !failed && <div className="dice-box-loading">Готуємо кубики...</div>}
       {failed && (
-        <div className="dice-box-fallback" aria-hidden>
-          <span>{dice[0]}</span>
-          <span>{dice[1]}</span>
+        <div className={`dice-box-fallback ${diceValues.length === 1 ? 'single-die' : ''}`} aria-hidden>
+          {diceValues.map((value, index) => (
+            <span key={`${value}-${index}`}>{value}</span>
+          ))}
         </div>
       )}
     </div>
   );
 };
 
-const toRollNotation = (dice: [number, number]) => `2d6@${dice[0]},${dice[1]}`;
+const visibleDiceValues = (dice: [number, number]) => {
+  const values = dice.filter((value) => value > 0);
+  return values.length > 0 ? values : [1];
+};
+
+const formatDiceAria = (values: number[]) =>
+  values.length === 1 ? `Кубик: ${values[0]}` : `Кубики: ${values[0]} і ${values[1]}`;
+
+const toRollNotation = (dice: [number, number]) => {
+  const values = visibleDiceValues(dice);
+  return `${values.length}d6@${values.join(',')}`;
+};
 
 const disposeDiceBox = (box: DiceBox) => {
   const internals = box as DiceBox & {

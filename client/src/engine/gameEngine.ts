@@ -118,7 +118,7 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       next = rollForTurnOrder(state, action.playerId, action.dice ?? randomDice());
       break;
     case 'roll':
-      next = rollDice(state, action.playerId, action.dice ?? randomDice());
+      next = rollDice(state, action.playerId, action.dice ?? randomDice(getRollDiceCount(state)));
       break;
     case 'buy':
       next = buyPendingProperty(state, action.playerId);
@@ -264,7 +264,7 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
     rent = [0, money(25), money(50), money(100), money(200)][bankCount] ?? money(200);
   } else if (tile.type === 'utility') {
     const utilityCount = ownedProperties(state, ownerId).filter((owned) => owned.type === 'utility').length;
-    rent = diceTotal * (utilityCount === 2 ? money(10) : money(4));
+    rent = diceTotal * (utilityCount === 2 ? money(12) : money(6));
   } else {
     const houses = state.properties[tile.id].houses;
     const base = tile.rents[houses];
@@ -340,6 +340,20 @@ const getCityEventUnmortgageMultiplier = (state: GameState): number =>
 
 const getCityEventFineMultiplier = (state: GameState): number =>
   getActiveCityEventDefinitions(state).reduce((multiplier, event) => multiplier * (event.effects.fineMultiplier ?? 1), 1);
+
+const hasSingleDieRolls = (state: GameState): boolean =>
+  getActiveCityEventDefinitions(state).some((event) => event.effects.singleDieRolls);
+
+const isBuildingBlockedByCityEvent = (state: GameState): boolean =>
+  getActiveCityEventDefinitions(state).some((event) => event.effects.buildingBlocked);
+
+const getRollDiceCount = (state: GameState): 1 | 2 => (hasSingleDieRolls(state) ? 1 : 2);
+
+const normalizeDiceForRoll = (state: GameState, dice: [number, number]): [number, number] =>
+  getRollDiceCount(state) === 1 ? [dice[0], 0] : dice;
+
+const isDoubleDice = (dice: [number, number] | undefined): boolean =>
+  Boolean(dice && dice[1] > 0 && dice[0] === dice[1]);
 
 export const getEffectiveFineAmount = (state: GameState, amount: number): number =>
   ceilMoney(amount * getCityEventFineMultiplier(state) * getLateGameFineMultiplier(state.turn));
@@ -422,14 +436,16 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
   if (hasPendingTrade(state)) throw new Error('Спочатку прийміть або відхиліть активну угоду.');
 
   const player = getPlayer(state, playerId);
-  const isDouble = dice[0] === dice[1];
+  const normalizedDice = normalizeDiceForRoll(state, dice);
+  const isSingleDieRoll = normalizedDice[1] <= 0;
+  const isDouble = isDoubleDice(normalizedDice);
   const isJailed = player.jailTurns > 0;
   const doublesInRow = isJailed ? 0 : isDouble ? state.doublesInRow + 1 : 0;
   let next: GameState = {
     ...state,
-    dice,
+    dice: normalizedDice,
     diceRollId: state.diceRollId + 1,
-    lastDice: dice,
+    lastDice: normalizedDice,
     doublesInRow,
     builtThisRoll: undefined,
   };
@@ -444,9 +460,13 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
       ),
       log: appendLog(
         next,
-        remainingTurns > 0
-          ? `${player.name} не викидає дубль і лишається у вʼязниці (${remainingTurns} ход.).`
-          : `${player.name} не викидає дубль і відсидів строк. Наступного ходу він вільний.`,
+        isSingleDieRoll
+          ? remainingTurns > 0
+            ? `${player.name} кидає один кубик через ремонт доріг і лишається у вʼязниці (${remainingTurns} ход.).`
+            : `${player.name} кидає один кубик через ремонт доріг і відсидів строк. Наступного ходу він вільний.`
+          : remainingTurns > 0
+            ? `${player.name} не викидає дубль і лишається у вʼязниці (${remainingTurns} ход.).`
+            : `${player.name} не викидає дубль і відсидів строк. Наступного ходу він вільний.`,
       ),
     };
   }
@@ -465,7 +485,7 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
     return sendToJail({ ...next, doublesInRow: 0 }, playerId, 'Три дублі поспіль. Гравець іде до вʼязниці.');
   }
 
-  return movePlayer(next, playerId, dice[0] + dice[1]);
+  return movePlayer(next, playerId, normalizedDice[0] + normalizedDice[1]);
 };
 
 const movePlayer = (state: GameState, playerId: string, steps: number): GameState => {
@@ -923,6 +943,7 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
   if (tile.type !== 'city') throw new Error('Будувати можна тільки в містах.');
   const property = state.properties[tileId];
   const player = getPlayer(state, playerId);
+  if (isBuildingBlockedByCityEvent(state)) throw new Error('Будівництво заборонене через подію міста.');
   if (property.ownerId !== playerId) throw new Error('Місто належить іншому гравцю.');
   if (!ownsFullGroup(state, playerId, tile.group)) throw new Error('Потрібна монополія групи.');
   if (state.builtThisRoll?.playerId === playerId && state.builtThisRoll.diceRollId === state.diceRollId) {
@@ -1456,7 +1477,7 @@ const drawCityEvent = (state: GameState): GameState => {
           },
         ]
       : state.activeCityEvents ?? [];
-  const next: GameState = {
+  const nextBeforeStartEffects: GameState = {
     ...state,
     cityEventDeck: restDeck,
     cityEventDiscard: [...(state.cityEventDiscard ?? []), event.id],
@@ -1469,8 +1490,26 @@ const drawCityEvent = (state: GameState): GameState => {
     },
     log: appendLog(state, `Подія міста: ${event.title}. ${event.text}`, 'good'),
   };
+  const next = applyCityEventStartEffects(nextBeforeStartEffects, event);
 
   return event.effects.startAuctionOnUnowned ? startCityEventAuction(next, event) : next;
+};
+
+const applyCityEventStartEffects = (state: GameState, event: CityEventDefinition): GameState => {
+  const cashPaymentPercent = event.effects.cashPaymentPercent;
+  if (!cashPaymentPercent) return state;
+
+  const payments = state.players.map((player) =>
+    player.isBankrupt ? 0 : Math.max(0, Math.min(player.money, ceilMoney(Math.max(0, player.money) * cashPaymentPercent))),
+  );
+  const total = payments.reduce((sum, payment) => sum + payment, 0);
+  if (total <= 0) return state;
+
+  return {
+    ...state,
+    players: state.players.map((player, index) => ({ ...player, money: player.money - payments[index] })),
+    log: appendLog(state, `${event.title}: гравці сплачують банку разом ${total}₴.`, 'bad'),
+  };
 };
 
 const startCityEventAuction = (state: GameState, event: CityEventDefinition): GameState => {
@@ -1586,7 +1625,7 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
   if (hasPendingTrade(state)) throw new Error('Спочатку прийміть або відхиліть активну угоду.');
 
   const player = getPlayer(state, playerId);
-  const rolledDouble = Boolean(state.lastDice && state.lastDice[0] === state.lastDice[1]);
+  const rolledDouble = isDoubleDice(state.lastDice);
   const canRollAgain = rolledDouble && state.doublesInRow > 0 && player.jailTurns === 0;
 
   if (canRollAgain) {
@@ -1935,10 +1974,11 @@ const assertEmergencyMoneyManagementPhase = (state: GameState, playerId: string,
   }
 };
 
-const randomDice = (): [number, number] => [
-  Math.floor(Math.random() * 6) + 1,
-  Math.floor(Math.random() * 6) + 1,
-];
+const randomDice = (diceCount: 1 | 2 = 2): [number, number] => {
+  const first = Math.floor(Math.random() * 6) + 1;
+  if (diceCount === 1) return [first, 0];
+  return [first, Math.floor(Math.random() * 6) + 1];
+};
 
 const createCardDeck = (cards: typeof chanceCards): number[] => {
   const weighted = cards.flatMap((card) => Array(card.rarity === 'rare' ? 1 : 4).fill(card.id));

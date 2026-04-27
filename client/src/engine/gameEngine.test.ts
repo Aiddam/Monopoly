@@ -171,6 +171,18 @@ describe('Ukraine Monopoly engine', () => {
     expect(calculateRent(game, mono)).toBe(money(100));
   });
 
+  it('charges utility rent at x6 for one service and x12 for both services', () => {
+    let game = createInitialGame(['Олена', 'Тарас'], 'utility-rent');
+    game = withOwnership(game, 'p1', [12]);
+
+    const electric = getTile(12);
+    if (electric.type !== 'utility') throw new Error('Expected electric service to be a utility.');
+    expect(calculateRent(game, electric, 7)).toBe(money(42));
+
+    game = withOwnership(game, 'p1', [12, 28]);
+    expect(calculateRent(game, electric, 7)).toBe(money(84));
+  });
+
   it('waits for a rent decision and then transfers rent on pay', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'rent-decision');
     game = withOwnership(game, 'p2', [1]);
@@ -1269,6 +1281,50 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(game.phase).toBe('payment');
     expect(game.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(400), tileId: 4, source: 'tax' });
+  });
+
+  it('charges every active player 10% cash when bank inspection is drawn', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-bank-inspection');
+    game = {
+      ...game,
+      cityEventDeck: ['bank-inspection'],
+      cityEventDiscard: [],
+      players: game.players.map((player) => (player.id === 'p2' ? { ...player, money: money(987) } : player)),
+    };
+
+    for (let index = 0; index < 6; index += 1) {
+      game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: game.currentPlayerId });
+    }
+
+    expect(game.pendingCityEvent?.id).toBe('bank-inspection');
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1350));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(888));
+  });
+
+  it('uses one die during road repair and prevents jail escape by doubles', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-road-repair');
+    game = {
+      ...game,
+      activeCityEvents: [{ id: 'road-repair', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, position: 10, jailTurns: 2 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [6, 6] });
+
+    expect(game.dice).toEqual([6, 0]);
+    expect(game.phase).toBe('turnEnd');
+    expect(game.players.find((player) => player.id === 'p1')).toMatchObject({ position: 10, jailTurns: 1 });
+  });
+
+  it('blocks building during a mass protest city event', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-mass-protest');
+    game = withOwnership(game, 'p1', [1, 3]);
+    game = {
+      ...game,
+      activeCityEvents: [{ id: 'mass-protest', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
+    };
+
+    expect(() => reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 })).toThrow('Будівництво заборонене');
   });
 
   it('raises prices and taxes later in the game without raising rent', () => {

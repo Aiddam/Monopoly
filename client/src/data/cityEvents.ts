@@ -126,6 +126,33 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     },
   },
   {
+    id: 'bank-inspection',
+    title: 'Банківська перевірка',
+    text: 'Кожен гравець одразу сплачує 10% від своїх готівкових коштів у банк.',
+    durationRounds: 0,
+    effects: {
+      cashPaymentPercent: 0.1,
+    },
+  },
+  {
+    id: 'road-repair',
+    title: 'Ремонт доріг',
+    text: '2 раунди гравці кидають лише 1 кубик замість 2. Дубль під час такого кидка не може випасти.',
+    durationRounds: 2,
+    effects: {
+      singleDieRolls: true,
+    },
+  },
+  {
+    id: 'mass-protest',
+    title: 'Масовий протест',
+    text: '2 раунди будівництво заборонене.',
+    durationRounds: 2,
+    effects: {
+      buildingBlocked: true,
+    },
+  },
+  {
     id: 'regional-festival',
     title: 'Фестиваль регіонів',
     text: 'Оренда на зелених, синіх і блакитних вулицях +30% на 2 раунди.',

@@ -460,9 +460,18 @@ input:focus {
   width: min(calc(124vh - 106px), 100%);
   min-width: 0;
   aspect-ratio: 1.32 / 1;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px) 0 0 / 8.45% 100%,
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px) 0 0 / 100% 7.12%,
+    linear-gradient(145deg, rgba(15, 23, 42, 0.98), rgba(6, 12, 23, 0.98));
   filter: drop-shadow(0 28px 46px rgba(0, 0, 0, 0.32));
   transform: perspective(1700px) rotateX(2deg);
   transform-origin: center;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+    inset 0 0 46px rgba(2, 6, 23, 0.54);
 }
 
 .board.building-shock {
@@ -484,6 +493,22 @@ input:focus {
     rgba(2, 6, 23, 0.28);
   box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.72);
   content: "";
+}
+
+.board::after {
+  position: absolute;
+  inset: 18% 12%;
+  z-index: 1;
+  border: 1px solid rgba(148, 163, 184, 0.11);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.58), rgba(2, 6, 23, 0.2)),
+    linear-gradient(45deg, rgba(248, 214, 106, 0.035), transparent 38%, rgba(67, 179, 255, 0.035));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    inset 0 24px 80px rgba(2, 6, 23, 0.28);
+  content: "";
+  pointer-events: none;
 }
 
 .board-center {
@@ -548,17 +573,27 @@ input:focus {
   z-index: 2;
   display: grid;
   align-content: end;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 7px;
   padding: 0;
   background:
-    linear-gradient(180deg, rgba(28, 39, 58, 0.98), rgba(12, 20, 33, 0.98)),
+    radial-gradient(circle at 50% 16%, rgba(255, 255, 255, 0.08), transparent 38%),
+    linear-gradient(180deg, rgba(27, 38, 58, 0.98), rgba(9, 15, 27, 0.99)),
     #141e2d;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 8px 16px rgba(2, 6, 23, 0.28);
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    inset 0 -14px 24px rgba(2, 6, 23, 0.26),
+    0 8px 18px rgba(2, 6, 23, 0.3);
   transform: scale(0.988);
   transform-origin: center;
+}
+
+.tile.city {
+  border-color: color-mix(in srgb, var(--group-color) 42%, rgba(148, 163, 184, 0.16));
+  background:
+    radial-gradient(circle at 50% 22%, color-mix(in srgb, var(--group-color) 36%, transparent), transparent 45%),
+    linear-gradient(180deg, color-mix(in srgb, var(--group-color) 18%, rgba(27, 38, 58, 0.98)), rgba(7, 12, 22, 0.99) 68%),
+    #101827;
 }
 
 .tile.inspectable {
@@ -658,39 +693,241 @@ input:focus {
   min-width: 0;
 }
 
-.tile-image {
+.city-tile-art {
+  position: absolute;
+  inset: 10px 6px 34%;
+  z-index: 1;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--group-color) 36%, rgba(255, 255, 255, 0.09));
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--group-color) 76%, #fff8e8);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--group-color) 22%, rgba(15, 23, 42, 0.74)), rgba(2, 6, 23, 0.18)),
+    rgba(15, 23, 42, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -18px 32px rgba(2, 6, 23, 0.22);
+  pointer-events: none;
+}
+
+.city-tile-art::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 38%;
+  background: linear-gradient(180deg, transparent, rgba(2, 6, 23, 0.52));
+  content: "";
+}
+
+.city-art-wash {
+  position: absolute;
+  inset: -28% -20% auto;
+  height: 82%;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--group-color) 68%, transparent), transparent 66%);
+  opacity: 0.42;
+}
+
+.city-art-pattern {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.5;
-  filter: saturate(1.02) contrast(1.02);
-  transform: scale(1.02);
+  opacity: 0.42;
+  mix-blend-mode: screen;
+}
+
+.city-art-industrial .city-art-pattern,
+.city-art-urban .city-art-pattern {
+  background:
+    linear-gradient(90deg, transparent 0 17%, rgba(255, 255, 255, 0.18) 17% 20%, transparent 20% 42%, rgba(255, 255, 255, 0.14) 42% 45%, transparent 45%),
+    repeating-linear-gradient(0deg, transparent 0 10px, rgba(255, 255, 255, 0.1) 10px 11px);
+}
+
+.city-art-river .city-art-pattern,
+.city-art-coast .city-art-pattern {
+  background:
+    radial-gradient(80% 40% at 25% 80%, rgba(255, 255, 255, 0.22), transparent 62%),
+    repeating-radial-gradient(ellipse at 20% 78%, transparent 0 12px, rgba(255, 255, 255, 0.13) 13px 15px);
+}
+
+.city-art-forest .city-art-pattern,
+.city-art-mountain .city-art-pattern {
+  background:
+    linear-gradient(135deg, transparent 0 42%, rgba(255, 255, 255, 0.17) 42% 45%, transparent 45%),
+    linear-gradient(45deg, transparent 0 52%, rgba(255, 255, 255, 0.14) 52% 55%, transparent 55%);
+}
+
+.city-art-castle .city-art-pattern,
+.city-art-capital .city-art-pattern,
+.city-art-civic .city-art-pattern {
+  background:
+    radial-gradient(circle at 50% 32%, rgba(255, 255, 255, 0.2), transparent 18%),
+    repeating-linear-gradient(90deg, transparent 0 18px, rgba(255, 255, 255, 0.1) 18px 20px);
+}
+
+.city-art-icon {
+  position: absolute;
+  top: 43%;
+  left: 50%;
+  z-index: 2;
+  display: grid;
+  width: clamp(28px, 2.7vw, 42px);
+  height: clamp(28px, 2.7vw, 42px);
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--group-color) 44%, rgba(255, 255, 255, 0.14));
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.34);
+  box-shadow:
+    0 10px 22px rgba(2, 6, 23, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  transform: translate(-50%, -50%);
+}
+
+.city-art-skyline {
+  position: absolute;
+  right: 8%;
+  bottom: 6px;
+  left: 8%;
+  z-index: 1;
+  display: flex;
+  height: 36%;
+  align-items: end;
+  justify-content: center;
+  gap: 4px;
+  opacity: 0.72;
+}
+
+.city-art-skyline i {
+  display: block;
+  width: 15%;
+  min-width: 5px;
+  height: 58%;
+  border-radius: 3px 3px 1px 1px;
+  background: color-mix(in srgb, var(--group-color) 44%, rgba(255, 255, 255, 0.72));
+  box-shadow: inset -5px -8px 0 rgba(2, 6, 23, 0.2);
+}
+
+.city-art-skyline i:nth-child(2) {
+  height: 88%;
+}
+
+.city-art-skyline i:nth-child(3) {
+  height: 70%;
+}
+
+.city-art-skyline i:nth-child(4) {
+  height: 46%;
+}
+
+.tile-left .city-tile-art,
+.tile-right .city-tile-art {
+  inset: 7px 8px 7px auto;
+  width: 34%;
+}
+
+.tile-right .city-tile-art {
+  right: auto;
+  left: 8px;
+}
+
+.tile-left .city-art-icon,
+.tile-right .city-art-icon {
+  width: 26px;
+  height: 26px;
+}
+
+.tile-left .city-art-skyline,
+.tile-right .city-art-skyline {
+  display: none;
+}
+
+.tile-pawn-zone {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid rgba(226, 232, 240, 0.08);
+  border-radius: 999px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.035), rgba(15, 23, 42, 0.08)),
+    rgba(2, 6, 23, 0.16);
+  box-shadow:
+    inset 0 0 0 1px rgba(15, 23, 42, 0.22),
+    0 6px 14px rgba(2, 6, 23, 0.08);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.tile.occupied .tile-pawn-zone,
+.tile.trade-offer .tile-pawn-zone,
+.tile.trade-request .tile-pawn-zone,
+.tile.trade-offer-selected .tile-pawn-zone,
+.tile.trade-request-selected .tile-pawn-zone {
+  border-color: rgba(226, 232, 240, 0.16);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.07), rgba(15, 23, 42, 0.12)),
+    rgba(2, 6, 23, 0.3);
+  opacity: 0.62;
+}
+
+.tile-bottom .tile-pawn-zone,
+.tile-top .tile-pawn-zone {
+  left: 50%;
+  width: 58%;
+  height: 28%;
+  transform: translateX(-50%);
+}
+
+.tile-bottom .tile-pawn-zone {
+  top: 20%;
+}
+
+.tile-top .tile-pawn-zone {
+  bottom: 20%;
+}
+
+.tile-left .tile-pawn-zone,
+.tile-right .tile-pawn-zone {
+  top: 50%;
+  width: 34%;
+  height: 60%;
+  transform: translateY(-50%);
+}
+
+.tile-left .tile-pawn-zone {
+  right: 13%;
+}
+
+.tile-right .tile-pawn-zone {
+  left: 13%;
 }
 
 .tile::after {
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(2, 6, 23, 0.08), rgba(2, 6, 23, 0.5));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 38%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.02), rgba(2, 6, 23, 0.34));
   content: "";
+  pointer-events: none;
 }
 
 .group-band {
   position: absolute;
   top: 0;
   left: 0;
-  z-index: 1;
+  z-index: 5;
   width: 100%;
-  height: 8px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+  height: 10px;
+  box-shadow:
+    0 4px 14px color-mix(in srgb, var(--group-color) 36%, transparent),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28);
 }
 
 .tile-left .group-band,
 .tile-right .group-band {
-  width: 8px;
+  width: 10px;
   height: 100%;
-  box-shadow: 4px 0 14px rgba(0, 0, 0, 0.24);
+  box-shadow:
+    4px 0 14px color-mix(in srgb, var(--group-color) 34%, transparent),
+    inset -1px 0 0 rgba(0, 0, 0, 0.28);
 }
 
 .tile-right .group-band {
@@ -720,14 +957,17 @@ input:focus {
 
 .tile-label {
   position: relative;
-  z-index: 2;
+  z-index: 6;
   max-width: 100%;
   min-width: 0;
   border-radius: 5px;
   margin: 0 5px 5px;
-  padding: 5px 5px 4px;
-  background: rgba(7, 12, 22, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.05);
+  padding: 5px 6px 4px;
+  background: rgba(5, 10, 18, 0.78);
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 232, 240, 0.07),
+    0 8px 18px rgba(2, 6, 23, 0.18);
+  backdrop-filter: blur(6px);
 }
 
 .tile-price {
@@ -739,9 +979,12 @@ input:focus {
 }
 
 .tile.city .tile-label {
-  min-height: 42%;
+  min-height: 39%;
   display: grid;
   align-content: end;
+  border-color: color-mix(in srgb, var(--group-color) 38%, rgba(226, 232, 240, 0.06));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--group-color) 12%, rgba(5, 10, 18, 0.84)), rgba(5, 10, 18, 0.82));
 }
 
 .tile.city .tile-name {
@@ -778,10 +1021,48 @@ input:focus {
 .tile.jail,
 .tile.casino,
 .tile.goToJail,
-.tile.go {
+.tile.go,
+.tile.bank,
+.tile.utility {
+  --special-color: #94a3b8;
   background:
-    linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(12, 20, 33, 0.98)),
+    radial-gradient(circle at 50% 22%, color-mix(in srgb, var(--special-color) 32%, transparent), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--special-color) 12%, rgba(30, 41, 59, 0.96)), rgba(10, 17, 29, 0.99)),
     #111a28;
+  border-color: color-mix(in srgb, var(--special-color) 34%, rgba(148, 163, 184, 0.15));
+}
+
+.tile.chance {
+  --special-color: #a78bfa;
+}
+
+.tile.community {
+  --special-color: #86efac;
+}
+
+.tile.tax {
+  --special-color: #fcd34d;
+}
+
+.tile.jail,
+.tile.goToJail {
+  --special-color: #f87171;
+}
+
+.tile.casino {
+  --special-color: #e879f9;
+}
+
+.tile.go {
+  --special-color: #93c5fd;
+}
+
+.tile.bank {
+  --special-color: #60a5fa;
+}
+
+.tile.utility {
+  --special-color: #22d3ee;
 }
 
 .tile.chance .tile-name,
@@ -790,15 +1071,20 @@ input:focus {
 .tile.jail .tile-name,
 .tile.casino .tile-name,
 .tile.goToJail .tile-name,
-.tile.go .tile-name {
+.tile.go .tile-name,
+.tile.bank .tile-name,
+.tile.utility .tile-name {
   color: #dbe7f6;
 }
 
 .tile.go .tile-label,
 .tile.jail .tile-label,
 .tile.casino .tile-label,
-.tile.goToJail .tile-label {
-  background: rgba(15, 23, 42, 0.5);
+.tile.goToJail .tile-label,
+.tile.bank .tile-label,
+.tile.utility .tile-label {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--special-color) 12%, rgba(15, 23, 42, 0.68)), rgba(5, 10, 18, 0.7));
 }
 
 .tile-icon {
@@ -810,10 +1096,15 @@ input:focus {
   width: 38px;
   height: 38px;
   place-items: center;
-  border-radius: 12px;
-  color: rgba(226, 232, 240, 0.86);
-  background: rgba(2, 6, 23, 0.3);
-  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.08);
+  border: 1px solid color-mix(in srgb, var(--special-color) 44%, rgba(226, 232, 240, 0.1));
+  border-radius: 13px;
+  color: color-mix(in srgb, var(--special-color) 78%, #f8fafc);
+  background:
+    radial-gradient(circle at 35% 20%, rgba(255, 255, 255, 0.16), transparent 34%),
+    color-mix(in srgb, var(--special-color) 16%, rgba(2, 6, 23, 0.54));
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 232, 240, 0.06),
+    0 12px 22px rgba(2, 6, 23, 0.24);
   transform: translateX(-50%);
 }
 
@@ -849,26 +1140,36 @@ input:focus {
 
 .casino-icon {
   color: #f0abfc;
-  background: rgba(88, 28, 135, 0.34);
+}
+
+.utility-icon.electric {
+  color: #fde68a;
+}
+
+.utility-icon.water {
+  color: #67e8f9;
 }
 
 .bank-art {
   position: absolute;
   inset: 7px 7px auto auto;
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   place-items: center;
-  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 11px;
   color: white;
   z-index: 3;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  box-shadow:
+    0 10px 22px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 
-.bank-art.mono { background: #111; }
-.bank-art.privat { background: #42a52f; }
-.bank-art.sense { background: #7d59ca; }
-.bank-art.raiffeisen { background: #efc52f; color: #1f1b12; }
+.bank-art.mono { background: linear-gradient(135deg, #334155, #020617); }
+.bank-art.privat { background: linear-gradient(135deg, #4ade80, #166534); }
+.bank-art.sense { background: linear-gradient(135deg, #a78bfa, #4c1d95); }
+.bank-art.raiffeisen { background: linear-gradient(135deg, #fde047, #d97706); color: #1f1b12; }
 
 .owner-dot {
   position: absolute;
@@ -882,6 +1183,15 @@ input:focus {
 
 .owner-dot {
   right: 6px;
+}
+
+.tile.city .owner-dot {
+  top: 11px;
+  z-index: 8;
+  width: 10px;
+  height: 10px;
+  border-width: 2px;
+  box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.48), 0 0 12px color-mix(in srgb, var(--owner-color) 58%, transparent);
 }
 
 .owner-rail {
@@ -934,6 +1244,19 @@ input:focus {
 
 .tile-right .owner-dot {
   right: 11px;
+}
+
+.tile.city .owner-chip {
+  display: none;
+}
+
+.tile-left.city .owner-dot {
+  right: auto;
+  left: 17px;
+}
+
+.tile-right.city .owner-dot {
+  right: 17px;
 }
 
 .tile-buildings {
@@ -1534,6 +1857,7 @@ input:focus {
   width: 34px;
   height: 40px;
   place-items: center;
+  will-change: left, top, transform;
   transform: translate(-50%, -50%) scale(var(--pawn-scale, 1));
 }
 
@@ -1770,6 +2094,10 @@ input:focus {
   background:
     radial-gradient(circle at 50% 48%, rgba(252, 211, 77, 0.16), transparent 42%),
     rgba(2, 6, 23, 0.32);
+}
+
+.dice-box-fallback.single-die {
+  grid-template-columns: 54px;
 }
 
 .dice-box-fallback span {
@@ -4488,6 +4816,8 @@ input:focus {
 }
 
 .city-event-main {
+  position: relative;
+  isolation: isolate;
   min-width: 0;
   overflow: hidden;
   border: 1px solid rgba(252, 211, 77, 0.24);
@@ -4500,10 +4830,39 @@ input:focus {
   backdrop-filter: blur(14px);
 }
 
+.city-event-main::before {
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, transparent, rgba(252, 211, 77, 0.48), transparent),
+    radial-gradient(circle at 18% 50%, rgba(34, 211, 238, 0.22), transparent 42%);
+  opacity: 0;
+  animation: city-event-banner-glow 5200ms ease-out both;
+  content: "";
+}
+
+.city-event-main::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -44%;
+  z-index: 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+  transform: skewX(-18deg);
+  animation: city-event-banner-sweep 2200ms ease-out 240ms both;
+  content: "";
+  pointer-events: none;
+}
+
 .city-event-main span,
 .city-event-main strong,
 .city-event-main p {
   display: block;
+  position: relative;
+  z-index: 1;
 }
 
 .city-event-main span {
@@ -4557,6 +4916,153 @@ input:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
   backdrop-filter: blur(10px);
+}
+
+.city-event-reveal {
+  position: absolute;
+  inset: 0;
+  z-index: 170;
+  display: grid;
+  place-items: center;
+  padding: clamp(18px, 3vw, 34px);
+  pointer-events: none;
+}
+
+.city-event-reveal-card {
+  position: relative;
+  isolation: isolate;
+  width: min(520px, 72%);
+  overflow: hidden;
+  border: 1px solid rgba(252, 211, 77, 0.5);
+  border-radius: 16px;
+  padding: clamp(18px, 2.4vw, 28px);
+  color: #f8fafc;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(252, 211, 77, 0.32), transparent 38%),
+    radial-gradient(circle at 16% 86%, rgba(34, 211, 238, 0.22), transparent 34%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.97));
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+    0 0 44px rgba(252, 211, 77, 0.36),
+    0 28px 90px rgba(2, 6, 23, 0.72);
+  text-align: center;
+}
+
+.city-event-reveal-card div {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  gap: 7px;
+}
+
+.city-event-reveal-card span:not(.city-event-reveal-glow):not(.city-event-reveal-sweep) {
+  color: rgba(252, 211, 77, 0.9);
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.city-event-reveal-card strong {
+  color: #fff8e8;
+  overflow-wrap: anywhere;
+  font-size: clamp(24px, 3.2vw, 42px);
+  font-weight: 950;
+  line-height: 1.02;
+  text-shadow: 0 0 24px rgba(252, 211, 77, 0.32);
+}
+
+.city-event-reveal-card p {
+  max-width: 44ch;
+  margin: 0 auto;
+  color: rgba(226, 232, 240, 0.86);
+  overflow-wrap: anywhere;
+  font-size: clamp(13px, 1.45vw, 16px);
+  font-weight: 850;
+  line-height: 1.35;
+}
+
+.city-event-reveal-glow {
+  position: absolute;
+  inset: -40%;
+  z-index: 0;
+  background:
+    conic-gradient(from 180deg, transparent, rgba(252, 211, 77, 0.32), transparent, rgba(34, 211, 238, 0.22), transparent);
+  animation: city-event-reveal-spin 5200ms linear both;
+  content: "";
+}
+
+.city-event-reveal-sweep {
+  position: absolute;
+  inset: 0 auto 0 -28%;
+  z-index: 1;
+  width: 28%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.26), transparent);
+  transform: skewX(-16deg);
+  animation: city-event-reveal-sweep 2200ms ease-out 420ms both;
+  content: "";
+}
+
+@keyframes city-event-banner-glow {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+  }
+
+  16%,
+  58% {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(8px);
+  }
+}
+
+@keyframes city-event-banner-sweep {
+  from {
+    left: -44%;
+    opacity: 0;
+  }
+
+  18% {
+    opacity: 1;
+  }
+
+  to {
+    left: 112%;
+    opacity: 0;
+  }
+}
+
+@keyframes city-event-reveal-spin {
+  from {
+    transform: rotate(0deg) scale(1);
+    opacity: 0.8;
+  }
+
+  to {
+    transform: rotate(185deg) scale(1.08);
+    opacity: 0;
+  }
+}
+
+@keyframes city-event-reveal-sweep {
+  from {
+    left: -28%;
+    opacity: 0;
+  }
+
+  20% {
+    opacity: 1;
+  }
+
+  to {
+    left: 116%;
+    opacity: 0;
+  }
 }
 
 .board-active-trade {
