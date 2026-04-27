@@ -71,9 +71,9 @@ const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', m
 const CASINO_MAX_BET = money(600);
 const CASINO_DEFAULT_BET = money(100);
 const CASINO_SEGMENTS = [
-  { multiplier: 0, weight: 2.5, color: '#991b1b' },
+  { multiplier: 0, weight: 2, color: '#991b1b' },
   { multiplier: 4, weight: 1, color: '#4338ca' },
-  { multiplier: 1, weight: 2.5, color: '#0f766e' },
+  { multiplier: 1, weight: 2, color: '#0f766e' },
   { multiplier: 6, weight: 1, color: '#0369a1' },
   { multiplier: 2, weight: 1, color: '#15803d' },
   { multiplier: 5, weight: 1, color: '#be123c' },

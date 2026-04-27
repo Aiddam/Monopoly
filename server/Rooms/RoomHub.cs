@@ -38,21 +38,24 @@ public sealed class RoomHub(RoomManager rooms) : Hub
     {
         try
         {
-            var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName, playerId);
-            await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
-            var joinedPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
-            var joined = snapshot.Players.FirstOrDefault(player => player.Id == joinedPeerId);
-            if (joined is null)
-            {
-                throw new HubException("Не вдалося приєднати гравця до кімнати.");
-            }
-            await Clients.OthersInGroup(snapshot.Code).SendAsync("PeerJoined", joined);
-            await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
-            return snapshot;
+            return await JoinRoomCore(code, playerName, playerId);
         }
         catch (InvalidOperationException exception)
         {
             throw new HubException(exception.Message);
+        }
+    }
+
+    public async Task<RoomJoinResult> TryJoinRoom(string code, string playerName, string? playerId = null)
+    {
+        try
+        {
+            var snapshot = await JoinRoomCore(code, playerName, playerId);
+            return new RoomJoinResult(snapshot, null);
+        }
+        catch (InvalidOperationException exception)
+        {
+            return new RoomJoinResult(null, exception.Message);
         }
     }
 
@@ -150,6 +153,22 @@ public sealed class RoomHub(RoomManager rooms) : Hub
         {
             await Clients.Group(snapshot.Code).SendAsync("HostChanged", host.Id);
         }
+    }
+
+    private async Task<RoomSnapshot> JoinRoomCore(string code, string playerName, string? playerId)
+    {
+        var snapshot = rooms.JoinRoom(Context.ConnectionId, code, playerName, playerId);
+        await Groups.AddToGroupAsync(Context.ConnectionId, snapshot.Code);
+        var joinedPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
+        var joined = snapshot.Players.FirstOrDefault(player => player.Id == joinedPeerId);
+        if (joined is null)
+        {
+            throw new InvalidOperationException("Не вдалося приєднати гравця до кімнати.");
+        }
+
+        await Clients.OthersInGroup(snapshot.Code).SendAsync("PeerJoined", joined);
+        await Clients.Group(snapshot.Code).SendAsync("RoomSnapshot", snapshot);
+        return snapshot;
     }
 
     private static string CleanCode(string code) => (code ?? string.Empty).Trim().ToUpperInvariant();

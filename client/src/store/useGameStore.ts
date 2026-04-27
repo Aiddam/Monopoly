@@ -591,7 +591,9 @@ const setConnectionError = (error: unknown) => {
 
 const isRoomNotFoundError = (error: unknown): boolean =>
   error instanceof Error &&
-  (error.message.includes('Кімнату не знайдено') || error.message.includes("Failed to invoke 'JoinRoom' due to an error on the server"));
+  (error.message.includes('Кімнату не знайдено') ||
+    error.message.includes('РљС–РјРЅР°С‚Сѓ РЅРµ Р·РЅР°Р№РґРµРЅРѕ') ||
+    error.message.includes("Failed to invoke 'JoinRoom' due to an error on the server"));
 
 export const canStartRoom = (players: RoomPlayer[]) =>
   players.length >= MIN_PLAYERS &&

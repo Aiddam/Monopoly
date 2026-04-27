@@ -18,6 +18,10 @@ public sealed record RoomSnapshot(
     IReadOnlyList<RoomPlayer> Players,
     bool TestMode);
 
+public sealed record RoomJoinResult(
+    RoomSnapshot? Room,
+    string? Error);
+
 public sealed record RoomRestorePlayer(
     string Id,
     string Name,

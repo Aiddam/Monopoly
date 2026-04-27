@@ -17,6 +17,11 @@ export interface RoomSnapshot {
   testMode: boolean;
 }
 
+interface RoomJoinResult {
+  room?: RoomSnapshot | null;
+  error?: string | null;
+}
+
 export interface SignalPayload {
   fromPeerId: string;
   toPeerId: string;
@@ -141,10 +146,11 @@ export class RoomClient {
     await this.connect();
     const roomCode = normalizeRoomCode(code);
     try {
-      return await this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName, playerId);
+      const result = await this.connection!.invoke<RoomJoinResult>('TryJoinRoom', roomCode, playerName, playerId);
+      return unwrapRoomJoinResult(result);
     } catch (error) {
-      if (!isHubInvokeVersionError(error) || !playerId) throw error;
-      return this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName);
+      if (!isHubInvokeVersionError(error)) throw error;
+      return this.joinRoomLegacy(roomCode, playerName, playerId);
     }
   }
 
@@ -177,6 +183,15 @@ export class RoomClient {
       throw new Error(ROOM_CONNECTION_NOT_READY_MESSAGE);
     }
     return this.connection.invoke<T>(methodName, ...args);
+  }
+
+  private async joinRoomLegacy(roomCode: string, playerName: string, playerId?: string) {
+    try {
+      return await this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName, playerId);
+    } catch (error) {
+      if (!isHubInvokeVersionError(error) || !playerId) throw error;
+      return this.connection!.invoke<RoomSnapshot>('JoinRoom', roomCode, playerName);
+    }
   }
 
   private emitConnectionState(status: RoomConnectionStatus, error?: Error) {
@@ -222,6 +237,11 @@ export const isTransientSignalRDisconnect = (error: unknown): boolean =>
     error.message.includes('Connection disconnected with error'));
 
 const normalizeRoomCode = (code: string) => code.trim().toUpperCase();
+
+const unwrapRoomJoinResult = (result: RoomJoinResult): RoomSnapshot => {
+  if (result.room) return result.room;
+  throw new Error(result.error || 'Не вдалося приєднатися до кімнати.');
+};
 
 const isHubInvokeVersionError = (error: unknown): boolean =>
   error instanceof Error &&
