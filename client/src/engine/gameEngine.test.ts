@@ -248,7 +248,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1450));
   });
 
-  it('surrenders to the rent creditor and clears pending rent', () => {
+  it('makes surrendered properties neutral and pays rent creditor from available cash', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'rent-surrender');
     game = withOwnership(game, 'p1', [3]);
     game = withOwnership(game, 'p2', [1]);
@@ -263,8 +263,35 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.pendingRent).toBeUndefined();
     expect(game.phase).toBe('finished');
     expect(game.winnerId).toBe('p2');
-    expect(game.properties[3].ownerId).toBe('p2');
+    expect(game.properties[3]).toMatchObject({ ownerId: undefined, houses: 0, mortgaged: false });
     expect(game.players.find((player) => player.id === 'p1')?.isBankrupt).toBe(true);
+    expect(game.players.find((player) => player.id === 'p1')?.properties).toEqual([]);
+    expect(game.players.find((player) => player.id === 'p2')?.properties).toEqual([1]);
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1502));
+  });
+
+  it('pays only the cash a surrendering rent debtor still has', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'rent-surrender-cash-limit');
+    game = withOwnership(game, 'p1', [3]);
+    game = withOwnership(game, 'p2', [39]);
+    game = {
+      ...game,
+      properties: {
+        ...game.properties,
+        39: { ...game.properties[39], houses: 5 },
+      },
+      players: game.players.map((player) =>
+        player.id === 'p1' ? { ...player, position: 37, money: money(100) } : player,
+      ),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+    game = reduceGame(game, { type: 'declare_bankruptcy', playerId: 'p1' });
+
+    expect(game.pendingRent).toBeUndefined();
+    expect(game.properties[3].ownerId).toBeUndefined();
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(0);
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1600));
   });
 
   it('opens casino on tile 20 and lets the player skip it', () => {

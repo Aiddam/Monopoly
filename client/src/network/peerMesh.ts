@@ -77,23 +77,40 @@ export class PeerMesh {
     const peerId = signal.fromPeerId;
     this.activePeerIds.add(peerId);
     const peer = this.peers.get(peerId) ?? (await this.createPeer(peerId, false));
+    if (peer.signalingState === 'closed') return;
 
     if (signal.kind === 'offer') {
-      await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
-      await this.flushPendingIceCandidates(peerId, peer);
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      await this.sendSignalIfActive(peerId, peer, 'answer', answer);
+      await this.handleOffer(peerId, peer, signal.payload as RTCSessionDescriptionInit);
+      return;
     }
 
     if (signal.kind === 'answer') {
-      await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
-      await this.flushPendingIceCandidates(peerId, peer);
+      await this.handleAnswer(peerId, peer, signal.payload as RTCSessionDescriptionInit);
+      return;
     }
 
     if (signal.kind === 'ice') {
       await this.addOrQueueIceCandidate(peerId, peer, signal.payload as RTCIceCandidateInit);
     }
+  }
+
+  private async handleOffer(peerId: string, peer: RTCPeerConnection, description: RTCSessionDescriptionInit) {
+    if (this.hasRemoteDescription(peer, description)) return;
+    if (peer.signalingState !== 'stable') return;
+
+    await peer.setRemoteDescription(description);
+    await this.flushPendingIceCandidates(peerId, peer);
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    await this.sendSignalIfActive(peerId, peer, 'answer', answer);
+  }
+
+  private async handleAnswer(peerId: string, peer: RTCPeerConnection, description: RTCSessionDescriptionInit) {
+    if (this.hasRemoteDescription(peer, description)) return;
+    if (peer.signalingState !== 'have-local-offer') return;
+
+    await peer.setRemoteDescription(description);
+    await this.flushPendingIceCandidates(peerId, peer);
   }
 
   broadcast(message: PeerMessage) {
@@ -202,5 +219,9 @@ export class PeerMesh {
     } catch {
       // ICE can arrive during renegotiation or just after a peer closes. SignalR state sync is the source of truth.
     }
+  }
+
+  private hasRemoteDescription(peer: RTCPeerConnection, description: RTCSessionDescriptionInit) {
+    return peer.remoteDescription?.type === description.type && peer.remoteDescription.sdp === description.sdp;
   }
 }

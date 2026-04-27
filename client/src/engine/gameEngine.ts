@@ -1649,16 +1649,22 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
 
 const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const debtor = getPlayer(state, playerId);
-  const paymentCreditorId =
+  const pendingRent = state.pendingRent?.payerId === playerId ? state.pendingRent : undefined;
+  const pendingPayment =
     state.pendingPayment?.payerId === playerId && state.pendingPayment.recipients?.length === 1
-      ? state.pendingPayment.recipients[0].playerId
+      ? state.pendingPayment
       : undefined;
-  const creditorId = state.pendingRent?.payerId === playerId ? state.pendingRent.ownerId : paymentCreditorId;
+  const paymentCreditorId =
+    pendingPayment
+      ? pendingPayment.recipients?.[0]?.playerId
+      : undefined;
+  const creditorId = pendingRent?.ownerId ?? paymentCreditorId;
+  const creditorAmount = Math.min(debtor.money, pendingRent?.amount ?? pendingPayment?.recipients?.[0]?.amount ?? 0);
   let next: GameState = {
     ...state,
     players: state.players.map((player) => {
       if (player.id === playerId) return { ...player, isBankrupt: true, properties: [], money: 0 };
-      if (player.id === creditorId) return { ...player, properties: [...player.properties, ...debtor.properties] };
+      if (player.id === creditorId && creditorAmount > 0) return { ...player, money: player.money + creditorAmount };
       return player;
     }),
     properties: Object.fromEntries(
@@ -1670,7 +1676,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
               mortgaged: false,
               mortgagedAtTurn: undefined,
               mortgageTurnsLeft: undefined,
-              ownerId: creditorId,
+              ownerId: undefined,
             }
           : property,
       ]),
