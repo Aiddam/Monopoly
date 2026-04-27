@@ -7,7 +7,8 @@ export type PeerMessage =
   | { type: 'game:state'; state: GameState }
   | { type: 'sync:request' }
   | { type: 'sync:response'; state: GameState }
-  | { type: 'presence:ping'; at: number };
+  | { type: 'presence:ping'; at: number }
+  | { type: 'emote'; playerId: string; emoteId: string; createdAt: number };
 
 type SendSignal = (toPeerId: string, kind: SignalPayload['kind'], payload: unknown) => Promise<void>;
 type MessageHandler = (message: PeerMessage, fromPeerId: string) => void;

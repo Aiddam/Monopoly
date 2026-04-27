@@ -20,6 +20,13 @@ interface ConnectionState {
   error?: string;
 }
 
+export interface EmoteEvent {
+  id: string;
+  playerId: string;
+  emoteId: string;
+  createdAt: number;
+}
+
 interface GameStore {
   screen: Screen;
   localPlayerId?: string;
@@ -28,6 +35,7 @@ interface GameStore {
   roomClient?: RoomClient;
   peerMesh?: PeerMesh;
   connection: ConnectionState;
+  emotes: EmoteEvent[];
   game?: GameState;
   resumeSavedSession: () => Promise<void>;
   createRoom: (playerName: string, testMode?: boolean) => Promise<void>;
@@ -36,6 +44,7 @@ interface GameStore {
   startLocalDemo: (playerName?: string) => void;
   startRoomGame: () => void;
   dispatch: (action: GameAction, fromPeer?: boolean) => void;
+  sendEmote: (emoteId: string) => void;
   applyRemoteMessage: (message: PeerMessage, fromPeerId: string) => void;
   clearConnectionError: () => void;
   leaveRoom: () => Promise<void>;
@@ -57,6 +66,8 @@ const ROOM_NOT_FOUND_MESSAGE = 'Кімнату не знайдено. Якщо �
 const ROOM_RESTORE_WAIT_MESSAGE = 'Сервер перезапустився. Очікуємо, поки хост відновить кімнату.';
 const STALE_PEER_RELAY_MESSAGE = 'SignalR relay відхилено: peer не в кімнаті.';
 const ROOM_REJOIN_RETRY_MS = 2_500;
+const EMOTE_EVENT_TTL_MS = 3_200;
+const MAX_EMOTE_EVENTS = 8;
 
 let roomRejoinRetryTimer: number | undefined;
 
@@ -82,6 +93,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   room: savedSession?.room,
   game: savedSession?.game,
   connection: { signalr: 'idle', p2p: {} },
+  emotes: [],
 
   async resumeSavedSession() {
     const saved = readSavedSession();
@@ -97,6 +109,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
         game: saved.game,
         room: undefined,
         connection: { signalr: 'idle', p2p: {} },
+        emotes: [],
       });
       return;
     }
@@ -112,6 +125,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       game: saved.game,
       roomClient,
       connection: { signalr: 'connecting', p2p: {} },
+      emotes: [],
     });
 
     try {
@@ -141,7 +155,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const normalizedPlayerName = normalizePlayerName(playerName);
     const localPlayerId = createStablePlayerId();
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId });
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId, emotes: [] });
     try {
       const room = await roomClient.createRoom(normalizedPlayerName, testMode, localPlayerId);
       savePlayerName(normalizedPlayerName);
@@ -159,7 +173,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const normalizedPlayerName = normalizePlayerName(playerName);
     const localPlayerId = createStablePlayerId();
     const roomClient = configureRoomClient();
-    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId });
+    set({ connection: { signalr: 'connecting', p2p: {} }, roomClient, playerName: normalizedPlayerName, localPlayerId, emotes: [] });
     try {
       const room = await roomClient.joinRoom(code, normalizedPlayerName, localPlayerId);
       savePlayerName(normalizedPlayerName);
@@ -191,7 +205,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const normalizedPlayerName = normalizePlayerName(playerName);
     savePlayerName(normalizedPlayerName);
     const game = createInitialGame([normalizedPlayerName, 'Тарас', 'Марія'], 'local-demo', { determineTurnOrder: true });
-    set({ screen: 'game', localPlayerId: game.currentPlayerId, playerName: normalizedPlayerName, room: undefined, game });
+    set({ screen: 'game', localPlayerId: game.currentPlayerId, playerName: normalizedPlayerName, room: undefined, game, emotes: [] });
     persistCurrentSession(get());
   },
 
@@ -246,9 +260,23 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
   },
 
+  sendEmote(emoteId) {
+    const { room, roomClient, peerMesh, localPlayerId, game } = get();
+    const playerId = localPlayerId ?? game?.currentPlayerId;
+    if (!playerId) return;
+
+    const message: PeerMessage = { type: 'emote', playerId, emoteId, createdAt: Date.now() };
+    pushEmoteEvent(message);
+    broadcastRoomMessage(room, roomClient, peerMesh, message);
+  },
+
   applyRemoteMessage(message, _fromPeerId) {
     const { game, room, localPlayerId, peerMesh } = get();
     const isHost = room?.players.find((player) => player.id === localPlayerId)?.isHost;
+    if (message.type === 'emote') {
+      pushEmoteEvent(message);
+      return;
+    }
     if (message.type === 'game:init' || message.type === 'game:state') {
       set({ game: message.state, screen: message.state.phase === 'finished' ? 'finished' : 'game' });
       persistCurrentSession(get());
@@ -286,10 +314,31 @@ export const useGameStore = create<GameStore>((set, get) => ({
       playerName: undefined,
       peerMesh: undefined,
       connection: { signalr: 'idle', p2p: {} },
+      emotes: [],
     });
     clearSavedSession();
   },
 }));
+
+const pushEmoteEvent = (message: Extract<PeerMessage, { type: 'emote' }>) => {
+  const event: EmoteEvent = {
+    id: `${message.playerId}:${message.emoteId}:${message.createdAt}`,
+    playerId: message.playerId,
+    emoteId: message.emoteId,
+    createdAt: message.createdAt,
+  };
+
+  useGameStore.setState((state) => ({
+    emotes: [...state.emotes.filter((emote) => emote.id !== event.id), event].slice(-MAX_EMOTE_EVENTS),
+  }));
+
+  if (typeof window === 'undefined') return;
+  window.setTimeout(() => {
+    useGameStore.setState((state) => ({
+      emotes: state.emotes.filter((emote) => emote.id !== event.id),
+    }));
+  }, EMOTE_EVENT_TTL_MS);
+};
 
 const configureRoomClient = () => {
   const roomClient = new RoomClient();
@@ -351,7 +400,7 @@ const configureRoomClient = () => {
   });
   roomClient.on('RoomClosed', () => {
     clearRejoinRetryTimer();
-    useGameStore.setState({ screen: 'home', room: undefined, game: undefined });
+    useGameStore.setState({ screen: 'home', room: undefined, game: undefined, emotes: [] });
     clearSavedSession();
   });
   roomClient.on('ErrorMessage', (message) => {

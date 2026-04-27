@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  Ambulance,
   ArrowLeftRight,
   BadgeDollarSign,
   BadgePercent,
@@ -9,10 +10,12 @@ import {
   Check,
   ChevronsDown,
   CircleHelp,
+  Dice5,
   Factory,
   Flag,
   Hammer,
   HandCoins,
+  HeartCrack,
   Home,
   Hotel,
   Landmark,
@@ -21,10 +24,13 @@ import {
   LockOpen,
   LogOut,
   MapPinned,
+  MessageCircleHeart,
   Mountain,
   RotateCcw,
   Sailboat,
   ShieldAlert,
+  Sigma,
+  SmilePlus,
   Trash2,
   TrendingUp,
   Trees,
@@ -34,6 +40,7 @@ import {
   Waves,
   X,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import type { CSSProperties, Dispatch, FormEvent, SetStateAction } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -58,7 +65,7 @@ import type {
   RentServiceOffer,
   TradeOffer,
 } from '../engine/types';
-import { useGameStore } from '../store/useGameStore';
+import { useGameStore, type EmoteEvent } from '../store/useGameStore';
 import { DiceRoller } from './DiceRoller';
 
 const TURN_SECONDS = 120;
@@ -101,6 +108,16 @@ const AUCTION_WIN_ANIMATION_MS = 3000;
 const MORTGAGE_ANIMATION_MS = 2800;
 const CITY_EVENT_REVEAL_MS = 5200;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
+const EMOTE_COOLDOWN_LIMIT = 2;
+const EMOTE_COOLDOWN_WINDOW_MS = 30_000;
+type EmoteOption = {
+  id: string;
+  label: string;
+  Icon: LucideIcon;
+  color: string;
+  audioSrc?: string;
+  gain?: number;
+};
 type WorkspaceTab = 'cards' | 'trade' | 'chart';
 type GameSoundKind =
   | 'auction'
@@ -155,6 +172,21 @@ type MortgageAnimationEvent = {
   color: string;
 };
 
+const EMOTE_OPTIONS: EmoteOption[] = [
+  { id: 'halepa', label: 'Халепа', Icon: CircleHelp, color: '#38bdf8', audioSrc: '/assets/emotes/halepa.mp3', gain: 1.5 },
+  { id: 'unlucky', label: 'Un-un-un-un-un-unlucky', Icon: ShieldAlert, color: '#fb923c', audioSrc: '/assets/emotes/unlucky.mp3', gain: 1.5 },
+  { id: 'i-feel-nothing', label: 'I feel nothing', Icon: HeartCrack, color: '#f472b6', audioSrc: '/assets/emotes/i-feel-nothing.mp3', gain: 1.5 },
+  { id: 'ready-catch-you', label: '准备好了吗，要来抓你咯', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/ready-catch-you.mp3', gain: 1.5 },
+  { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: 1.5 },
+  { id: 'absolute-cinema', label: 'Absolute cinema', Icon: MessageCircleHeart, color: '#fb7185', audioSrc: '/assets/emotes/absolute-cinema.mp3', gain: 1.5 },
+  { id: 'sigma-moment', label: 'Sigma moment', Icon: Sigma, color: '#f472b6', audioSrc: '/assets/emotes/sigma-moment.mp3', gain: 1.5 },
+  { id: 'call-an-ambulance', label: 'Oh, call an ambulance', Icon: Ambulance, color: '#fbbf24', audioSrc: '/assets/emotes/call-an-ambulance.mp3', gain: 1.5 },
+  { id: 'ks-ks-chk-pk-a', label: 'Кс-кс-чк-чк-пк-пк-а!', Icon: Flag, color: '#60a5fa', audioSrc: '/assets/emotes/ks-ks-chk-pk-a.mp3', gain: 1.5 },
+  { id: 'ay-que-buena-jugada', label: '¡Ay, ay ay! ¡Qué buena jugada', Icon: TrendingUp, color: '#22c55e', audioSrc: '/assets/emotes/ay-que-buena-jugada.mp3', gain: 1.5 },
+  { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: 1.5 },
+];
+const EMOTE_OPTION_MAP = new Map(EMOTE_OPTIONS.map((option) => [option.id, option]));
+
 const CITY_TILE_ART: Record<string, CityArtKind> = {
   pavlohrad: 'industrial',
   ternivka: 'industrial',
@@ -181,14 +213,19 @@ const CITY_TILE_ART: Record<string, CityArtKind> = {
 };
 
 export const GameScreen = () => {
-  const { game, localPlayerId, room, dispatch, leaveRoom } = useGameStore();
+  const { game, localPlayerId, room, dispatch, leaveRoom, emotes, sendEmote } = useGameStore();
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab | undefined>();
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | undefined>();
   const [tradeDraft, setTradeDraft] = useState<TradeDraft | undefined>();
   const [adminOpen, setAdminOpen] = useState(false);
+  const [emoteWheelOpen, setEmoteWheelOpen] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(() =>
     typeof window === 'undefined' ? true : window.localStorage.getItem(SOUND_STORAGE_KEY) !== 'off',
   );
+  const [emoteSentAt, setEmoteSentAt] = useState<number[]>([]);
+  const [emoteCooldownNow, setEmoteCooldownNow] = useState(() => Date.now());
+  const [emoteCooldownNudge, setEmoteCooldownNudge] = useState(0);
+  const emoteSentAtRef = useRef<number[]>([]);
   if (!game) return null;
 
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
@@ -220,8 +257,19 @@ export const GameScreen = () => {
   const isBoardBusy = isDiceRolling || isPawnAnimating;
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const canUseAdmin = Boolean(room?.testMode);
+  const recentEmoteSentAt = emoteSentAt.filter((sentAt) => emoteCooldownNow - sentAt < EMOTE_COOLDOWN_WINDOW_MS);
+  const emoteCooldownRemainingMs =
+    recentEmoteSentAt.length >= EMOTE_COOLDOWN_LIMIT
+      ? Math.max(0, EMOTE_COOLDOWN_WINDOW_MS - (emoteCooldownNow - recentEmoteSentAt[0]))
+      : 0;
+  const emoteCooldownSeconds = Math.ceil(emoteCooldownRemainingMs / 1000);
+  const isEmoteCooldownActive = emoteCooldownRemainingMs > 0;
+  const emoteCooldownProgress = isEmoteCooldownActive
+    ? emoteCooldownRemainingMs / EMOTE_COOLDOWN_WINDOW_MS
+    : 0;
   useAutoContinueTurn(game, isHost, dispatch, isBoardBusy);
   useGameSounds(game, soundEnabled, localPlayer.id, Boolean(room));
+  useEmoteSounds(emotes, soundEnabled, localPlayer.id);
 
   const toggleSound = () => {
     setSoundEnabled((enabled) => {
@@ -229,6 +277,33 @@ export const GameScreen = () => {
       window.localStorage.setItem(SOUND_STORAGE_KEY, next ? 'on' : 'off');
       return next;
     });
+  };
+
+  const toggleEmoteWheel = () => setEmoteWheelOpen((open) => !open);
+
+  const handleSelectEmote = (emoteId: string) => {
+    const now = Date.now();
+    const recent = emoteSentAtRef.current.filter((sentAt) => now - sentAt < EMOTE_COOLDOWN_WINDOW_MS);
+    if (recent.length >= EMOTE_COOLDOWN_LIMIT) {
+      emoteSentAtRef.current = recent;
+      setEmoteSentAt(recent);
+      setEmoteCooldownNow(now);
+      setEmoteCooldownNudge((nudge) => nudge + 1);
+      return;
+    }
+
+    const next = [...recent, now];
+    emoteSentAtRef.current = next;
+    setEmoteSentAt(next);
+    setEmoteCooldownNow(now);
+    if (soundEnabled) void playEmoteAudio(emoteId);
+    sendEmote(emoteId);
+    setEmoteWheelOpen(false);
+  };
+
+  const handleBlockedEmote = () => {
+    setEmoteCooldownNow(Date.now());
+    setEmoteCooldownNudge((nudge) => nudge + 1);
   };
 
   const handleStartTradeDraft = (_player: Player, partners: Player[]) => {
@@ -259,6 +334,32 @@ export const GameScreen = () => {
   }, [game.id]);
 
   useEffect(() => {
+    setEmoteWheelOpen(false);
+    emoteSentAtRef.current = [];
+    setEmoteSentAt([]);
+    setEmoteCooldownNow(Date.now());
+    setEmoteCooldownNudge(0);
+  }, [game.id]);
+
+  useEffect(() => {
+    if (!isEmoteCooldownActive) return;
+    const timer = window.setInterval(() => setEmoteCooldownNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [isEmoteCooldownActive]);
+
+  useEffect(() => {
+    const handleEmoteKey = (event: KeyboardEvent) => {
+      const isEmoteKey = event.code === 'KeyG' || event.key.toLowerCase() === 'g';
+      if (event.repeat || !isEmoteKey || isTextEditingTarget(event.target)) return;
+      event.preventDefault();
+      setEmoteWheelOpen((open) => !open);
+    };
+
+    window.addEventListener('keydown', handleEmoteKey);
+    return () => window.removeEventListener('keydown', handleEmoteKey);
+  }, []);
+
+  useEffect(() => {
     if (!tradeDraft) return;
     const targetExists = tradePartners.some((partner) => partner.id === tradeDraft.targetId);
     if (!isLocalTurn || hasPendingTrade || !targetExists) {
@@ -269,6 +370,10 @@ export const GameScreen = () => {
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (emoteWheelOpen) {
+        setEmoteWheelOpen(false);
+        return;
+      }
       if (adminOpen) {
         setAdminOpen(false);
         return;
@@ -288,7 +393,7 @@ export const GameScreen = () => {
 
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [adminOpen, selectedPropertyId, tradeDraft, workspaceTab]);
+  }, [adminOpen, emoteWheelOpen, selectedPropertyId, tradeDraft, workspaceTab]);
 
   return (
     <section className="game-screen">
@@ -310,6 +415,23 @@ export const GameScreen = () => {
               Адмін
             </button>
           )}
+          <button
+            className={`sound-toggle emote-toggle ${emoteWheelOpen ? 'enabled' : ''} ${
+              isEmoteCooldownActive ? 'cooldown' : ''
+            }`}
+            type="button"
+            style={
+              {
+                '--emote-cooldown-progress': `${emoteCooldownProgress * 360}deg`,
+              } as CSSProperties
+            }
+            title="Емоції"
+            onClick={toggleEmoteWheel}
+          >
+            <SmilePlus size={15} />
+            {isEmoteCooldownActive && <span className="emote-cooldown-chip">{emoteCooldownSeconds}s</span>}
+            Емоції
+          </button>
           <button
             className={`sound-toggle ${soundEnabled ? 'enabled' : ''}`}
             type="button"
@@ -358,6 +480,19 @@ export const GameScreen = () => {
           canResolveCasino={isHost}
         />
       </div>
+      <EmoteBurstLayer game={game} emotes={emotes} />
+      <AnimatePresence>
+        {emoteWheelOpen && (
+          <EmoteWheel
+            onClose={() => setEmoteWheelOpen(false)}
+            onSelect={handleSelectEmote}
+            onCooldownBlocked={handleBlockedEmote}
+            cooldownRemainingMs={emoteCooldownRemainingMs}
+            cooldownProgress={emoteCooldownProgress}
+            cooldownNudge={emoteCooldownNudge}
+          />
+        )}
+      </AnimatePresence>
       {workspaceTab &&
         createPortal(
           <WorkspaceDrawer
@@ -387,6 +522,135 @@ export const GameScreen = () => {
           document.body,
         )}
     </section>
+  );
+};
+
+type EmoteWheelProps = {
+  onClose: () => void;
+  onSelect: (emoteId: string) => void;
+  onCooldownBlocked: () => void;
+  cooldownRemainingMs: number;
+  cooldownProgress: number;
+  cooldownNudge: number;
+};
+
+const EmoteWheel = ({
+  onClose,
+  onSelect,
+  onCooldownBlocked,
+  cooldownRemainingMs,
+  cooldownProgress,
+  cooldownNudge,
+}: EmoteWheelProps) => {
+  const isCooldown = cooldownRemainingMs > 0;
+  const cooldownSeconds = Math.ceil(cooldownRemainingMs / 1000);
+
+  return (
+    <motion.div
+      className="emote-wheel-backdrop"
+      role="presentation"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      onMouseDown={onClose}
+    >
+      <motion.div
+        className={`emote-wheel ${isCooldown ? 'cooldown' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Емоції"
+        style={
+          {
+            '--emote-cooldown-progress': `${cooldownProgress * 360}deg`,
+          } as CSSProperties
+        }
+        initial={{ opacity: 0, scale: 0.88, y: 16 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.9, y: 10 }}
+        transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <button className="emote-wheel-center" type="button" onClick={onClose} aria-label="Закрити емоції">
+          <SmilePlus size={28} />
+          <span>{isCooldown ? 'КД' : 'Емоції'}</span>
+          {isCooldown && <strong key={cooldownNudge}>{cooldownSeconds}s</strong>}
+        </button>
+        {EMOTE_OPTIONS.map((option, index) => {
+          const angle = (360 / EMOTE_OPTIONS.length) * index - 90;
+          const Icon = option.Icon;
+          return (
+            <button
+              className={`emote-wheel-option ${isCooldown ? 'cooldown-locked' : ''}`}
+              type="button"
+              aria-disabled={isCooldown}
+              style={
+                {
+                  '--emote-angle': `${angle}deg`,
+                  '--emote-angle-back': `${-angle}deg`,
+                  '--emote-color': option.color,
+                  '--emote-index': index,
+                } as CSSProperties
+              }
+              onClick={() => {
+                if (isCooldown) {
+                  onCooldownBlocked();
+                  return;
+                }
+                onSelect(option.id);
+              }}
+              key={option.id}
+            >
+              <Icon size={22} />
+              <span>{option.label}</span>
+            </button>
+          );
+        })}
+      </motion.div>
+    </motion.div>
+  );
+};
+
+const EmoteBurstLayer = ({ game, emotes }: { game: GameState; emotes: EmoteEvent[] }) => {
+  const visibleEmotes = emotes
+    .map((emote) => {
+      const player = game.players.find((candidate) => candidate.id === emote.playerId);
+      const option = getEmoteOption(emote.emoteId);
+      return player && !player.isBankrupt ? { emote, player, option } : undefined;
+    })
+    .filter((entry): entry is { emote: EmoteEvent; player: Player; option: EmoteOption } => Boolean(entry));
+
+  if (visibleEmotes.length === 0) return null;
+
+  return (
+    <div className="emote-burst-layer" aria-live="polite">
+      <AnimatePresence initial={false}>
+        {visibleEmotes.map(({ emote, player, option }) => {
+          const Icon = option.Icon;
+          return (
+            <motion.div
+              className="emote-burst"
+              style={
+                {
+                  '--player-color': player.color,
+                  '--emote-color': option.color,
+                } as CSSProperties
+              }
+              initial={{ opacity: 0, x: 24, scale: 0.92 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 18, scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 360, damping: 26 }}
+              key={emote.id}
+            >
+              <span className="emote-burst-icon">
+                <Icon size={22} />
+              </span>
+              <span>{player.name}</span>
+              <strong>{option.label}</strong>
+            </motion.div>
+          );
+        })}
+      </AnimatePresence>
+    </div>
   );
 };
 
@@ -2260,6 +2524,7 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
       {game.players.map((player) => {
         const isActive = player.id === game.currentPlayerId;
         const isJailed = player.jailTurns > 0;
+        const propertyCount = player.properties.length;
         return (
           <article
             className={`player-row ${isActive ? 'active' : ''} ${isJailed ? 'jailed' : ''} ${player.isBankrupt ? 'bankrupt' : ''}`}
@@ -2276,9 +2541,19 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
                   <span className="player-timer">{formatTimer(secondsLeft)}</span>
                 )}
               </div>
-              <p>{player.isBankrupt ? 'Вибув' : isJailed ? `У вʼязниці: ${player.jailTurns} ход.` : `${player.properties.length} майна`}</p>
+              {(player.isBankrupt || isJailed) && (
+                <div className="player-stat-line">
+                  {player.isBankrupt && <span className="player-status-chip bankrupt">Вибув</span>}
+                  {!player.isBankrupt && isJailed && <span className="player-status-chip jailed">Вʼязн. {player.jailTurns}</span>}
+                </div>
+              )}
             </div>
             <strong className="player-money">{formatMoney(player.money)}</strong>
+            <span className="player-property-count player-property-badge" title={`${propertyCount} полів`}>
+              <MapPinned size={12} />
+              <strong>{propertyCount}</strong>
+              <span className="player-property-unit">полів</span>
+            </span>
           </article>
         );
       })}
@@ -4146,6 +4421,9 @@ const createMortgageSnapshot = (game: GameState): Record<number, { mortgaged: bo
     }),
   );
 
+let emoteAudioContext: AudioContext | undefined;
+const emoteAudioBuffers = new Map<string, Promise<AudioBuffer>>();
+
 type SoundSnapshot = {
   auctionBidCount: number;
   cityEventKey: string;
@@ -4246,11 +4524,113 @@ const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string,
     }
 
     const context = getAudioContext();
-    if (!context || context.state !== 'running') return;
-    uniqueSounds(sounds)
-      .slice(0, 4)
-      .forEach((sound, index) => playGameSound(context, sound, index * 80));
+    if (!context) return;
+    void resumeAudioContext(context).then((ready) => {
+      if (!ready) return;
+      uniqueSounds(sounds)
+        .slice(0, 4)
+        .forEach((sound, index) => playGameSound(context, sound, index * 80));
+    });
   }, [enabled, game, isOnlineRoom, localPlayerId]);
+};
+
+const useEmoteSounds = (emotes: EmoteEvent[], enabled: boolean, localPlayerId: string) => {
+  const playedRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!enabled) return;
+    const unlockAudio = () => {
+      const context = getEmoteAudioContext();
+      if (context?.state === 'suspended') void context.resume();
+    };
+
+    window.addEventListener('pointerdown', unlockAudio, true);
+    window.addEventListener('keydown', unlockAudio, true);
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio, true);
+      window.removeEventListener('keydown', unlockAudio, true);
+    };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const context = getEmoteAudioContext();
+    if (!context) return;
+
+    emotes.forEach((emote) => {
+      if (playedRef.current.has(emote.id)) return;
+      playedRef.current.add(emote.id);
+      if (emote.playerId === localPlayerId) return;
+      const option = getEmoteOption(emote.emoteId);
+      if (!option.audioSrc) return;
+      void playEmoteSound(context, emoteAudioBuffers, option.audioSrc, option.gain ?? 1);
+    });
+  }, [emotes, enabled, localPlayerId]);
+};
+
+const playEmoteAudio = (emoteId: string) => {
+  const option = getEmoteOption(emoteId);
+  if (!option.audioSrc) return;
+  const context = getEmoteAudioContext();
+  if (!context) return;
+  void playEmoteSound(context, emoteAudioBuffers, option.audioSrc, option.gain ?? 1);
+};
+
+const getEmoteAudioContext = () => {
+  if (typeof window === 'undefined') return undefined;
+  const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
+  const AudioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
+  if (!AudioContextConstructor) return undefined;
+  emoteAudioContext ??= new AudioContextConstructor();
+  return emoteAudioContext;
+};
+
+const playEmoteSound = async (
+  context: AudioContext,
+  buffers: Map<string, Promise<AudioBuffer>>,
+  audioSrc: string,
+  gainValue: number,
+) => {
+  try {
+    const ready = await resumeAudioContext(context);
+    if (!ready) return;
+    const buffer = await loadAudioBuffer(context, buffers, audioSrc);
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = buffer;
+    gain.gain.setValueAtTime(gainValue, context.currentTime);
+    source.connect(gain);
+    gain.connect(context.destination);
+    source.start();
+  } catch {
+    // Missing custom emote audio should never block the visual emote.
+  }
+};
+
+const resumeAudioContext = async (context: AudioContext): Promise<boolean> => {
+  if (context.state === 'closed') return false;
+  if (context.state === 'suspended') {
+    await context.resume();
+  }
+  return context.state === 'running';
+};
+
+const loadAudioBuffer = (
+  context: AudioContext,
+  buffers: Map<string, Promise<AudioBuffer>>,
+  audioSrc: string,
+): Promise<AudioBuffer> => {
+  let buffer = buffers.get(audioSrc);
+  if (!buffer) {
+    buffer = fetch(audioSrc)
+      .then((response) => {
+        if (!response.ok) throw new Error(`Failed to load ${audioSrc}`);
+        return response.arrayBuffer();
+      })
+      .then((arrayBuffer) => context.decodeAudioData(arrayBuffer));
+    buffers.set(audioSrc, buffer);
+  }
+  return buffer;
 };
 
 const createGameSoundSnapshot = (game: GameState): SoundSnapshot => ({
@@ -4736,6 +5116,14 @@ const PlayerFigurine = ({ player, size = 'normal' }: { player: Player; size?: 's
     <span className="pawn-base" />
   </span>
 );
+
+const getEmoteOption = (emoteId: string): EmoteOption => EMOTE_OPTION_MAP.get(emoteId) ?? EMOTE_OPTIONS[0];
+
+const isTextEditingTarget = (target: EventTarget | null): boolean => {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+};
 
 const formatTimer = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
