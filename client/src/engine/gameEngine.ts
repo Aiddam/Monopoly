@@ -943,6 +943,7 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
   if (tile.type !== 'city') throw new Error('Будувати можна тільки в містах.');
   const property = state.properties[tileId];
   const player = getPlayer(state, playerId);
+  if (player.jailTurns > 0) throw new Error('Гравець у вʼязниці не може будувати.');
   if (isBuildingBlockedByCityEvent(state)) throw new Error('Будівництво заборонене через подію міста.');
   if (property.ownerId !== playerId) throw new Error('Місто належить іншому гравцю.');
   if (!ownsFullGroup(state, playerId, tile.group)) throw new Error('Потрібна монополія групи.');

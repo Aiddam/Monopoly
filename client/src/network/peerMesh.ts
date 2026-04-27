@@ -22,6 +22,7 @@ export class PeerMesh {
   private readonly channels = new Map<string, RTCDataChannel>();
   private readonly pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
   private readonly signalQueues = new Map<string, Promise<void>>();
+  private readonly activePeerIds = new Set<string>();
   private readonly onMessageHandlers: MessageHandler[] = [];
   private readonly onStatusHandlers: StatusHandler[] = [];
 
@@ -40,6 +41,9 @@ export class PeerMesh {
 
   async syncPeers(players: RoomPlayer[]) {
     const otherPlayers = players.filter((player) => player.id !== this.selfPeerId && player.online !== false);
+    this.activePeerIds.clear();
+    otherPlayers.forEach((player) => this.activePeerIds.add(player.id));
+
     for (const player of otherPlayers) {
       if (!this.peers.has(player.id) && this.selfPeerId < player.id) {
         await this.createPeer(player.id, true);
@@ -71,6 +75,7 @@ export class PeerMesh {
 
   private async processSignal(signal: SignalPayload) {
     const peerId = signal.fromPeerId;
+    this.activePeerIds.add(peerId);
     const peer = this.peers.get(peerId) ?? (await this.createPeer(peerId, false));
 
     if (signal.kind === 'offer') {
@@ -78,7 +83,7 @@ export class PeerMesh {
       await this.flushPendingIceCandidates(peerId, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      await this.sendSignal(peerId, 'answer', answer).catch(() => undefined);
+      await this.sendSignalIfActive(peerId, peer, 'answer', answer);
     }
 
     if (signal.kind === 'answer') {
@@ -106,6 +111,7 @@ export class PeerMesh {
   }
 
   removePeer(peerId: string) {
+    this.activePeerIds.delete(peerId);
     this.channels.get(peerId)?.close();
     this.peers.get(peerId)?.close();
     this.channels.delete(peerId);
@@ -122,6 +128,7 @@ export class PeerMesh {
     this.peers.clear();
     this.pendingIceCandidates.clear();
     this.signalQueues.clear();
+    this.activePeerIds.clear();
   }
 
   private async createPeer(peerId: string, initiator: boolean) {
@@ -129,7 +136,7 @@ export class PeerMesh {
     this.peers.set(peerId, peer);
 
     peer.onicecandidate = (event) => {
-      if (event.candidate) void this.sendSignal(peerId, 'ice', event.candidate.toJSON()).catch(() => undefined);
+      if (event.candidate) void this.sendSignalIfActive(peerId, peer, 'ice', event.candidate.toJSON());
     };
     peer.onconnectionstatechange = () => {
       this.onStatusHandlers.forEach((handler) => handler(peerId, peer.connectionState === 'connected'));
@@ -141,10 +148,20 @@ export class PeerMesh {
       this.bindChannel(peerId, channel);
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
-      await this.sendSignal(peerId, 'offer', offer).catch(() => undefined);
+      await this.sendSignalIfActive(peerId, peer, 'offer', offer);
     }
 
     return peer;
+  }
+
+  private async sendSignalIfActive(
+    peerId: string,
+    peer: RTCPeerConnection,
+    kind: SignalPayload['kind'],
+    payload: unknown,
+  ) {
+    if (this.peers.get(peerId) !== peer || !this.activePeerIds.has(peerId)) return;
+    await this.sendSignal(peerId, kind, payload).catch(() => undefined);
   }
 
   private bindChannel(peerId: string, channel: RTCDataChannel) {

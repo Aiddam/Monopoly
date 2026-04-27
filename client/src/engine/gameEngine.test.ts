@@ -738,6 +738,18 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.properties[3].houses).toBe(1);
   });
 
+  it('blocks building while the owner is in jail', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'build-in-jail');
+    game = withOwnership(game, 'p1', [1, 3]);
+    game = {
+      ...game,
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, position: 10, jailTurns: 2 } : player)),
+    };
+
+    expect(() => reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 })).toThrow('вʼязниці');
+    expect(game.properties[1].houses).toBe(0);
+  });
+
   it('blocks building but allows emergency selling and mortgaging during a purchase decision', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'manage-after-roll-purchase');
     game = withOwnership(game, 'p1', [1, 3]);

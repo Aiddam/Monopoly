@@ -74,9 +74,15 @@ public sealed class RoomHub(RoomManager rooms) : Hub
         var normalizedCode = CleanCode(code);
         var fromPeerId = rooms.GetPeerIdForConnection(Context.ConnectionId);
         var toConnectionId = rooms.GetConnectionIdForPeer(normalizedCode, toPeerId);
-        if (fromPeerId is null || toConnectionId is null || !rooms.ContainsPeer(normalizedCode, fromPeerId) || !rooms.ContainsPeer(normalizedCode, toPeerId))
+        if (fromPeerId is null || !rooms.ContainsPeer(normalizedCode, fromPeerId))
         {
-            await Clients.Caller.SendAsync("ErrorMessage", "SignalR relay відхилено: peer не в кімнаті.");
+            await Clients.Caller.SendAsync("ErrorMessage", "SignalR relay відхилено: ви не в кімнаті.");
+            return;
+        }
+
+        if (toConnectionId is null || !rooms.ContainsPeer(normalizedCode, toPeerId))
+        {
+            await Clients.Caller.SendAsync("PeerLeft", toPeerId);
             return;
         }
 

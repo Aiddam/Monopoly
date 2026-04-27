@@ -18,6 +18,7 @@ import {
   Landmark,
   Layers,
   Lock,
+  LockOpen,
   LogOut,
   MapPinned,
   Mountain,
@@ -69,11 +70,35 @@ const MORTGAGE_GRACE_TURNS = 10;
 const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit' });
 const CASINO_MAX_BET = money(300);
 const CASINO_DEFAULT_BET = money(100);
-const CASINO_MULTIPLIERS = [0, 1, 2, 3, 4, 5, 6];
+const CASINO_SEGMENTS = [
+  { multiplier: 0, weight: 3, color: '#991b1b' },
+  { multiplier: 1, weight: 3, color: '#0f766e' },
+  { multiplier: 2, weight: 1, color: '#15803d' },
+  { multiplier: 3, weight: 1, color: '#ca8a04' },
+  { multiplier: 4, weight: 1, color: '#4338ca' },
+  { multiplier: 5, weight: 1, color: '#be123c' },
+  { multiplier: 6, weight: 1, color: '#0369a1' },
+] as const;
+const CASINO_TOTAL_WEIGHT = CASINO_SEGMENTS.reduce((sum, segment) => sum + segment.weight, 0);
+const CASINO_WHEEL_SEGMENTS = CASINO_SEGMENTS.reduce<
+  Array<(typeof CASINO_SEGMENTS)[number] & { startAngle: number; endAngle: number; centerAngle: number }>
+>((segments, segment) => {
+  const startAngle = segments.at(-1)?.endAngle ?? 0;
+  const endAngle = startAngle + (segment.weight / CASINO_TOTAL_WEIGHT) * 360;
+  return [...segments, { ...segment, startAngle, endAngle, centerAngle: startAngle + (endAngle - startAngle) / 2 }];
+}, []);
+const CASINO_MULTIPLIERS = CASINO_SEGMENTS.map((segment) => segment.multiplier);
+const CASINO_WHEEL_BACKGROUND = `radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.16), transparent 0 7%, transparent 8%),
+  radial-gradient(circle at center, rgba(2, 6, 23, 0.98) 0 20%, transparent 21%),
+  conic-gradient(from 0deg, ${CASINO_WHEEL_SEGMENTS.map(
+    (segment) => `${segment.color} ${segment.startAngle.toFixed(2)}deg ${segment.endAngle.toFixed(2)}deg`,
+  ).join(', ')})`;
 const CASINO_SPIN_MS = 5400;
 const CASINO_RESULT_HOLD_MS = 850;
 const JAIL_FINE = money(100);
 const BUILDING_ANIMATION_MS = 2600;
+const AUCTION_WIN_ANIMATION_MS = 3000;
+const MORTGAGE_ANIMATION_MS = 2800;
 const CITY_EVENT_REVEAL_MS = 5200;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
 type WorkspaceTab = 'cards' | 'trade' | 'chart';
@@ -113,6 +138,20 @@ type BuildingAnimationEvent = {
   kind: 'build' | 'demolish';
   fromHouses: number;
   toHouses: number;
+  color: string;
+};
+type AuctionWinAnimationEvent = {
+  id: string;
+  tileId: number;
+  playerName: string;
+  amount: number;
+  color: string;
+};
+type MortgageAnimationEvent = {
+  id: string;
+  tileId: number;
+  kind: 'mortgage' | 'redeem' | 'released';
+  tileName: string;
   color: string;
 };
 
@@ -498,6 +537,8 @@ const GameBoard = ({
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
   const buildingEvents = useBuildingAnimationEvents(game);
+  const auctionWinEvents = useAuctionWinAnimationEvents(game);
+  const mortgageEvents = useMortgageAnimationEvents(game);
   const hasBuildingShock = buildingEvents.length > 0;
   const hasHotelShock = buildingEvents.some((event) => event.kind === 'build' && event.toHouses >= 5);
   const shouldShowCasino = Boolean(game.pendingCasino && (isLocalTurn || game.pendingCasino.spinEndsAt));
@@ -587,6 +628,8 @@ const GameBoard = ({
           />
         ))}
         <BuildingAnimationLayer events={buildingEvents} />
+        <AuctionWinAnimationLayer events={auctionWinEvents} />
+        <MortgageAnimationLayer events={mortgageEvents} />
         <BoardPawns game={game} displayPositions={displayPositions} />
         <DiceRollOverlay game={game} isRolling={isDiceRolling} rollingKey={rollingKey} />
         <AuctionOverlay game={game} />
@@ -857,7 +900,6 @@ const BoardCasinoPrompt = ({
   const [bet, setBet] = useState(maxBet > 0 ? Math.min(CASINO_DEFAULT_BET, maxBet) : 0);
   const [rotation, setRotation] = useState(0);
   const [now, setNow] = useState(Date.now());
-  const segmentAngle = 360 / CASINO_MULTIPLIERS.length;
   const isSpinning = Boolean(pendingCasino?.spinEndsAt && now < pendingCasino.spinEndsAt);
   const spinComplete = Boolean(pendingCasino?.spinEndsAt && now >= pendingCasino.spinEndsAt);
   const revealedMultiplier = spinComplete ? pendingCasino?.multiplier : undefined;
@@ -881,15 +923,15 @@ const BoardCasinoPrompt = ({
 
   useEffect(() => {
     if (!pendingCasino?.spinStartedAt || pendingCasino.multiplier === undefined) return;
-    const targetIndex = CASINO_MULTIPLIERS.indexOf(pendingCasino.multiplier);
-    const centerAngle = targetIndex * segmentAngle + segmentAngle / 2;
+    const targetSegment = CASINO_WHEEL_SEGMENTS.find((segment) => segment.multiplier === pendingCasino.multiplier);
+    const centerAngle = targetSegment?.centerAngle ?? 0;
     const seed = Math.abs(pendingCasino.spinSeed ?? 0);
     const extraTurns = 10 + (seed % 5);
     const targetRotation = extraTurns * 360 - centerAngle;
     setRotation(0);
     const frame = window.requestAnimationFrame(() => setRotation(targetRotation));
     return () => window.cancelAnimationFrame(frame);
-  }, [pendingCasino?.multiplier, pendingCasino?.spinSeed, pendingCasino?.spinStartedAt, segmentAngle]);
+  }, [pendingCasino?.multiplier, pendingCasino?.spinSeed, pendingCasino?.spinStartedAt]);
 
   useEffect(() => {
     if (!canResolve || !pendingCasino?.spinEndsAt || !spinComplete) return;
@@ -917,7 +959,7 @@ const BoardCasinoPrompt = ({
   const handleSpin = () => {
     if (!canControl || pendingCasino?.spinEndsAt || maxBet <= 0) return;
     const normalizedBet = Math.min(maxBet, Math.max(1, Math.floor(bet)));
-    const multiplier = CASINO_MULTIPLIERS[Math.floor(Math.random() * CASINO_MULTIPLIERS.length)];
+    const multiplier = pickCasinoMultiplier();
     setBet(normalizedBet);
     dispatch({
       type: 'start_casino_spin',
@@ -964,15 +1006,21 @@ const BoardCasinoPrompt = ({
           <span className="casino-pointer" />
           <div
             className="casino-wheel"
-            style={{ transform: `rotate(${rotation}deg)`, '--casino-spin-ms': `${CASINO_SPIN_MS}ms` } as CSSProperties}
+            style={
+              {
+                transform: `rotate(${rotation}deg)`,
+                '--casino-spin-ms': `${CASINO_SPIN_MS}ms`,
+                '--casino-wheel-background': CASINO_WHEEL_BACKGROUND,
+              } as CSSProperties
+            }
           >
-            {CASINO_MULTIPLIERS.map((multiplier, index) => (
+            {CASINO_WHEEL_SEGMENTS.map((segment) => (
               <span
-                className={multiplier === 0 ? 'zero' : ''}
-                key={multiplier}
-                style={{ '--label-angle': `${index * segmentAngle + segmentAngle / 2}deg` } as CSSProperties}
+                className={`${segment.multiplier === 0 ? 'zero' : ''} ${segment.weight > 1 ? 'wide' : ''}`}
+                key={segment.multiplier}
+                style={{ '--label-angle': `${segment.centerAngle}deg` } as CSSProperties}
               >
-                x{multiplier}
+                x{segment.multiplier}
               </span>
             ))}
           </div>
@@ -1056,6 +1104,15 @@ const BoardCasinoPrompt = ({
       </div>
     </motion.article>
   );
+};
+
+const pickCasinoMultiplier = () => {
+  let roll = Math.random() * CASINO_TOTAL_WEIGHT;
+  for (const segment of CASINO_SEGMENTS) {
+    roll -= segment.weight;
+    if (roll < 0) return segment.multiplier;
+  }
+  return CASINO_SEGMENTS[CASINO_SEGMENTS.length - 1].multiplier;
 };
 
 const SURRENDER_CHARGE_MS = 3200;
@@ -1593,7 +1650,7 @@ const CityEventReveal = ({ event }: { event?: PendingCityEvent }) => {
     }, CITY_EVENT_REVEAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [event, eventKey]);
+  }, [eventKey]);
 
   return (
     <AnimatePresence>
@@ -1884,17 +1941,22 @@ const TileCell = ({
         </>
       )}
       {mortgageTurnsLeft !== undefined && (
-        <span
-          className="mortgage-lock-badge"
-          title={
+        <>
+          <span className="mortgage-lock-watermark" aria-hidden>
+            <Lock size={24} />
+          </span>
+          <span
+            className="mortgage-lock-badge"
+            title={
             mortgageTurnsLeft > 0
               ? `Заставлено. Залишилось ${mortgageTurnsLeft} ${formatTurnWord(mortgageTurnsLeft)} власника.`
               : 'Заставлено. Місто скоро повернеться банку.'
-          }
-        >
-          <Lock size={10} />
-          {mortgageTurnsLeft}
-        </span>
+            }
+          >
+            <Lock size={14} />
+            {mortgageTurnsLeft}
+          </span>
+        </>
       )}
       <div className="tile-label">
         <div className="tile-name">{tile.name}</div>
@@ -2107,6 +2169,79 @@ const BuildingAnimationLayer = ({ events }: { events: BuildingAnimationEvent[] }
               <i />
             </span>
           )}
+        </div>
+      );
+    })}
+  </div>
+);
+
+const AuctionWinAnimationLayer = ({ events }: { events: AuctionWinAnimationEvent[] }) => (
+  <div className="auction-win-animation-layer" aria-hidden>
+    {events.map((event) => {
+      const point = tileCenterPoint(event.tileId);
+      return (
+        <div
+          className="auction-win-event"
+          key={event.id}
+          style={
+            {
+              left: `${point.x}%`,
+              top: `${point.y}%`,
+              '--auction-winner-color': event.color,
+            } as CSSProperties
+          }
+        >
+          <span className="auction-win-ring" />
+          <span className="auction-win-ring secondary" />
+          <span className="auction-win-coins">
+            <i />
+            <i />
+            <i />
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="auction-win-badge">
+            <BadgeDollarSign size={18} />
+            <span>
+              <strong>{event.playerName}</strong>
+              <small>{formatMoney(event.amount)}</small>
+            </span>
+          </span>
+        </div>
+      );
+    })}
+  </div>
+);
+
+const MortgageAnimationLayer = ({ events }: { events: MortgageAnimationEvent[] }) => (
+  <div className="mortgage-animation-layer" aria-hidden>
+    {events.map((event) => {
+      const point = tileCenterPoint(event.tileId);
+      const isMortgage = event.kind === 'mortgage';
+      const isReleased = event.kind === 'released';
+      const Icon = isMortgage ? Lock : LockOpen;
+      return (
+        <div
+          className={`mortgage-event ${event.kind}`}
+          key={event.id}
+          style={
+            {
+              left: `${point.x}%`,
+              top: `${point.y}%`,
+              '--mortgage-event-color': event.color,
+            } as CSSProperties
+          }
+        >
+          <span className="mortgage-event-pulse" />
+          <span className="mortgage-event-scan" />
+          <span className="mortgage-event-stamp">
+            <Icon size={20} />
+            <span>
+              <strong>{isMortgage ? 'Застава' : isReleased ? 'Нічийне' : 'Викуплено'}</strong>
+              <small>{isReleased ? `${event.tileName} повернулось у банк` : event.tileName}</small>
+            </span>
+          </span>
         </div>
       );
     })}
@@ -3600,6 +3735,9 @@ const getBuildInfo = (game: GameState, player: Player, tile: CityTile) => {
   if (game.phase !== 'rolling') {
     return { canBuild: false, reason: 'Будувати можна лише до кидка кубиків.' };
   }
+  if (player.jailTurns > 0) {
+    return { canBuild: false, reason: 'У вʼязниці не можна будувати будинки.' };
+  }
   if (hasBuildingBlockedCityEvent(game)) {
     return { canBuild: false, reason: 'Будівництво заборонене через подію міста.' };
   }
@@ -3886,6 +4024,157 @@ const createBuildingSnapshot = (game: GameState): Record<number, { houses: numbe
     boardTiles
       .filter((tile): tile is CityTile => tile.type === 'city')
       .map((tile) => [tile.id, { houses: game.properties[tile.id].houses, ownerId: game.properties[tile.id].ownerId }]),
+  );
+
+const useAuctionWinAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<AuctionWinAnimationEvent[]>([]);
+  const previousSnapshotRef = useRef(createAuctionWinSnapshot(game));
+  const timersRef = useRef<number[]>([]);
+  const auctionWinKey = [
+    boardTiles
+      .filter(isPropertyTile)
+      .map((tile) => `${tile.id}:${game.properties[tile.id].ownerId ?? ''}`)
+      .join('|'),
+    game.auction
+      ? `${game.auction.tileId}:${game.auction.startedAt}:${game.auction.highestBidderId ?? ''}:${game.auction.highestBid}`
+      : 'none',
+  ].join('::');
+
+  useEffect(() => {
+    previousSnapshotRef.current = createAuctionWinSnapshot(game);
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const previousSnapshot = previousSnapshotRef.current;
+    const nextSnapshot = createAuctionWinSnapshot(game);
+    previousSnapshotRef.current = nextSnapshot;
+
+    const completedAuction = previousSnapshot.auction;
+    if (!completedAuction?.highestBidderId) return;
+    if (nextSnapshot.auction?.startedAt === completedAuction.startedAt) return;
+
+    const previousOwnerId = previousSnapshot.owners[completedAuction.tileId];
+    const nextOwnerId = nextSnapshot.owners[completedAuction.tileId];
+    if (previousOwnerId === nextOwnerId || nextOwnerId !== completedAuction.highestBidderId) return;
+
+    const winner = game.players.find((player) => player.id === completedAuction.highestBidderId);
+    const event: AuctionWinAnimationEvent = {
+      id: crypto.randomUUID(),
+      tileId: completedAuction.tileId,
+      playerName: winner?.name ?? getTile(completedAuction.tileId).name,
+      amount: completedAuction.highestBid,
+      color: winner?.color ?? '#f8c24e',
+    };
+
+    setEvents((current) => [...current, event].slice(-4));
+    const timer = window.setTimeout(() => {
+      setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+    }, AUCTION_WIN_ANIMATION_MS);
+    timersRef.current.push(timer);
+  }, [auctionWinKey, game]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
+const createAuctionWinSnapshot = (game: GameState) => ({
+  owners: Object.fromEntries(
+    boardTiles.filter(isPropertyTile).map((tile) => [tile.id, game.properties[tile.id].ownerId]),
+  ) as Record<number, string | undefined>,
+  auction: game.auction
+    ? {
+        tileId: game.auction.tileId,
+        startedAt: game.auction.startedAt,
+        highestBid: game.auction.highestBid,
+        highestBidderId: game.auction.highestBidderId,
+      }
+    : undefined,
+});
+
+const useMortgageAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<MortgageAnimationEvent[]>([]);
+  const previousSnapshotRef = useRef(createMortgageSnapshot(game));
+  const timersRef = useRef<number[]>([]);
+  const mortgageKey = boardTiles
+    .filter(isPropertyTile)
+    .map((tile) => {
+      const property = game.properties[tile.id];
+      return `${tile.id}:${property.ownerId ?? ''}:${property.mortgaged ? '1' : '0'}`;
+    })
+    .join('|');
+
+  useEffect(() => {
+    previousSnapshotRef.current = createMortgageSnapshot(game);
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const previousSnapshot = previousSnapshotRef.current;
+    const nextSnapshot = createMortgageSnapshot(game);
+    const nextEvents: MortgageAnimationEvent[] = [];
+
+    Object.entries(nextSnapshot).forEach(([tileIdText, next]) => {
+      const tileId = Number(tileIdText);
+      const previous = previousSnapshot[tileId];
+      if (!previous || previous.mortgaged === next.mortgaged) return;
+
+      const isMortgage = !previous.mortgaged && next.mortgaged;
+      const isRedeem = previous.mortgaged && !next.mortgaged && previous.ownerId === next.ownerId && Boolean(next.ownerId);
+      const isReleased = previous.mortgaged && !next.mortgaged && Boolean(previous.ownerId) && !next.ownerId;
+      if (!isMortgage && !isRedeem && !isReleased) return;
+
+      const tile = getTile(tileId);
+      if (!isPropertyTile(tile)) return;
+      const ownerId = next.ownerId ?? previous.ownerId;
+      const owner = ownerId ? game.players.find((player) => player.id === ownerId) : undefined;
+      nextEvents.push({
+        id: crypto.randomUUID(),
+        tileId,
+        kind: isMortgage ? 'mortgage' : isReleased ? 'released' : 'redeem',
+        tileName: tile.name,
+        color: isReleased ? '#94a3b8' : owner?.color ?? (tile.type === 'city' ? tile.groupColor : '#f8c24e'),
+      });
+    });
+
+    previousSnapshotRef.current = nextSnapshot;
+    if (nextEvents.length === 0) return;
+
+    setEvents((current) => [...current, ...nextEvents].slice(-6));
+    nextEvents.forEach((event) => {
+      const timer = window.setTimeout(() => {
+        setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+      }, MORTGAGE_ANIMATION_MS);
+      timersRef.current.push(timer);
+    });
+  }, [mortgageKey, game]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
+const createMortgageSnapshot = (game: GameState): Record<number, { mortgaged: boolean; ownerId?: string }> =>
+  Object.fromEntries(
+    boardTiles.filter(isPropertyTile).map((tile) => {
+      const property = game.properties[tile.id];
+      return [tile.id, { mortgaged: property.mortgaged, ownerId: property.ownerId }];
+    }),
   );
 
 type SoundSnapshot = {

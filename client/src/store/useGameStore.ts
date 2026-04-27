@@ -55,6 +55,7 @@ interface SavedSession {
 const SESSION_STORAGE_KEY = 'ukraine-monopoly-session-v1';
 const ROOM_NOT_FOUND_MESSAGE = 'Кімнату не знайдено. Якщо сервер Render перезапустився, створіть нову кімнату.';
 const ROOM_RESTORE_WAIT_MESSAGE = 'Сервер перезапустився. Очікуємо, поки хост відновить кімнату.';
+const STALE_PEER_RELAY_MESSAGE = 'SignalR relay відхилено: peer не в кімнаті.';
 const ROOM_REJOIN_RETRY_MS = 2_500;
 
 let roomRejoinRetryTimer: number | undefined;
@@ -354,6 +355,7 @@ const configureRoomClient = () => {
     clearSavedSession();
   });
   roomClient.on('ErrorMessage', (message) => {
+    if (message === STALE_PEER_RELAY_MESSAGE) return;
     useGameStore.setState({ connection: { ...useGameStore.getState().connection, error: message } });
   });
   return roomClient;
