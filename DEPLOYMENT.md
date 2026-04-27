@@ -33,6 +33,7 @@ ASPNETCORE_ENVIRONMENT=Production
 DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 DOTNET_USE_POLLING_FILE_WATCHER=true
 ClientOrigins=https://your-client-domain.onrender.com
+SignalR__MaximumReceiveMessageSizeBytes=1048576
 ```
 
 After deploy, copy the server URL, for example:

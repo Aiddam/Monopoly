@@ -2720,11 +2720,11 @@ input:focus {
   top: 50%;
   z-index: 75;
   display: grid;
-  width: min(560px, 62%);
-  gap: 10px;
+  width: min(500px, 58%);
+  gap: 8px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 10px;
-  padding: clamp(12px, 1.4vw, 18px);
+  padding: clamp(10px, 1.1vw, 14px);
   color: #f8fafc;
   background:
     radial-gradient(circle at 90% 8%, rgba(252, 211, 77, 0.16), transparent 34%),
@@ -2750,14 +2750,14 @@ input:focus {
 
 .auction-head h2 {
   margin: 0;
-  font-size: clamp(20px, 2.2vw, 30px);
+  font-size: clamp(18px, 1.9vw, 25px);
   line-height: 1;
 }
 
 .auction-timer {
   display: grid;
-  width: 66px;
-  height: 66px;
+  width: 54px;
+  height: 54px;
   place-items: center;
   border: 1px solid rgba(252, 211, 77, 0.28);
   border-radius: 50%;
@@ -2767,7 +2767,7 @@ input:focus {
 
 .auction-timer span {
   color: #fcd34d;
-  font-size: 25px;
+  font-size: 21px;
   font-weight: 950;
   line-height: 0.8;
 }
@@ -2797,12 +2797,12 @@ input:focus {
 .auction-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .auction-summary > div {
   border-radius: 8px;
-  padding: 9px;
+  padding: 7px;
   background: rgba(2, 6, 23, 0.44);
 }
 
@@ -2836,25 +2836,25 @@ input:focus {
 
 .game-screen .auction-bid-row input,
 .game-screen .auction-bid-row select {
-  min-height: 40px;
+  min-height: 36px;
   color: #f8fafc;
   background: rgba(2, 6, 23, 0.62);
 }
 
 .auction-quick-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .auction-chart {
   display: grid;
-  gap: 8px;
+  gap: 5px;
 }
 
 .auction-chart-row {
   display: grid;
-  grid-template-columns: minmax(78px, 0.8fr) minmax(0, 1.5fr) 62px;
-  gap: 8px;
+  grid-template-columns: minmax(70px, 0.8fr) minmax(0, 1.5fr) 58px;
+  gap: 6px;
 }
 
 .auction-player-name {
@@ -2902,9 +2902,9 @@ input:focus {
 
 .auction-history {
   display: grid;
-  gap: 5px;
+  gap: 4px;
   border-top: 1px solid rgba(148, 163, 184, 0.14);
-  padding-top: 8px;
+  padding-top: 6px;
 }
 
 .auction-history p {
@@ -5764,13 +5764,13 @@ input:focus {
   align-self: center;
   justify-self: center;
   display: grid;
-  width: min(620px, 88%);
-  max-height: min(58vh, 520px);
-  gap: 12px;
+  width: min(560px, 84%);
+  max-height: min(52vh, 460px);
+  gap: 10px;
   overflow: auto;
   border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 12px;
-  padding: 14px;
+  padding: 12px;
   color: #f8fafc;
   background:
     radial-gradient(circle at 88% 0%, rgba(252, 211, 77, 0.14), transparent 34%),
@@ -5884,92 +5884,19 @@ input:focus {
 }
 
 .board-purchase-prompt .modal-head {
-  gap: 12px;
+  gap: 10px;
 }
 
 .board-purchase-prompt .purchase-hero {
-  min-height: 132px;
+  min-height: 108px;
 }
 
 .board-purchase-prompt .purchase-hero-copy strong {
-  font-size: clamp(24px, 3.6vw, 36px);
+  font-size: clamp(21px, 3vw, 31px);
 }
 
 .board-purchase-prompt .purchase-summary {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.purchase-mortgage-panel {
-  display: grid;
-  gap: 10px;
-  border: 1px solid rgba(96, 165, 250, 0.2);
-  border-radius: 10px;
-  padding: 11px;
-  background: rgba(15, 23, 42, 0.58);
-}
-
-.purchase-mortgage-head strong,
-.purchase-mortgage-head span {
-  display: block;
-}
-
-.purchase-mortgage-head strong {
-  color: #dbeafe;
-  font-size: 13px;
-  font-weight: 950;
-}
-
-.purchase-mortgage-head span {
-  margin-top: 2px;
-  color: rgba(203, 213, 225, 0.68);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.purchase-mortgage-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-}
-
-.purchase-mortgage-item {
-  display: flex;
-  min-width: 0;
-  min-height: 36px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 8px;
-  padding: 0 9px;
-  color: #f8fafc;
-  background: rgba(2, 6, 23, 0.38);
-  cursor: pointer;
-}
-
-.purchase-mortgage-item:not(:disabled):hover {
-  border-color: rgba(96, 165, 250, 0.46);
-  background: rgba(37, 99, 235, 0.2);
-}
-
-.purchase-mortgage-item:disabled {
-  cursor: not-allowed;
-  opacity: 0.44;
-}
-
-.purchase-mortgage-item span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.purchase-mortgage-item strong {
-  flex: 0 0 auto;
-  color: #fcd34d;
-  font-size: 12px;
-  font-weight: 950;
 }
 
 .board-purchase-prompt .purchase-actions {
@@ -6009,6 +5936,18 @@ input:focus {
   gap: 12px;
 }
 
+.casino-head {
+  flex-wrap: wrap;
+}
+
+.casino-head-side {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .casino-head h3,
 .casino-head p {
   margin: 0;
@@ -6044,6 +5983,11 @@ input:focus {
   font-size: 30px;
   font-weight: 950;
   line-height: 0.95;
+}
+
+.casino-skip-action {
+  min-height: 38px;
+  white-space: nowrap;
 }
 
 .casino-body {
@@ -6305,6 +6249,10 @@ input:focus {
 .casino-actions {
   justify-content: flex-start;
   flex-wrap: wrap;
+}
+
+.casino-actions .primary {
+  flex: 1 1 220px;
 }
 
 .board-jail-prompt {
@@ -7048,6 +6996,10 @@ input:focus {
     width: min(88%, 720px);
   }
 
+  .board-purchase-prompt {
+    width: min(84%, 560px);
+  }
+
   .board-action-dock {
     grid-template-columns: auto minmax(150px, 1fr) auto;
   }
@@ -7172,6 +7124,7 @@ input:focus {
   }
 
   .board-purchase-prompt {
+    width: min(84%, 560px);
     gap: 8px;
     padding: 10px;
   }
@@ -7197,8 +7150,7 @@ input:focus {
   }
 
   .board-purchase-prompt .purchase-summary,
-  .board-purchase-prompt .purchase-actions,
-  .purchase-mortgage-list {
+  .board-purchase-prompt .purchase-actions {
     grid-template-columns: 1fr;
   }
 
@@ -7539,6 +7491,10 @@ input:focus {
   .board-log-shell,
   .board-action-dock {
     width: 94%;
+  }
+
+  .board-purchase-prompt {
+    width: 88%;
   }
 
   .board-log-shell {

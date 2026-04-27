@@ -1,6 +1,7 @@
 using UkraineMonopoly.Server.Rooms;
 
 var builder = WebApplication.CreateBuilder(args);
+const long DefaultSignalRMaximumReceiveMessageSize = 1024 * 1024;
 var clientOrigins = (builder.Configuration["ClientOrigins"] ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
     .Select(origin => origin.TrimEnd('/'))
@@ -36,6 +37,9 @@ builder.Services.AddCors(options =>
 builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = true;
+    options.MaximumReceiveMessageSize =
+        builder.Configuration.GetValue<long?>("SignalR:MaximumReceiveMessageSizeBytes")
+        ?? DefaultSignalRMaximumReceiveMessageSize;
 });
 builder.Services.AddSingleton<RoomManager>();
 

@@ -68,16 +68,16 @@ const DICE_ROLL_ANIMATION_MS = 4200;
 const PAWN_STEP_ANIMATION_MS = 220;
 const MORTGAGE_GRACE_TURNS = 10;
 const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit' });
-const CASINO_MAX_BET = money(300);
+const CASINO_MAX_BET = money(600);
 const CASINO_DEFAULT_BET = money(100);
 const CASINO_SEGMENTS = [
-  { multiplier: 0, weight: 3, color: '#991b1b' },
-  { multiplier: 1, weight: 3, color: '#0f766e' },
-  { multiplier: 2, weight: 1, color: '#15803d' },
-  { multiplier: 3, weight: 1, color: '#ca8a04' },
+  { multiplier: 0, weight: 2.5, color: '#991b1b' },
   { multiplier: 4, weight: 1, color: '#4338ca' },
-  { multiplier: 5, weight: 1, color: '#be123c' },
+  { multiplier: 1, weight: 2.5, color: '#0f766e' },
   { multiplier: 6, weight: 1, color: '#0369a1' },
+  { multiplier: 2, weight: 1, color: '#15803d' },
+  { multiplier: 5, weight: 1, color: '#be123c' },
+  { multiplier: 3, weight: 1, color: '#ca8a04' },
 ] as const;
 const CASINO_TOTAL_WEIGHT = CASINO_SEGMENTS.reduce((sum, segment) => sum + segment.weight, 0);
 const CASINO_WHEEL_SEGMENTS = CASINO_SEGMENTS.reduce<
@@ -87,7 +87,7 @@ const CASINO_WHEEL_SEGMENTS = CASINO_SEGMENTS.reduce<
   const endAngle = startAngle + (segment.weight / CASINO_TOTAL_WEIGHT) * 360;
   return [...segments, { ...segment, startAngle, endAngle, centerAngle: startAngle + (endAngle - startAngle) / 2 }];
 }, []);
-const CASINO_MULTIPLIERS = CASINO_SEGMENTS.map((segment) => segment.multiplier);
+const CASINO_MULTIPLIERS = [0, 1, 2, 3, 4, 5, 6] as const;
 const CASINO_WHEEL_BACKGROUND = `radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.16), transparent 0 7%, transparent 8%),
   radial-gradient(circle at center, rgba(2, 6, 23, 0.98) 0 20%, transparent 21%),
   conic-gradient(from 0deg, ${CASINO_WHEEL_SEGMENTS.map(
@@ -995,9 +995,20 @@ const BoardCasinoPrompt = ({
           <p className="eyebrow">Казино</p>
           <h3>Рулетка фортуни</h3>
         </div>
-        <div className="casino-jackpot">
-          <span>Макс.</span>
-          <strong>x6</strong>
+        <div className="casino-head-side">
+          <div className="casino-jackpot">
+            <span>Макс.</span>
+            <strong>x6</strong>
+          </div>
+          <button
+            className="secondary compact casino-skip-action"
+            type="button"
+            disabled={controlsLocked}
+            onClick={() => dispatch({ type: 'skip_casino', playerId: currentPlayer.id })}
+          >
+            <X size={16} />
+            Відмовитись
+          </button>
         </div>
       </div>
 
@@ -1089,15 +1100,6 @@ const BoardCasinoPrompt = ({
             >
               <BadgeDollarSign size={16} />
               {isSpinning ? 'Крутиться...' : spinComplete ? 'Результат...' : 'Підтвердити ставку'}
-            </button>
-            <button
-              className="secondary compact"
-              type="button"
-              disabled={controlsLocked}
-              onClick={() => dispatch({ type: 'skip_casino', playerId: currentPlayer.id })}
-            >
-              <X size={16} />
-              Відмовитись
             </button>
           </div>
         </section>
@@ -1846,7 +1848,7 @@ const AuctionOverlay = ({ game }: { game: GameState }) => {
             <p>Ставок ще немає. Гравці у вʼязниці не беруть участі.</p>
           ) : (
             auction.bids
-              .slice(-4)
+              .slice(-2)
               .reverse()
               .map((bid) => {
                 const player = game.players.find((candidate) => candidate.id === bid.playerId);
@@ -2924,8 +2926,6 @@ const BoardPurchasePrompt = ({
   const isCity = tile.type === 'city';
   const purchasePrice = getEffectivePropertyPrice(game, tile);
   const projectedRent = getProjectedRent(game, tile, currentPlayer.id);
-  const mortgageTiles = currentPlayer.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
-  const canUseMortgageHelp = currentPlayer.money < purchasePrice && mortgageTiles.length > 0;
 
   return (
     <motion.article
@@ -2978,39 +2978,8 @@ const BoardPurchasePrompt = ({
 
         {currentPlayer.money < purchasePrice && (
           <p className="purchase-status bad">
-            Недостатньо грошей для прямої купівлі. Можна закласти майно або запустити аукціон.
+            Недостатньо грошей для прямої купівлі. Закласти майно можна окремо, натиснувши на своє поле, або запустити аукціон.
           </p>
-        )}
-
-        {canUseMortgageHelp && (
-          <section className="purchase-mortgage-panel">
-            <div className="purchase-mortgage-head">
-              <div>
-                <strong>Потрібно ще {formatMoney(Math.max(0, purchasePrice - currentPlayer.money))}</strong>
-                <span>Закладіть своє майно, не виходячи з вибору купівлі.</span>
-              </div>
-            </div>
-            <div className="purchase-mortgage-list">
-              {mortgageTiles.map((ownedTile) => {
-                const mortgageInfo = getMortgageInfo(game, currentPlayer, ownedTile);
-                const property = game.properties[ownedTile.id];
-                const disabled = mortgageInfo.disabled || property.mortgaged;
-                return (
-                  <button
-                    className="purchase-mortgage-item"
-                    type="button"
-                    disabled={disabled}
-                    title={property.mortgaged ? 'Майно вже заставлене.' : mortgageInfo.reason}
-                    onClick={() => dispatch({ type: 'mortgage', playerId: currentPlayer.id, tileId: ownedTile.id })}
-                    key={ownedTile.id}
-                  >
-                    <span>{ownedTile.name}</span>
-                    <strong>{formatMoney(ownedTile.mortgage)}</strong>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
         )}
 
         <div className="purchase-actions">

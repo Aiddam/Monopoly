@@ -288,7 +288,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1500));
   });
 
-  it('pays casino roulette winnings up to x6 and caps the bet at 300', () => {
+  it('pays casino roulette winnings up to x6 and caps the bet at 600', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'casino-bet');
     game = {
       ...game,
@@ -297,7 +297,7 @@ describe('Ukraine Monopoly engine', () => {
 
     game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 1] });
     expect(() => reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: 0, multiplier: 2 })).toThrow();
-    expect(() => reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: money(300) + 1, multiplier: 2 })).toThrow();
+    expect(() => reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: money(600) + 1, multiplier: 2 })).toThrow();
 
     game = reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: money(100), multiplier: 6 });
 
