@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   calculateRent,
   createInitialGame,
@@ -206,6 +206,146 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1502));
   });
 
+  it('caps UNO Reverse cards at one when drawn', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'uno-reverse-card-cap');
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 7 },
+      chanceDeck: [13],
+      discardChance: [],
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, unoReverseCards: 1 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.players.find((player) => player.id === 'p1')?.unoReverseCards).toBe(1);
+    expect(game.pendingCard?.title).toBe('УНО РЕВЕРС');
+    expect(game.discardChance).not.toContain(13);
+  });
+
+  it('does not recycle UNO Reverse after it has been drawn', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'uno-reverse-no-recycle');
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 7 },
+      chanceDeck: [13],
+      discardChance: [2],
+    };
+
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.players.find((player) => player.id === 'p1')?.unoReverseCards).toBe(1);
+    expect(game.discardChance).toEqual([2]);
+
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 7 },
+      chanceDeck: [],
+      discardChance: [13, 2],
+    };
+
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.pendingCard?.cardId).toBe(2);
+    expect(game.discardChance).toEqual([2]);
+  });
+
+  it('uses UNO Reverse on rent and returns a double turn to the original player', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'uno-reverse-double');
+    game = withOwnership(game, 'p3', [1]);
+    game = {
+      ...game,
+      players: game.players.map((player) =>
+        player.id === 'p1' ? { ...player, position: 39, unoReverseCards: 1 } : player,
+      ),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+    game = reduceGame(game, { type: 'use_uno_reverse', playerId: 'p1' });
+
+    expect(game.currentPlayerId).toBe('p3');
+    expect(game.pendingRent).toMatchObject({ payerId: 'p3', ownerId: 'p1', tileId: 1, amount: money(2) });
+    expect(game.pendingRent?.unoReverse).toMatchObject({ originalTurnPlayerId: 'p1', fromPlayerId: 'p1', toPlayerId: 'p3' });
+    expect(game.players.find((player) => player.id === 'p1')?.unoReverseCards).toBe(0);
+
+    game = reduceGame(game, { type: 'pay_rent', playerId: 'p3' });
+
+    expect(game.phase).toBe('turnEnd');
+    expect(game.currentPlayerId).toBe('p1');
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1702));
+    expect(game.players.find((player) => player.id === 'p3')?.money).toBe(money(1498));
+
+    game = reduceGame(game, { type: 'continue_turn', playerId: 'p1' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p1');
+  });
+
+  it('continues to the next player after an UNO Reverse rent payment without a double', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'uno-reverse-next-player');
+    game = withOwnership(game, 'p3', [3]);
+    game = {
+      ...game,
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, unoReverseCards: 1 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 2] });
+    game = reduceGame(game, { type: 'use_uno_reverse', playerId: 'p1' });
+    game = reduceGame(game, { type: 'pay_rent', playerId: 'p3' });
+    game = reduceGame(game, { type: 'continue_turn', playerId: 'p1' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p2');
+  });
+
+  it('allows an UNO Reverse chain when the target also has the card', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'uno-reverse-chain');
+    game = withOwnership(game, 'p3', [3]);
+    game = {
+      ...game,
+      players: game.players.map((player) =>
+        player.id === 'p1' || player.id === 'p3' ? { ...player, unoReverseCards: 1 } : player,
+      ),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 2] });
+    game = reduceGame(game, { type: 'use_uno_reverse', playerId: 'p1' });
+    game = reduceGame(game, { type: 'use_uno_reverse', playerId: 'p3' });
+
+    expect(game.currentPlayerId).toBe('p1');
+    expect(game.pendingRent).toMatchObject({ payerId: 'p1', ownerId: 'p3', tileId: 3, amount: money(4) });
+    expect(game.pendingRent?.unoReverse).toMatchObject({ originalTurnPlayerId: 'p1', fromPlayerId: 'p3', toPlayerId: 'p1' });
+    expect(game.players.find((player) => player.id === 'p1')?.unoReverseCards).toBe(0);
+    expect(game.players.find((player) => player.id === 'p3')?.unoReverseCards).toBe(0);
+  });
+
+  it('returns a reversed bankruptcy decision to the original double turn', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'uno-reverse-bankruptcy');
+    game = withOwnership(game, 'p3', [1]);
+    game = {
+      ...game,
+      players: game.players.map((player) =>
+        player.id === 'p1' ? { ...player, position: 39, unoReverseCards: 1 } : player,
+      ),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+    game = reduceGame(game, { type: 'use_uno_reverse', playerId: 'p1' });
+    game = reduceGame(game, { type: 'declare_bankruptcy', playerId: 'p3' });
+
+    expect(game.phase).toBe('turnEnd');
+    expect(game.currentPlayerId).toBe('p1');
+    expect(game.players.find((player) => player.id === 'p3')?.isBankrupt).toBe(true);
+
+    game = reduceGame(game, { type: 'continue_turn', playerId: 'p1' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p1');
+  });
+
   it('opens a payment decision before charging tax', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'tax-payment');
     game = {
@@ -292,6 +432,23 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.properties[3].ownerId).toBeUndefined();
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(0);
     expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1600));
+  });
+
+  it('lets a non-current player surrender without interrupting the active turn', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'out-of-turn-surrender');
+    game = withOwnership(game, 'p2', [1, 3]);
+
+    game = reduceGame(game, { type: 'declare_bankruptcy', playerId: 'p2' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p1');
+    expect(game.players.find((player) => player.id === 'p2')).toMatchObject({
+      isBankrupt: true,
+      money: 0,
+      properties: [],
+    });
+    expect(game.properties[1].ownerId).toBeUndefined();
+    expect(game.properties[3].ownerId).toBeUndefined();
   });
 
   it('opens casino on tile 20 and lets the player skip it', () => {
@@ -411,6 +568,44 @@ describe('Ukraine Monopoly engine', () => {
     expect(purchaseGame.players.find((player) => player.id === 'p1')?.position).toBe(1);
     expect(purchaseGame.phase).toBe('awaitingPurchase');
     expect(purchaseGame.pendingPurchaseTileId).toBe(1);
+  });
+
+  it('lets admin grant an UNO Reverse card without exceeding one card', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'admin-uno-reverse');
+
+    game = reduceGame(game, { type: 'admin_grant_uno_reverse', playerId: 'p2' });
+    expect(game.players.find((player) => player.id === 'p2')?.unoReverseCards).toBe(1);
+    expect(game.log[0].text).toContain('УНО РЕВЕРС');
+
+    game = reduceGame(game, { type: 'admin_grant_uno_reverse', playerId: 'p2' });
+    expect(game.players.find((player) => player.id === 'p2')?.unoReverseCards).toBe(1);
+  });
+
+  it('lets admin start a selected city event immediately', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'admin-city-event');
+
+    game = reduceGame(game, { type: 'admin_start_city_event', cityEventId: 'road-repair' });
+
+    expect(game.pendingCityEvent?.id).toBe('road-repair');
+    expect(game.activeCityEvents).toContainEqual({
+      id: 'road-repair',
+      remainingRounds: 2,
+      durationRounds: 2,
+      startedRound: 1,
+    });
+    expect(game.log[0].text).toContain('Ремонт доріг');
+  });
+
+  it('blocks admin city events while a player decision is active', () => {
+    const game = {
+      ...createInitialGame(['Olena', 'Taras'], 'admin-city-event-blocked'),
+      phase: 'rent' as const,
+      pendingRent: { payerId: 'p1', ownerId: 'p2', tileId: 1, amount: money(2) },
+    };
+
+    expect(() => reduceGame(game, { type: 'admin_start_city_event', cityEventId: 'road-repair' })).toThrow(
+      'Міську подію можна запустити',
+    );
   });
 
   it('sends a player to jail on three doubles', () => {
@@ -647,14 +842,16 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.phase).toBe('turnEnd');
   });
 
-  it('keeps travel chance cards to Kyiv and Lviv rare in the weighted deck', () => {
+  it('keeps travel chance cards rare and boosts UNO Reverse in the weighted deck', () => {
     const game = createInitialGame(['Olena', 'Taras'], 'rare-card-weight');
     const kyivCards = game.chanceDeck.filter((cardId) => cardId === 1);
     const lvivCards = game.chanceDeck.filter((cardId) => cardId === 10);
+    const unoReverseCards = game.chanceDeck.filter((cardId) => cardId === 13);
     const commonCards = game.chanceDeck.filter((cardId) => cardId === 2);
 
     expect(kyivCards).toHaveLength(1);
     expect(lvivCards).toHaveLength(1);
+    expect(unoReverseCards).toHaveLength(6);
     expect(commonCards).toHaveLength(4);
   });
 
@@ -1264,21 +1461,21 @@ describe('Ukraine Monopoly engine', () => {
     expect(calculateRent(game, zaporizhzhia)).toBe(money(27));
   });
 
-  it('discounts building cost during an economic crisis city event', () => {
+  it('raises building cost during a tax crisis city event', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'city-event-build');
     game = withOwnership(game, 'p1', [1, 3]);
     game = {
       ...game,
-      activeCityEvents: [{ id: 'economic-crisis', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
+      activeCityEvents: [{ id: 'tax-crisis', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
     };
 
     const pavlohrad = getTile(1);
     if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
-    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(35));
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(65));
 
     game = reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 });
     expect(game.properties[1].houses).toBe(1);
-    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1465));
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1435));
   });
 
   it('raises purchase and unmortgage costs during a tax crisis city event', () => {
@@ -1338,6 +1535,60 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.pendingCityEvent?.id).toBe('bank-inspection');
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1350));
     expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(888));
+  });
+
+  it('boosts paid roads in the city event deck', () => {
+    const game = createInitialGame(['Olena', 'Taras'], 'city-event-paid-roads-boost');
+
+    expect(game.cityEventDeck.filter((eventId) => eventId === 'paid-roads')).toHaveLength(2);
+  });
+
+  it('charges paid roads by moved steps before resolving the landing tile', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-paid-roads-step-fee');
+    game = {
+      ...game,
+      activeCityEvents: [{ id: 'paid-roads', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, position: 39 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 2] });
+
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(15), source: 'cityEvent' });
+    expect(game.players.find((player) => player.id === 'p1')?.position).toBe(2);
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p1' });
+    expect(game.phase).toBe('awaitingCard');
+    expect(game.pendingCardDraw).toMatchObject({ deck: 'community', tileId: 2 });
+  });
+
+  it('can draw a double city event and biases paid roads toward one-die repair', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-double-paid-roads');
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValueOnce(0.01).mockReturnValueOnce(0.01);
+
+    try {
+      game = {
+        ...game,
+        currentPlayerId: 'p2',
+        currentRound: 3,
+        turn: 6,
+        phase: 'turnEnd',
+        cityEventDeck: ['paid-roads', 'road-repair'],
+        cityEventDiscard: [],
+      };
+
+      game = reduceGame(game, { type: 'end_turn', playerId: 'p2' });
+    } finally {
+      randomSpy.mockRestore();
+    }
+
+    expect(game.pendingCityEvent).toMatchObject({
+      id: 'paid-roads',
+      isDouble: true,
+      secondary: { id: 'road-repair' },
+    });
+    expect(game.activeCityEvents.map((event) => event.id)).toEqual(expect.arrayContaining(['paid-roads', 'road-repair']));
+    expect(game.cityEventDiscard).toEqual(['paid-roads', 'road-repair']);
   });
 
   it('uses one die during road repair and prevents jail escape by doubles', () => {
@@ -1433,7 +1684,7 @@ describe('Ukraine Monopoly engine', () => {
 
   it('reshuffles city events without immediately repeating recent discards', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'city-event-reshuffle');
-    const recentEvents = ['tourist-season', 'economic-crisis', 'tax-crisis', 'city-tender', 'bank-day'] as const;
+    const recentEvents = ['tourist-season', 'tax-madness', 'tax-crisis', 'city-tender', 'bank-day'] as const;
     game = { ...game, cityEventDeck: [], cityEventDiscard: [...recentEvents] };
 
     for (let index = 0; index < 6; index += 1) {

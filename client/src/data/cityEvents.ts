@@ -1,4 +1,5 @@
 import type { CityEventDefinition, CityEventId } from '../engine/types';
+import { money } from '../engine/economy';
 
 export const CITY_EVENT_ROUND_INTERVAL = 3;
 
@@ -11,15 +12,6 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     effects: {
       rentGroups: ['Червона', 'Золота'],
       rentMultiplier: 1.5,
-    },
-  },
-  {
-    id: 'economic-crisis',
-    title: 'Економічна криза',
-    text: 'Будинки 2 раунди коштують на 30% дешевше.',
-    durationRounds: 2,
-    effects: {
-      houseCostMultiplier: 0.7,
     },
   },
   {
@@ -64,26 +56,6 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     },
   },
   {
-    id: 'investor-day',
-    title: 'День інвестора',
-    text: 'Придбання вільного майна 2 раунди дешевше на 20%.',
-    durationRounds: 2,
-    effects: {
-      propertyPriceTypes: ['city', 'bank', 'utility'],
-      propertyPriceMultiplier: 0.8,
-    },
-  },
-  {
-    id: 'renovation-grants',
-    title: 'Гранти на реновацію',
-    text: 'Будинки на синіх і зелених вулицях 2 раунди дешевші на 20%.',
-    durationRounds: 2,
-    effects: {
-      houseCostGroups: ['Синя', 'Зелена'],
-      houseCostMultiplier: 0.8,
-    },
-  },
-  {
     id: 'infrastructure-boom',
     title: 'Інфраструктурний бум',
     text: 'Оренда на блакитних і помаранчевих вулицях +25% на 2 раунди.',
@@ -101,16 +73,6 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     effects: {
       rentGroups: ['Фіолетова', 'Бурштинова'],
       rentMultiplier: 1.4,
-    },
-  },
-  {
-    id: 'construction-permit',
-    title: 'Будівельні дозволи',
-    text: 'Будинки на червоних і золотих вулицях 2 раунди коштують на 25% дешевше.',
-    durationRounds: 2,
-    effects: {
-      houseCostGroups: ['Червона', 'Золота'],
-      houseCostMultiplier: 0.75,
     },
   },
   {
@@ -132,6 +94,15 @@ export const cityEventDefinitions: CityEventDefinition[] = [
     durationRounds: 0,
     effects: {
       cashPaymentPercent: 0.1,
+    },
+  },
+  {
+    id: 'paid-roads',
+    title: 'Платні дороги',
+    text: '2 раунди після кидка гравець сплачує 5₴ за кожну пройдену клітинку.',
+    durationRounds: 2,
+    effects: {
+      stepFeePerMove: money(5),
     },
   },
   {
@@ -182,26 +153,6 @@ export const cityEventDefinitions: CityEventDefinition[] = [
       propertyPriceMultiplier: 1.2,
       rentPropertyTypes: ['utility'],
       rentMultiplier: 1.5,
-    },
-  },
-  {
-    id: 'heritage-protection',
-    title: 'Охорона спадщини',
-    text: 'Будинки на золотих і зелених вулицях 2 раунди дорожчі на 35%.',
-    durationRounds: 2,
-    effects: {
-      houseCostGroups: ['Золота', 'Зелена'],
-      houseCostMultiplier: 1.35,
-    },
-  },
-  {
-    id: 'startup-wave',
-    title: 'Стартап-хвиля',
-    text: 'Вільні міста та сервіси 2 раунди дешевші на 15%.',
-    durationRounds: 2,
-    effects: {
-      propertyPriceTypes: ['city', 'utility'],
-      propertyPriceMultiplier: 0.85,
     },
   },
 ];

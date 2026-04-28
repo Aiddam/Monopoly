@@ -68,13 +68,6 @@ export const chanceCards: CardDefinition[] = [
     apply: (state, playerId) => moveToNearestType(state, playerId, 'bank'),
   },
   {
-    id: 7,
-    deck: 'chance',
-    title: 'Реверс маршруту',
-    text: 'Поверніться на 3 клітинки назад і виконайте дію поля.',
-    apply: (state, playerId) => moveBy(state, playerId, -3),
-  },
-  {
     id: 8,
     deck: 'chance',
     title: 'Інвестор у стартап',
@@ -109,6 +102,13 @@ export const chanceCards: CardDefinition[] = [
     title: 'Вечір у казино',
     text: `Перейдіть у казино. Якщо проходите Старт, отримайте ${moneyText(200)}.`,
     apply: (state, playerId) => moveTo(state, playerId, 20, true),
+  },
+  {
+    id: 13,
+    deck: 'chance',
+    title: 'УНО РЕВЕРС',
+    text: 'Отримайте унікальну картку: під час оренди іншому гравцю можна перекинути платіж на власника.',
+    apply: (state, playerId) => addUnoReverseCard(state, playerId),
   },
 ];
 
@@ -217,6 +217,13 @@ const addMoney = (state: GameState, playerId: string, amount: number): GameState
   };
 };
 
+const addUnoReverseCard = (state: GameState, playerId: string): GameState => ({
+  ...state,
+  players: state.players.map((player) =>
+    player.id === playerId ? { ...player, unoReverseCards: Math.min(1, (player.unoReverseCards ?? 0) + 1) } : player,
+  ),
+});
+
 const transferMoney = (state: GameState, fromPlayerId: string, toPlayerId: string, amount: number): GameState => ({
   ...state,
   players: state.players.map((player) => {
@@ -245,15 +252,6 @@ const moveTo = (state: GameState, playerId: string, tileId: number, collectGo: b
   players: state.players.map((player) => {
     if (player.id !== playerId) return player;
     return { ...player, position: tileId, money: player.money + getStartReward(player.position, tileId, collectGo, state.turn) };
-  }),
-});
-
-const moveBy = (state: GameState, playerId: string, steps: number): GameState => ({
-  ...state,
-  players: state.players.map((player) => {
-    if (player.id !== playerId) return player;
-    const nextPosition = (player.position + steps + boardTiles.length) % boardTiles.length;
-    return { ...player, position: nextPosition, money: player.money + getStartReward(player.position, nextPosition, steps > 0, state.turn) };
   }),
 });
 

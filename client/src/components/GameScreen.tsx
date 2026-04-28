@@ -45,7 +45,7 @@ import type { CSSProperties, Dispatch, FormEvent, SetStateAction } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { boardTiles, getTile, isPropertyTile } from '../data/board';
-import { getCityEventDefinition } from '../data/cityEvents';
+import { cityEventDefinitions, getCityEventDefinition } from '../data/cityEvents';
 import { money } from '../engine/economy';
 import {
   AUCTION_BID_INCREMENT,
@@ -57,6 +57,7 @@ import {
 } from '../engine/gameEngine';
 import type {
   CityTile,
+  CityEventId,
   GameState,
   MoneyHistoryPoint,
   PendingCityEvent,
@@ -68,7 +69,7 @@ import type {
 import { useGameStore, type EmoteEvent } from '../store/useGameStore';
 import { DiceRoller } from './DiceRoller';
 
-const TURN_SECONDS = 120;
+const TURN_SECONDS = 180;
 const AUTO_CONTINUE_MS = 1300;
 const CARD_REVEAL_MS = 3600;
 const DICE_ROLL_ANIMATION_MS = 4200;
@@ -106,9 +107,13 @@ const JAIL_FINE = money(100);
 const BUILDING_ANIMATION_MS = 2600;
 const AUCTION_WIN_ANIMATION_MS = 3000;
 const MORTGAGE_ANIMATION_MS = 2800;
+const UNO_REVERSE_ANIMATION_MS = 3200;
 const CITY_EVENT_REVEAL_MS = 5200;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
 const EMOTE_COOLDOWN_LIMIT = 2;
+const UNO_REVERSE_CARD_IMAGE = '/assets/cards/uno-reverse.png';
+const UNO_REVERSE_CARD_ID = 13;
+const UNO_REVERSE_SPARK_INDICES = Array.from({ length: 10 }, (_, index) => index);
 const EMOTE_COOLDOWN_WINDOW_MS = 30_000;
 type EmoteOption = {
   id: string;
@@ -170,6 +175,15 @@ type MortgageAnimationEvent = {
   kind: 'mortgage' | 'redeem' | 'released';
   tileName: string;
   color: string;
+};
+type UnoReverseAnimationEvent = {
+  id: string;
+  fromName: string;
+  toName: string;
+  fromColor: string;
+  toColor: string;
+  tileName: string;
+  amount: number;
 };
 
 const EMOTE_OPTIONS: EmoteOption[] = [
@@ -665,7 +679,16 @@ const AdminPanel = ({
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const [selectedTileId, setSelectedTileId] = useState(currentPlayer.position);
+  const [selectedAdminPlayerId, setSelectedAdminPlayerId] = useState(currentPlayer.id);
+  const [selectedCityEventId, setSelectedCityEventId] = useState<CityEventId>(cityEventDefinitions[0].id);
   const selectedTile = getTile(selectedTileId);
+  const selectedAdminPlayer = game.players.find((player) => player.id === selectedAdminPlayerId) ?? currentPlayer;
+  const selectedCityEvent = getCityEventDefinition(selectedCityEventId);
+  const activePlayers = game.players.filter((player) => !player.isBankrupt);
+  const selectedPlayerHasUnoReverse = (selectedAdminPlayer.unoReverseCards ?? 0) > 0;
+  const canStartCityEvent =
+    ['rolling', 'turnEnd', 'manage', 'trade'].includes(game.phase) &&
+    !game.tradeOffers.some((offer) => offer.status === 'pending');
   const quickTiles = [20, 1, 7, 30, 0]
     .map((tileId) => getTile(tileId))
     .filter((tile, index, tiles) => tiles.findIndex((candidate) => candidate.id === tile.id) === index);
@@ -673,6 +696,15 @@ const AdminPanel = ({
   const submit = (event: FormEvent) => {
     event.preventDefault();
     dispatch({ type: 'admin_move_current_player', tileId: selectedTile.id });
+    onClose();
+  };
+
+  const grantUnoReverse = () => {
+    dispatch({ type: 'admin_grant_uno_reverse', playerId: selectedAdminPlayer.id });
+  };
+
+  const startCityEvent = () => {
+    dispatch({ type: 'admin_start_city_event', cityEventId: selectedCityEvent.id });
     onClose();
   };
 
@@ -739,6 +771,70 @@ const AdminPanel = ({
           </span>
         </div>
 
+        <section className="admin-section">
+          <div className="admin-section-head">
+            <div>
+              <p className="eyebrow">Картка</p>
+              <h3>УНО РЕВЕРС</h3>
+            </div>
+            <img src={UNO_REVERSE_CARD_IMAGE} alt="" aria-hidden />
+          </div>
+          <label className="admin-field">
+            Гравець
+            <select value={selectedAdminPlayer.id} onChange={(event) => setSelectedAdminPlayerId(event.target.value)}>
+              {activePlayers.map((player) => (
+                <option value={player.id} key={player.id}>
+                  {player.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="secondary compact"
+            type="button"
+            disabled={selectedPlayerHasUnoReverse}
+            title={selectedPlayerHasUnoReverse ? 'У гравця вже є ця картка.' : undefined}
+            onClick={grantUnoReverse}
+          >
+            <Layers size={16} />
+            Видати УНО
+          </button>
+        </section>
+
+        <section className="admin-section city-event-admin-section">
+          <div className="admin-section-head">
+            <div>
+              <p className="eyebrow">Міська подія</p>
+              <h3>{selectedCityEvent.title}</h3>
+            </div>
+            <CircleHelp size={20} />
+          </div>
+          <label className="admin-field">
+            Подія
+            <select
+              value={selectedCityEvent.id}
+              onChange={(event) => setSelectedCityEventId(event.target.value as CityEventId)}
+            >
+              {cityEventDefinitions.map((event) => (
+                <option value={event.id} key={event.id}>
+                  {event.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p>{selectedCityEvent.text}</p>
+          <button
+            className="secondary compact"
+            type="button"
+            disabled={!canStartCityEvent}
+            title={canStartCityEvent ? undefined : 'Завершіть активне рішення або угоду перед запуском події.'}
+            onClick={startCityEvent}
+          >
+            <Flag size={16} />
+            Запустити подію
+          </button>
+        </section>
+
         <div className="admin-actions">
           <button className="primary" type="submit">
             <ShieldAlert size={18} />
@@ -803,9 +899,21 @@ const GameBoard = ({
   const buildingEvents = useBuildingAnimationEvents(game);
   const auctionWinEvents = useAuctionWinAnimationEvents(game);
   const mortgageEvents = useMortgageAnimationEvents(game);
+  const unoReverseEvents = useUnoReverseAnimationEvents(game);
   const hasBuildingShock = buildingEvents.length > 0;
   const hasHotelShock = buildingEvents.some((event) => event.kind === 'build' && event.toHouses >= 5);
   const shouldShowCasino = Boolean(game.pendingCasino && (isLocalTurn || game.pendingCasino.spinEndsAt));
+  const isCardPaymentDecision = Boolean(
+    game.pendingCard && game.phase === 'payment' && game.pendingPayment?.source === 'card',
+  );
+  const shouldLayerCardBehindDecision =
+    !isCardPaymentDecision &&
+    !isBoardBusy &&
+    ((game.phase === 'awaitingJailDecision' && Boolean(game.pendingJail) && isLocalTurn) ||
+      (game.phase === 'casino' && shouldShowCasino) ||
+      (game.phase === 'awaitingPurchase' && Boolean(pendingTile && isPropertyTile(pendingTile)) && isLocalTurn) ||
+      (game.phase === 'rent' && Boolean(game.pendingRent)) ||
+      (game.phase === 'payment' && Boolean(game.pendingPayment)));
   const occupiedTileIds = useMemo(() => {
     const tileIds = new Set<number>();
     game.players.forEach((player) => {
@@ -846,7 +954,7 @@ const GameBoard = ({
             <BoardPurchasePrompt game={game} tile={pendingTile} currentPlayer={currentPlayer} dispatch={dispatch} />
           ) : game.phase === 'rent' && game.pendingRent && !isBoardBusy ? (
             <BoardRentPrompt game={game} isLocalTurn={isLocalTurn} dispatch={dispatch} />
-          ) : game.phase === 'payment' && game.pendingPayment && !isBoardBusy ? (
+          ) : game.phase === 'payment' && game.pendingPayment && !isBoardBusy && !isCardPaymentDecision ? (
             <BoardPaymentPrompt game={game} isLocalTurn={isLocalTurn} dispatch={dispatch} />
           ) : tradeDraft ? (
             <BoardTradeBuilder
@@ -875,10 +983,11 @@ const GameBoard = ({
             orderRollPlayer={orderRollPlayer}
             canLocalRollForOrder={canLocalRollForOrder}
             isBoardBusy={isBoardBusy}
-            hasDoubleRoll={hasDoubleRoll}
-            dispatch={dispatch}
-            onOpenWorkspace={onOpenWorkspace}
-          />
+          hasDoubleRoll={hasDoubleRoll}
+          dispatch={dispatch}
+          onOpenWorkspace={onOpenWorkspace}
+          surrenderPlayer={tradePlayer}
+        />
         </div>
         {boardTiles.map((tile) => (
           <TileCell
@@ -894,10 +1003,16 @@ const GameBoard = ({
         <BuildingAnimationLayer events={buildingEvents} />
         <AuctionWinAnimationLayer events={auctionWinEvents} />
         <MortgageAnimationLayer events={mortgageEvents} />
+        <UnoReverseAnimationLayer events={unoReverseEvents} />
         <BoardPawns game={game} displayPositions={displayPositions} />
         <DiceRollOverlay game={game} isRolling={isDiceRolling} rollingKey={rollingKey} />
         <AuctionOverlay game={game} />
-        <CardDrawOverlay game={game} />
+        <CardDrawOverlay
+          game={game}
+          isLocalTurn={isLocalTurn}
+          layerBehindDecision={shouldLayerCardBehindDecision}
+          dispatch={dispatch}
+        />
         <CityEventReveal event={game.pendingCityEvent} />
       </div>
     </section>
@@ -905,25 +1020,61 @@ const GameBoard = ({
 };
 
 const CityEventBanner = ({ game }: { game: GameState }) => {
+  const [isTipOpen, setIsTipOpen] = useState(false);
   const activeEvents = game.activeCityEvents ?? [];
   const visibleEvent = game.pendingCityEvent ?? activeEvents[activeEvents.length - 1];
   const visibleEventDefinition = visibleEvent ? getCityEventDefinition(visibleEvent.id) : undefined;
-  if (!visibleEventDefinition && activeEvents.length === 0) return null;
+  const pendingEvent = game.pendingCityEvent;
+  const visibleEventTitle = pendingEvent?.secondary
+    ? `${pendingEvent.title} + ${pendingEvent.secondary.title}`
+    : pendingEvent?.title ?? visibleEventDefinition?.title;
+  const visibleEventText = pendingEvent?.secondary
+    ? `${pendingEvent.text} ${pendingEvent.secondary.text}`
+    : pendingEvent?.text ?? visibleEventDefinition?.text;
+  if (!visibleEventTitle && activeEvents.length === 0) return null;
 
   return (
     <motion.aside
-      className="city-event-banner"
-      key={`${visibleEventDefinition?.id ?? 'city-events'}-${game.pendingCityEvent?.round ?? 'active'}`}
+      className={`city-event-banner${pendingEvent?.isDouble ? ' double' : ''}`}
+      key={`${visibleEvent?.id ?? 'city-events'}-${pendingEvent?.secondary?.id ?? 'single'}-${pendingEvent?.round ?? 'active'}`}
       aria-live="polite"
       initial={{ opacity: 0, y: -10, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: 'spring', stiffness: 260, damping: 22 }}
     >
-      {visibleEventDefinition && (
-        <div className="city-event-main">
-          <span>Подія міста</span>
-          <strong>{visibleEventDefinition.title}</strong>
-          <p>{visibleEventDefinition.text}</p>
+      {visibleEventTitle && (
+        <div className="city-event-card-area">
+          <div className="city-event-main">
+            <span>{pendingEvent?.isDouble ? 'Подвійна подія' : 'Подія міста'}</span>
+            <strong>{visibleEventTitle}</strong>
+            {visibleEventText && (
+              <p
+                className="city-event-summary"
+                tabIndex={0}
+                onBlur={() => setIsTipOpen(false)}
+                onFocus={() => setIsTipOpen(true)}
+                onMouseEnter={() => setIsTipOpen(true)}
+                onMouseLeave={() => setIsTipOpen(false)}
+              >
+                {visibleEventText}
+              </p>
+            )}
+          </div>
+          <AnimatePresence>
+            {visibleEventText && isTipOpen && (
+              <motion.div
+                className="city-event-tip"
+                role="tooltip"
+                initial={{ opacity: 0, y: -4, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                transition={{ duration: 0.16 }}
+              >
+                <strong>{visibleEventTitle}</strong>
+                <p>{visibleEventText}</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       )}
       {activeEvents.length > 0 && (
@@ -1418,6 +1569,8 @@ const BoardRentPrompt = ({
   const owner = game.players.find((player) => player.id === pendingRent.ownerId);
   const tile = getTile(pendingRent.tileId);
   const canPay = Boolean(payer && payer.money >= pendingRent.amount);
+  const hasUnoReverseCard = Boolean(payer && (payer.unoReverseCards ?? 0) > 0);
+  const canUseUnoReverse = Boolean(hasUnoReverseCard && payer && owner && owner.id !== payer.id);
   const surrenderArmed = surrenderCharge >= 100;
   const stopSurrenderCharge = () => {
     if (surrenderArmed) return;
@@ -1447,6 +1600,11 @@ const BoardRentPrompt = ({
       <p>
         {payer?.name ?? 'Гравець'} має сплатити {owner?.name ?? 'власнику'}.
       </p>
+      {pendingRent.unoReverse && (
+        <p className="rent-reverse-note">
+          УНО РЕВЕРС активний: платіж перекинуто на {payer?.name ?? 'гравця'}.
+        </p>
+      )}
       {pendingRent.originalAmount && (
         <p className="rent-discount-note">
           Послуга оренди: {pendingRent.discountPercent}% знижки, замість {formatMoney(pendingRent.originalAmount)}.
@@ -1462,6 +1620,17 @@ const BoardRentPrompt = ({
           <HandCoins size={16} />
           Заплатити
         </button>
+        {hasUnoReverseCard && (
+          <button
+            className="uno-reverse-button compact"
+            disabled={!isLocalTurn || !canUseUnoReverse}
+            title={canUseUnoReverse ? 'Перекинути платіж на власника.' : undefined}
+            onClick={() => dispatch({ type: 'use_uno_reverse', playerId: pendingRent.payerId })}
+          >
+            <img src={UNO_REVERSE_CARD_IMAGE} alt="" aria-hidden />
+            <span>УНО РЕВЕРС</span>
+          </button>
+        )}
         <button
           className={`surrender-button compact ${isSurrenderCharging ? 'charging' : ''} ${surrenderArmed ? 'armed' : ''}`}
           disabled={!isLocalTurn}
@@ -1478,7 +1647,7 @@ const BoardRentPrompt = ({
           <span>Здатися</span>
         </button>
       </div>
-      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно перейде кредитору.</p>
+      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно повернеться в банк.</p>
     </motion.article>
   );
 };
@@ -1491,6 +1660,25 @@ const BoardPaymentPrompt = ({
   game: GameState;
   isLocalTurn: boolean;
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => (
+  <PaymentDecisionPanel
+    game={game}
+    isLocalTurn={isLocalTurn}
+    dispatch={dispatch}
+    className="board-rent-prompt board-payment-prompt"
+  />
+);
+
+const PaymentDecisionPanel = ({
+  game,
+  isLocalTurn,
+  dispatch,
+  className,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+  className: string;
 }) => {
   const pendingPayment = game.pendingPayment;
   const [isSurrenderCharging, setIsSurrenderCharging] = useState(false);
@@ -1530,8 +1718,8 @@ const BoardPaymentPrompt = ({
   };
 
   return (
-    <motion.article
-      className="board-rent-prompt board-payment-prompt"
+    <motion.div
+      className={className}
       initial={{ opacity: 0, y: 10, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 10, scale: 0.98 }}
@@ -1574,14 +1762,15 @@ const BoardPaymentPrompt = ({
           <span>Здатися</span>
         </button>
       </div>
-      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно перейде кредитору або банку.</p>
-    </motion.article>
+      <p className="rent-warning">Після натискання “Здатися” ви програєте, а ваше майно повернеться в банк.</p>
+    </motion.div>
   );
 };
 
 const BoardLogFeed = ({ game, deferUpdates }: { game: GameState; deferUpdates: boolean }) => {
   const [visibleLog, setVisibleLog] = useState(game.log);
   const entries = useMemo(() => [...visibleLog].reverse(), [visibleLog]);
+  const latestEntryId = visibleLog[0]?.id ?? '';
   const shellRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -1630,7 +1819,7 @@ const BoardLogFeed = ({ game, deferUpdates }: { game: GameState; deferUpdates: b
       setShowJumpDown(false);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [entries.length]);
+  }, [latestEntryId]);
 
   return (
     <div className="board-log-shell" ref={shellRef}>
@@ -1675,6 +1864,7 @@ const BoardActionDock = ({
   hasDoubleRoll,
   dispatch,
   onOpenWorkspace,
+  surrenderPlayer,
 }: {
   game: GameState;
   isDiceRolling: boolean;
@@ -1685,6 +1875,7 @@ const BoardActionDock = ({
   hasDoubleRoll: boolean;
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
   onOpenWorkspace: (tab: WorkspaceTab) => void;
+  surrenderPlayer: Player;
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
@@ -1692,6 +1883,35 @@ const BoardActionDock = ({
   const diceLabel = isDiceRolling ? '...' : formatDiceRoll(game.dice);
   const hasPendingTrade = game.tradeOffers.some((offer) => offer.status === 'pending');
   const isCurrentPlayerJailed = currentPlayer.jailTurns > 0;
+  const [isSurrenderCharging, setIsSurrenderCharging] = useState(false);
+  const [surrenderCharge, setSurrenderCharge] = useState(0);
+  const surrenderArmed = surrenderCharge >= 100;
+  const canSurrender = game.phase !== 'finished' && !surrenderPlayer.isBankrupt;
+
+  useEffect(() => {
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  }, [surrenderPlayer.id, game.phase]);
+
+  useEffect(() => {
+    if (!isSurrenderCharging || surrenderCharge >= 100) return;
+    const timer = window.setTimeout(() => {
+      setSurrenderCharge((value) =>
+        Math.min(100, value + (SURRENDER_CHARGE_STEP_MS / SURRENDER_CHARGE_MS) * 100),
+      );
+    }, SURRENDER_CHARGE_STEP_MS);
+    return () => window.clearTimeout(timer);
+  }, [isSurrenderCharging, surrenderCharge]);
+
+  const stopSurrenderCharge = () => {
+    if (surrenderArmed) return;
+    setIsSurrenderCharging(false);
+    setSurrenderCharge(0);
+  };
+  const handleSurrender = () => {
+    if (!canSurrender || !surrenderArmed) return;
+    dispatch({ type: 'declare_bankruptcy', playerId: surrenderPlayer.id });
+  };
 
   return (
     <div className="board-action-dock">
@@ -1814,6 +2034,27 @@ const BoardActionDock = ({
         </button>
       </div>
 
+      <button
+        className={`dock-tool dock-surrender surrender-button ${isSurrenderCharging ? 'charging' : ''} ${surrenderArmed ? 'armed' : ''}`}
+        type="button"
+        disabled={!canSurrender}
+        aria-disabled={!canSurrender || !surrenderArmed}
+        style={{ '--surrender-charge': `${surrenderCharge}%` } as CSSProperties}
+        title={
+          canSurrender
+            ? `Здатися за ${surrenderPlayer.name}. Наведіть і дочекайтесь заповнення.`
+            : 'Гравець уже вибув або партію завершено.'
+        }
+        onBlur={stopSurrenderCharge}
+        onClick={handleSurrender}
+        onFocus={() => setIsSurrenderCharging(true)}
+        onPointerEnter={() => setIsSurrenderCharging(true)}
+        onPointerLeave={stopSurrenderCharge}
+      >
+        <ShieldAlert size={17} />
+        <span>Здатися</span>
+      </button>
+
     </div>
   );
 };
@@ -1854,21 +2095,90 @@ const DiceRollOverlay = ({ game, isRolling, rollingKey }: { game: GameState; isR
   );
 };
 
-const CardDrawOverlay = ({ game }: { game: GameState }) => {
+const CardDrawOverlay = ({
+  game,
+  isLocalTurn,
+  layerBehindDecision,
+  dispatch,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  layerBehindDecision: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
   const card = game.pendingCard;
-  const isDecisionVisible = ['awaitingPurchase', 'rent', 'payment', 'casino', 'awaitingJailDecision'].includes(game.phase);
+  const receiver = game.players.find((player) => player.id === game.currentPlayerId);
+  const isCardPaymentDecision = Boolean(card && game.phase === 'payment' && game.pendingPayment?.source === 'card');
+  const isUnoReverseAcquire = Boolean(card?.deck === 'chance' && card.cardId === UNO_REVERSE_CARD_ID);
 
   return (
     <AnimatePresence>
       {card && (
         <motion.div
-          className={`card-draw-overlay ${isDecisionVisible ? 'behind-decision' : ''}`}
+          className={`card-draw-overlay ${layerBehindDecision ? 'behind-decision' : ''} ${isCardPaymentDecision ? 'card-payment-active' : ''} ${isUnoReverseAcquire ? 'uno-reverse-acquire-active' : ''}`}
           key={`${card.deck}-${card.cardId}-${game.turn}`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
         >
+          {isUnoReverseAcquire ? (
+            <div className="uno-reverse-acquire-stage">
+              <motion.div
+                className="uno-reverse-acquire-aura"
+                initial={{ opacity: 0, scale: 0.54, rotate: -18 }}
+                animate={{ opacity: [0, 0.95, 0.7], scale: [0.54, 1.08, 1], rotate: 26 }}
+                transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
+                aria-hidden
+              />
+              <motion.div
+                className="uno-reverse-acquire-rays"
+                initial={{ opacity: 0, scale: 0.72, rotate: 0 }}
+                animate={{ opacity: [0, 0.72, 0.36], scale: [0.72, 1.12, 1.22], rotate: 42 }}
+                transition={{ duration: 1.6, delay: 0.08, ease: 'easeOut' }}
+                aria-hidden
+              />
+              <motion.img
+                className="uno-reverse-acquire-card"
+                src={UNO_REVERSE_CARD_IMAGE}
+                alt=""
+                aria-hidden
+                initial={{ y: 42, rotateZ: -14, rotateY: -180, scale: 0.46, opacity: 0 }}
+                animate={{
+                  y: [42, -18, 0],
+                  rotateZ: [-14, 8, -3, 0],
+                  rotateY: [-180, 180, 540, 720],
+                  scale: [0.46, 1.22, 0.98, 1],
+                  opacity: 1,
+                }}
+                transition={{ duration: 1.45, ease: [0.16, 1, 0.3, 1] }}
+              />
+              <div className="uno-reverse-acquire-sparks" aria-hidden>
+                {UNO_REVERSE_SPARK_INDICES.map((index) => (
+                  <motion.span
+                    key={index}
+                    initial={{ opacity: 0, scale: 0.3, x: 0, y: 0 }}
+                    animate={{
+                      opacity: [0, 1, 0],
+                      scale: [0.3, 1, 0.5],
+                      x: Math.cos((index / 10) * Math.PI * 2) * 118,
+                      y: Math.sin((index / 10) * Math.PI * 2) * 88,
+                    }}
+                    transition={{ duration: 1.05, delay: 0.2 + index * 0.035, ease: 'easeOut' }}
+                  />
+                ))}
+              </div>
+              <motion.div
+                className="uno-reverse-acquire-label"
+                initial={{ y: 18, opacity: 0, scale: 0.96 }}
+                animate={{ y: 0, opacity: 1, scale: 1 }}
+                transition={{ duration: 0.26, delay: 0.78 }}
+              >
+                <strong>УНО РЕВЕРС</strong>
+                {receiver && <span>{receiver.name}</span>}
+              </motion.div>
+            </div>
+          ) : (
           <div className="card-draw-stage">
             <motion.div
               className={`card-deck ${card.deck}`}
@@ -1879,7 +2189,7 @@ const CardDrawOverlay = ({ game }: { game: GameState }) => {
               <span>{card.deck === 'chance' ? 'Шанс' : 'Громада'}</span>
             </motion.div>
             <motion.article
-              className={`drawn-card ${card.deck}`}
+              className={`drawn-card ${card.deck}${isCardPaymentDecision ? ' with-payment' : ''}`}
               initial={{ x: -112, y: 22, rotate: -9, rotateY: 54, scale: 0.84, opacity: 0 }}
               animate={{ x: 0, y: 0, rotate: 0, rotateY: 0, scale: 1, opacity: 1 }}
               exit={{ y: -20, scale: 0.94, opacity: 0 }}
@@ -1888,8 +2198,17 @@ const CardDrawOverlay = ({ game }: { game: GameState }) => {
               <span className="card-chip">{card.deck === 'chance' ? 'Шанс' : 'Громада'}</span>
               <h3>{card.title}</h3>
               <p>{card.text}</p>
+              {isCardPaymentDecision && (
+                <PaymentDecisionPanel
+                  game={game}
+                  isLocalTurn={isLocalTurn}
+                  dispatch={dispatch}
+                  className="card-payment-inline"
+                />
+              )}
             </motion.article>
           </div>
+          )}
         </motion.div>
       )}
     </AnimatePresence>
@@ -1898,7 +2217,7 @@ const CardDrawOverlay = ({ game }: { game: GameState }) => {
 
 const CityEventReveal = ({ event }: { event?: PendingCityEvent }) => {
   const [visibleEvent, setVisibleEvent] = useState<PendingCityEvent | undefined>();
-  const eventKey = event ? `${event.id}:${event.round}` : '';
+  const eventKey = event ? `${event.id}:${event.secondary?.id ?? 'single'}:${event.round}` : '';
   const lastEventKeyRef = useRef(eventKey);
 
   useEffect(() => {
@@ -1931,7 +2250,7 @@ const CityEventReveal = ({ event }: { event?: PendingCityEvent }) => {
           aria-live="assertive"
         >
           <motion.article
-            className="city-event-reveal-card"
+            className={`city-event-reveal-card${visibleEvent.isDouble ? ' double-city-event' : ''}`}
             initial={{ opacity: 0, y: 26, scale: 0.82 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -18, scale: 0.96 }}
@@ -1939,10 +2258,17 @@ const CityEventReveal = ({ event }: { event?: PendingCityEvent }) => {
           >
             <span className="city-event-reveal-glow" aria-hidden />
             <span className="city-event-reveal-sweep" aria-hidden />
+            {visibleEvent.isDouble && <span className="city-event-double-orbit" aria-hidden />}
             <div>
-              <span>Подія міста</span>
+              <span>{visibleEvent.isDouble ? 'Подвійна подія міста' : 'Подія міста'}</span>
               <strong>{visibleEvent.title}</strong>
               <p>{visibleEvent.text}</p>
+              {visibleEvent.secondary && (
+                <p className="city-event-secondary">
+                  <b>{visibleEvent.secondary.title}</b>
+                  {visibleEvent.secondary.text}
+                </p>
+              )}
             </div>
           </motion.article>
         </motion.div>
@@ -2150,6 +2476,7 @@ const TileCell = ({
   const position = boardPosition(tileId);
   const property = game?.properties[tileId];
   const owner = property?.ownerId ? game?.players.find((player) => player.id === property.ownerId) : undefined;
+  const ownerNameMark = owner && game ? getOwnerNameMark(game.players, owner) : '';
   const isInspectable = isPropertyTile(tile);
   const rent = game && property?.ownerId && isPropertyTile(tile) ? calculateRent(game, tile, game.dice[0] + game.dice[1]) : undefined;
   const price = game && isPropertyTile(tile) ? getEffectivePropertyPrice(game, tile) : undefined;
@@ -2202,7 +2529,7 @@ const TileCell = ({
         <>
           <span className="owner-rail" aria-hidden />
           <span className="owner-chip" title={`Власник: ${owner.name}`}>
-            {owner.name.slice(0, 2)}
+            {ownerNameMark}
           </span>
         </>
       )}
@@ -2511,6 +2838,63 @@ const MortgageAnimationLayer = ({ events }: { events: MortgageAnimationEvent[] }
         </div>
       );
     })}
+  </div>
+);
+
+const UnoReverseAnimationLayer = ({ events }: { events: UnoReverseAnimationEvent[] }) => (
+  <div className="uno-reverse-animation-layer" aria-live="polite">
+    <AnimatePresence>
+      {events.map((event) => (
+        <motion.div
+          className="uno-reverse-event"
+          key={event.id}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+        >
+          <motion.div
+            className="uno-reverse-card-spin"
+            initial={{ y: 40, scale: 0.42, rotateZ: -18, rotateY: -160 }}
+            animate={{
+              y: [40, -14, 0],
+              scale: [0.42, 1.18, 1],
+              rotateZ: [-18, 10, -4, 0],
+              rotateY: [-160, 220, 540, 720],
+            }}
+            transition={{ duration: 1.35, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <img src={UNO_REVERSE_CARD_IMAGE} alt="" aria-hidden />
+          </motion.div>
+          <motion.div
+            className="uno-reverse-burst"
+            initial={{ scale: 0.42, opacity: 0 }}
+            animate={{ scale: [0.42, 1.08, 1.3], opacity: [0, 0.75, 0] }}
+            transition={{ duration: 1.1, delay: 0.26 }}
+            aria-hidden
+          />
+          <motion.div
+            className="uno-reverse-caption"
+            initial={{ y: 18, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 12, opacity: 0 }}
+            transition={{ duration: 0.28, delay: 0.52 }}
+          >
+            <strong>УНО РЕВЕРС</strong>
+            <span>
+              <i style={{ '--reverse-player-color': event.fromColor } as CSSProperties} />
+              {event.fromName}
+              <ArrowLeftRight size={15} />
+              <i style={{ '--reverse-player-color': event.toColor } as CSSProperties} />
+              {event.toName}
+            </span>
+            <small>
+              {event.tileName} · {formatMoney(event.amount)}
+            </small>
+          </motion.div>
+        </motion.div>
+      ))}
+    </AnimatePresence>
   </div>
 );
 
@@ -2856,6 +3240,16 @@ const ManagePanel = () => {
           <div>
             <strong>Картка виходу з вʼязниці</strong>
             <span>x{player.jailCards}</span>
+          </div>
+        </div>
+      )}
+
+      {(player.unoReverseCards ?? 0) > 0 && (
+        <div className="bonus-card uno-reverse">
+          <img src={UNO_REVERSE_CARD_IMAGE} alt="" aria-hidden />
+          <div>
+            <strong>УНО РЕВЕРС</strong>
+            <span>x1</span>
           </div>
         </div>
       )}
@@ -4189,6 +4583,19 @@ const hasBuildingBlockedCityEvent = (game: GameState) =>
 
 const formatMoney = (amount: number) => `${amount}₴`;
 
+const getOwnerNameMark = (players: Player[], owner: Player): string => {
+  const normalizedPrefix = getNameLetters(owner.name, 2).toLocaleLowerCase('uk-UA');
+  const hasDuplicatePrefix = players.some(
+    (player) => player.id !== owner.id && getNameLetters(player.name, 2).toLocaleLowerCase('uk-UA') === normalizedPrefix,
+  );
+  return getNameLetters(owner.name, hasDuplicatePrefix ? 3 : 2).toLocaleUpperCase('uk-UA');
+};
+
+const getNameLetters = (name: string, count: number): string => {
+  const letters = Array.from(name.trim().replace(/\s+/g, ''));
+  return letters.slice(0, count).join('') || '?';
+};
+
 const formatTurnWord = (turns: number) => (turns === 1 ? 'хід' : turns >= 2 && turns <= 4 ? 'ходи' : 'ходів');
 
 const formatRoundWord = (rounds: number) =>
@@ -4421,6 +4828,54 @@ const createMortgageSnapshot = (game: GameState): Record<number, { mortgaged: bo
     }),
   );
 
+const useUnoReverseAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<UnoReverseAnimationEvent[]>([]);
+  const lastEventIdRef = useRef(game.pendingRent?.unoReverse?.eventId ?? '');
+  const timersRef = useRef<number[]>([]);
+  const reverseEventId = game.pendingRent?.unoReverse?.eventId ?? '';
+
+  useEffect(() => {
+    lastEventIdRef.current = game.pendingRent?.unoReverse?.eventId ?? '';
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const reverse = game.pendingRent?.unoReverse;
+    if (!reverse || reverse.eventId === lastEventIdRef.current) return;
+    lastEventIdRef.current = reverse.eventId;
+
+    const from = game.players.find((player) => player.id === reverse.fromPlayerId);
+    const to = game.players.find((player) => player.id === reverse.toPlayerId);
+    const tile = getTile(game.pendingRent.tileId);
+    const event: UnoReverseAnimationEvent = {
+      id: reverse.eventId,
+      fromName: from?.name ?? 'Гравець',
+      toName: to?.name ?? 'Гравець',
+      fromColor: from?.color ?? '#22c55e',
+      toColor: to?.color ?? '#38bdf8',
+      tileName: tile.name,
+      amount: game.pendingRent.amount,
+    };
+
+    setEvents((current) => [...current, event].slice(-3));
+    const timer = window.setTimeout(() => {
+      setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+    }, UNO_REVERSE_ANIMATION_MS);
+    timersRef.current.push(timer);
+  }, [game, reverseEventId]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
 let emoteAudioContext: AudioContext | undefined;
 const emoteAudioBuffers = new Map<string, Promise<AudioBuffer>>();
 
@@ -4436,6 +4891,7 @@ type SoundSnapshot = {
   pendingTradeCount: number;
   phase: GameState['phase'];
   resolvedTradeCount: number;
+  unoReverseKey: string;
 };
 
 const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string, isOnlineRoom: boolean) => {
@@ -4443,20 +4899,20 @@ const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string,
   const snapshotRef = useRef<SoundSnapshot | undefined>(undefined);
   const buildingSnapshotRef = useRef(createSoundBuildingSnapshot(game));
 
-  const getAudioContext = () => {
+  const getAudioContext = (create = true) => {
     if (typeof window === 'undefined') return undefined;
     const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
     const AudioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
     if (!AudioContextConstructor) return undefined;
-    audioRef.current ??= new AudioContextConstructor();
+    if (!audioRef.current && create) audioRef.current = new AudioContextConstructor();
     return audioRef.current;
   };
 
   useEffect(() => {
     if (!enabled) return;
     const unlockAudio = () => {
-      const context = getAudioContext();
-      if (context?.state === 'suspended') void context.resume();
+      const context = getAudioContext(true);
+      if (context?.state === 'suspended') void context.resume().catch(() => undefined);
     };
 
     window.addEventListener('pointerdown', unlockAudio, true);
@@ -4493,6 +4949,7 @@ const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string,
       sounds.push(!isOnlineRoom || nextSnapshot.currentPlayerId === localPlayerId ? 'turn-alert' : 'turn');
     }
     if (nextSnapshot.pendingCardKey && nextSnapshot.pendingCardKey !== previousSnapshot.pendingCardKey) sounds.push('card');
+    if (nextSnapshot.unoReverseKey && nextSnapshot.unoReverseKey !== previousSnapshot.unoReverseKey) sounds.push('card');
     if (nextSnapshot.cityEventKey && nextSnapshot.cityEventKey !== previousSnapshot.cityEventKey) sounds.push('card');
     if (nextSnapshot.casinoSpinKey && nextSnapshot.casinoSpinKey !== previousSnapshot.casinoSpinKey) sounds.push('casino');
     if (nextSnapshot.auctionBidCount > previousSnapshot.auctionBidCount) sounds.push('bid');
@@ -4523,14 +4980,11 @@ const useGameSounds = (game: GameState, enabled: boolean, localPlayerId: string,
       else if (text.includes('сплачує') || text.includes('втрачає') || text.includes('програє')) sounds.push('loss');
     }
 
-    const context = getAudioContext();
-    if (!context) return;
-    void resumeAudioContext(context).then((ready) => {
-      if (!ready) return;
-      uniqueSounds(sounds)
-        .slice(0, 4)
-        .forEach((sound, index) => playGameSound(context, sound, index * 80));
-    });
+    const context = getAudioContext(false);
+    if (!context || context.state !== 'running') return;
+    uniqueSounds(sounds)
+      .slice(0, 4)
+      .forEach((sound, index) => playGameSound(context, sound, index * 80));
   }, [enabled, game, isOnlineRoom, localPlayerId]);
 };
 
@@ -4540,8 +4994,8 @@ const useEmoteSounds = (emotes: EmoteEvent[], enabled: boolean, localPlayerId: s
   useEffect(() => {
     if (!enabled) return;
     const unlockAudio = () => {
-      const context = getEmoteAudioContext();
-      if (context?.state === 'suspended') void context.resume();
+      const context = getEmoteAudioContext(true);
+      if (context?.state === 'suspended') void context.resume().catch(() => undefined);
     };
 
     window.addEventListener('pointerdown', unlockAudio, true);
@@ -4554,8 +5008,8 @@ const useEmoteSounds = (emotes: EmoteEvent[], enabled: boolean, localPlayerId: s
 
   useEffect(() => {
     if (!enabled) return;
-    const context = getEmoteAudioContext();
-    if (!context) return;
+    const context = getEmoteAudioContext(false);
+    if (!context || context.state !== 'running') return;
 
     emotes.forEach((emote) => {
       if (playedRef.current.has(emote.id)) return;
@@ -4576,12 +5030,12 @@ const playEmoteAudio = (emoteId: string) => {
   void playEmoteSound(context, emoteAudioBuffers, option.audioSrc, option.gain ?? 1);
 };
 
-const getEmoteAudioContext = () => {
+const getEmoteAudioContext = (create = true) => {
   if (typeof window === 'undefined') return undefined;
   const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext };
   const AudioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
   if (!AudioContextConstructor) return undefined;
-  emoteAudioContext ??= new AudioContextConstructor();
+  if (!emoteAudioContext && create) emoteAudioContext = new AudioContextConstructor();
   return emoteAudioContext;
 };
 
@@ -4635,7 +5089,9 @@ const loadAudioBuffer = (
 
 const createGameSoundSnapshot = (game: GameState): SoundSnapshot => ({
   auctionBidCount: game.auction?.bids.length ?? 0,
-  cityEventKey: game.pendingCityEvent ? `${game.pendingCityEvent.id}:${game.pendingCityEvent.round}` : '',
+  cityEventKey: game.pendingCityEvent
+    ? `${game.pendingCityEvent.id}:${game.pendingCityEvent.secondary?.id ?? 'single'}:${game.pendingCityEvent.round}`
+    : '',
   casinoSpinKey: game.pendingCasino?.spinStartedAt ? `${game.pendingCasino.playerId}:${game.pendingCasino.spinStartedAt}` : '',
   currentPlayerId: game.currentPlayerId,
   diceRollId: game.diceRollId ?? 0,
@@ -4645,6 +5101,7 @@ const createGameSoundSnapshot = (game: GameState): SoundSnapshot => ({
   pendingTradeCount: game.tradeOffers.filter((offer) => offer.status === 'pending').length,
   phase: game.phase,
   resolvedTradeCount: game.tradeOffers.filter((offer) => offer.status === 'accepted' || offer.status === 'declined').length,
+  unoReverseKey: game.pendingRent?.unoReverse?.eventId ?? '',
 });
 
 const createSoundBuildingSnapshot = (game: GameState): Record<number, number> =>

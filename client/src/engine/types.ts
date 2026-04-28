@@ -14,25 +14,20 @@ export type PropertyKind = 'city' | 'bank' | 'utility';
 export type CardDeck = 'chance' | 'community';
 export type CityEventId =
   | 'tourist-season'
-  | 'economic-crisis'
   | 'tax-crisis'
   | 'tax-madness'
   | 'city-tender'
   | 'bank-day'
-  | 'investor-day'
-  | 'renovation-grants'
   | 'infrastructure-boom'
   | 'night-market'
-  | 'construction-permit'
   | 'bank-audit'
   | 'bank-inspection'
+  | 'paid-roads'
   | 'road-repair'
   | 'mass-protest'
   | 'regional-festival'
   | 'transport-strike'
-  | 'utility-modernization'
-  | 'heritage-protection'
-  | 'startup-wave';
+  | 'utility-modernization';
 export type GamePhase =
   | 'orderRoll'
   | 'rolling'
@@ -117,6 +112,7 @@ export interface Player {
   properties: number[];
   jailTurns: number;
   jailCards: number;
+  unoReverseCards?: number;
   isBankrupt: boolean;
   ready?: boolean;
 }
@@ -186,6 +182,7 @@ export interface CityEventEffect {
   startAuctionOnUnowned?: boolean;
   auctionMinimumMultiplier?: number;
   cashPaymentPercent?: number;
+  stepFeePerMove?: number;
   singleDieRolls?: boolean;
   buildingBlocked?: boolean;
 }
@@ -210,6 +207,12 @@ export interface PendingCityEvent {
   title: string;
   text: string;
   round: number;
+  secondary?: {
+    id: CityEventId;
+    title: string;
+    text: string;
+  };
+  isDouble?: boolean;
 }
 
 export interface PendingPayment {
@@ -217,11 +220,25 @@ export interface PendingPayment {
   amount: number;
   reason: string;
   tileId?: number;
-  source: 'tax' | 'card' | 'casino' | 'bank';
+  source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent';
   recipients?: Array<{
     playerId: string;
     amount: number;
   }>;
+  afterPayment?: {
+    type: 'resolveTile';
+    playerId: string;
+    diceTotal: number;
+  };
+}
+
+export interface UnoReverseRentContext {
+  originalTurnPlayerId: string;
+  eventId: string;
+  fromPlayerId: string;
+  toPlayerId: string;
+  usedAt: number;
+  sequence: number;
 }
 
 export interface LogEntry {
@@ -265,6 +282,7 @@ export interface GameState {
     originalAmount?: number;
     rentServiceId?: string;
     discountPercent?: 50 | 100;
+    unoReverse?: UnoReverseRentContext;
   };
   pendingPayment?: PendingPayment;
   pendingCasino?: {
@@ -331,9 +349,12 @@ export type GameAction =
   | { type: 'accept_trade'; playerId: string; offerId: string }
   | { type: 'decline_trade'; playerId: string; offerId: string }
   | { type: 'pay_rent'; playerId: string }
+  | { type: 'use_uno_reverse'; playerId: string }
   | { type: 'pay_payment'; playerId: string }
   | { type: 'pay_bail'; playerId: string }
   | { type: 'admin_move_current_player'; tileId: number }
+  | { type: 'admin_grant_uno_reverse'; playerId: string }
+  | { type: 'admin_start_city_event'; cityEventId: CityEventId }
   | { type: 'end_turn'; playerId: string }
   | { type: 'continue_turn'; playerId: string }
   | { type: 'declare_bankruptcy'; playerId: string };

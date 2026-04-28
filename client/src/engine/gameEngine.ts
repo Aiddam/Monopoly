@@ -36,6 +36,14 @@ const CASINO_MAX_MULTIPLIER = 6;
 const CASINO_SPIN_DURATION_MS = 5_400;
 const JAIL_FINE = money(100);
 const JAIL_TURNS = 3;
+const UNO_REVERSE_CARD_ID = 13;
+const UNO_REVERSE_CARD_DECK_COPIES = 6;
+const UNO_REVERSE_CARD_LIMIT = 1;
+const STEP_FEE_CITY_EVENT_ID: CityEventId = 'paid-roads';
+const ROAD_REPAIR_CITY_EVENT_ID: CityEventId = 'road-repair';
+const CITY_EVENT_DOUBLE_CHANCE = 0.18;
+const STEP_FEE_SECOND_SINGLE_DIE_CHANCE = 0.65;
+const STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES = 1;
 
 interface CreateInitialGameOptions {
   determineTurnOrder?: boolean;
@@ -60,6 +68,7 @@ export const createInitialGame = (
     properties: [],
     jailTurns: 0,
     jailCards: 0,
+    unoReverseCards: 0,
     isBankrupt: false,
   }));
 
@@ -177,6 +186,9 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
     case 'pay_rent':
       next = payRent(state, action.playerId);
       break;
+    case 'use_uno_reverse':
+      next = useUnoReverse(state, action.playerId);
+      break;
     case 'pay_payment':
       next = payPendingPayment(state, action.playerId);
       break;
@@ -185,6 +197,12 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       break;
     case 'admin_move_current_player':
       next = adminMoveCurrentPlayer(state, action.tileId);
+      break;
+    case 'admin_grant_uno_reverse':
+      next = adminGrantUnoReverse(state, action.playerId);
+      break;
+    case 'admin_start_city_event':
+      next = adminStartCityEvent(state, action.cityEventId);
       break;
     case 'end_turn':
       next = endTurn(state, action.playerId);
@@ -340,6 +358,15 @@ const getCityEventUnmortgageMultiplier = (state: GameState): number =>
 
 const getCityEventFineMultiplier = (state: GameState): number =>
   getActiveCityEventDefinitions(state).reduce((multiplier, event) => multiplier * (event.effects.fineMultiplier ?? 1), 1);
+
+const getCityEventStepFee = (state: GameState, steps: number): number => {
+  if (steps <= 0) return 0;
+  const feePerStep = getActiveCityEventDefinitions(state).reduce(
+    (total, event) => total + (event.effects.stepFeePerMove ?? 0),
+    0,
+  );
+  return feePerStep > 0 ? ceilMoney(feePerStep * steps) : 0;
+};
 
 const hasSingleDieRolls = (state: GameState): boolean =>
   getActiveCityEventDefinitions(state).some((event) => event.effects.singleDieRolls);
@@ -507,6 +534,21 @@ const movePlayer = (state: GameState, playerId: string, steps: number): GameStat
     ),
     log: appendLog(state, `${player.name} рухається на ${steps} клітинок${startRewardText}.`),
   };
+
+  const stepFee = getCityEventStepFee(next, steps);
+  if (stepFee > 0) {
+    return createPendingPayment(next, {
+      payerId: playerId,
+      amount: stepFee,
+      reason: `Платні дороги: ${steps} ${formatStepWord(steps)}`,
+      source: 'cityEvent',
+      afterPayment: {
+        type: 'resolveTile',
+        playerId,
+        diceTotal: steps,
+      },
+    });
+  }
 
   return resolveTile(next, playerId, steps);
 };
@@ -901,6 +943,42 @@ const adminMoveCurrentPlayer = (state: GameState, tileId: number): GameState => 
   };
 
   return resolveTile(moved, player.id, state.dice[0] + state.dice[1]);
+};
+
+const adminGrantUnoReverse = (state: GameState, playerId: string): GameState => {
+  const player = getPlayer(state, playerId);
+  if (player.isBankrupt) throw new Error('Банкруту не можна видати картку.');
+  const alreadyHasCard = getUnoReverseCardCount(player) >= UNO_REVERSE_CARD_LIMIT;
+
+  return {
+    ...state,
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, unoReverseCards: UNO_REVERSE_CARD_LIMIT } : candidate,
+    ),
+    log: appendLog(
+      state,
+      alreadyHasCard
+        ? `${player.name} вже має картку УНО РЕВЕРС.`
+        : `Адмін видає ${player.name} картку УНО РЕВЕРС.`,
+      alreadyHasCard ? 'neutral' : 'good',
+    ),
+  };
+};
+
+const adminStartCityEvent = (state: GameState, cityEventId: CityEventId): GameState => {
+  if (hasPendingTrade(state)) throw new Error('Спочатку завершіть активну угоду.');
+  if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(state.phase)) {
+    throw new Error('Міську подію можна запустити, коли немає активного рішення гравця.');
+  }
+
+  const event = getCityEventDefinition(cityEventId);
+  return drawCityEvent(
+    {
+      ...state,
+      cityEventDeck: [event.id, ...(state.cityEventDeck ?? []).filter((candidate) => candidate !== event.id)],
+    },
+    { allowDouble: false },
+  );
 };
 
 const payJailFine = (state: GameState, playerId: string): GameState => {
@@ -1300,25 +1378,76 @@ const getTradeResolutionPhase = (state: GameState): GameState['phase'] => (state
 
 const payRent = (state: GameState, playerId: string): GameState => {
   assertCurrent(state, playerId);
-  if (state.phase !== 'rent' || !state.pendingRent || state.pendingRent.payerId !== playerId) {
+  const pendingRent = state.pendingRent;
+  if (state.phase !== 'rent' || !pendingRent || pendingRent.payerId !== playerId) {
     throw new Error('Зараз немає оренди до сплати.');
   }
 
   const payer = getPlayer(state, playerId);
-  const owner = getPlayer(state, state.pendingRent.ownerId);
-  const tile = getTile(state.pendingRent.tileId);
-  if (payer.money < state.pendingRent.amount) throw new Error('Недостатньо грошей для сплати оренди.');
+  const owner = getPlayer(state, pendingRent.ownerId);
+  const tile = getTile(pendingRent.tileId);
+  if (payer.money < pendingRent.amount) throw new Error('Недостатньо грошей для сплати оренди.');
 
   return {
-    ...transfer(state, playerId, state.pendingRent.ownerId, state.pendingRent.amount),
+    ...transfer(state, playerId, pendingRent.ownerId, pendingRent.amount),
+    currentPlayerId: pendingRent.unoReverse?.originalTurnPlayerId ?? state.currentPlayerId,
     phase: 'turnEnd',
     pendingRent: undefined,
     log: appendLog(
       state,
-      state.pendingRent.originalAmount
-        ? `${payer.name} сплачує ${state.pendingRent.amount}₴ замість ${state.pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}.`
-        : `${payer.name} сплачує ${state.pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}.`,
+      pendingRent.unoReverse
+        ? `${payer.name} сплачує ${pendingRent.amount}₴ після УНО РЕВЕРС гравцю ${owner.name} за ${tile.name}.`
+        : pendingRent.originalAmount
+          ? `${payer.name} сплачує ${pendingRent.amount}₴ замість ${pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}.`
+          : `${payer.name} сплачує ${pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}.`,
       'bad',
+    ),
+  };
+};
+
+const useUnoReverse = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  const pendingRent = state.pendingRent;
+  if (state.phase !== 'rent' || !pendingRent || pendingRent.payerId !== playerId) {
+    throw new Error('УНО РЕВЕРС можна використати лише під час власного рішення щодо оренди.');
+  }
+
+  const player = getPlayer(state, playerId);
+  if (getUnoReverseCardCount(player) <= 0) throw new Error('У гравця немає картки УНО РЕВЕРС.');
+
+  const target = getPlayer(state, pendingRent.ownerId);
+  if (target.isBankrupt) throw new Error('УНО РЕВЕРС не можна спрямувати на гравця, який уже вибув.');
+
+  const now = Date.now();
+  const sequence = (pendingRent.unoReverse?.sequence ?? 0) + 1;
+  const originalTurnPlayerId = pendingRent.unoReverse?.originalTurnPlayerId ?? playerId;
+
+  return {
+    ...state,
+    currentPlayerId: target.id,
+    pendingRent: {
+      payerId: target.id,
+      ownerId: playerId,
+      tileId: pendingRent.tileId,
+      amount: pendingRent.amount,
+      unoReverse: {
+        originalTurnPlayerId,
+        eventId: `${state.id}:${state.turn}:${sequence}:${playerId}:${target.id}:${now}`,
+        fromPlayerId: playerId,
+        toPlayerId: target.id,
+        usedAt: now,
+        sequence,
+      },
+    },
+    players: state.players.map((candidate) =>
+      candidate.id === playerId
+        ? { ...candidate, unoReverseCards: Math.max(0, getUnoReverseCardCount(candidate) - 1) }
+        : candidate,
+    ),
+    log: appendLog(
+      state,
+      `${player.name} використовує УНО РЕВЕРС: тепер ${target.name} має сплатити ${pendingRent.amount}₴ гравцю ${player.name}.`,
+      'good',
     ),
   };
 };
@@ -1334,7 +1463,7 @@ const payPendingPayment = (state: GameState, playerId: string): GameState => {
   if (payer.money < payment.amount) throw new Error('Недостатньо грошей для сплати.');
 
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
-  return {
+  const paid: GameState = {
     ...state,
     phase: 'turnEnd',
     pendingPayment: undefined,
@@ -1345,6 +1474,12 @@ const payPendingPayment = (state: GameState, playerId: string): GameState => {
     }),
     log: appendLog(state, `${payer.name} сплачує ${payment.amount}₴: ${payment.reason}.`, 'bad'),
   };
+
+  if (payment.afterPayment?.type === 'resolveTile') {
+    return resolveTile(paid, payment.afterPayment.playerId, payment.afterPayment.diceTotal);
+  }
+
+  return paid;
 };
 
 const payBail = (state: GameState, playerId: string): GameState => {
@@ -1448,7 +1583,27 @@ const getVisiblePendingCityEvent = (
   activeCityEvents: ActiveCityEvent[],
 ): GameState['pendingCityEvent'] => {
   const activeIds = new Set(activeCityEvents.map((event) => event.id));
-  if (pendingCityEvent && activeIds.has(pendingCityEvent.id)) return pendingCityEvent;
+  if (pendingCityEvent) {
+    const primaryIsActive = activeIds.has(pendingCityEvent.id);
+    const secondaryIsActive = pendingCityEvent.secondary ? activeIds.has(pendingCityEvent.secondary.id) : false;
+
+    if (primaryIsActive) {
+      return {
+        ...pendingCityEvent,
+        secondary: secondaryIsActive ? pendingCityEvent.secondary : undefined,
+        isDouble: secondaryIsActive,
+      };
+    }
+
+    if (pendingCityEvent.secondary && secondaryIsActive) {
+      return {
+        id: pendingCityEvent.secondary.id,
+        title: pendingCityEvent.secondary.title,
+        text: pendingCityEvent.secondary.text,
+        round: pendingCityEvent.round,
+      };
+    }
+  }
 
   const fallback = activeCityEvents[activeCityEvents.length - 1];
   if (!fallback) return undefined;
@@ -1462,38 +1617,103 @@ const getVisiblePendingCityEvent = (
   };
 };
 
-const drawCityEvent = (state: GameState): GameState => {
+interface DrawCityEventOptions {
+  allowDouble?: boolean;
+}
+
+const drawCityEvent = (state: GameState, options: DrawCityEventOptions = {}): GameState => {
+  const allowDouble = options.allowDouble ?? true;
   const cityEventDeck = state.cityEventDeck?.length ? state.cityEventDeck : createCityEventDeck(state.cityEventDiscard ?? []);
   const [eventId, ...restDeck] = cityEventDeck;
   const event = getCityEventDefinition(eventId);
-  const activeCityEvents =
-    event.durationRounds > 0
-      ? [
-          ...(state.activeCityEvents ?? []).filter((candidate) => candidate.id !== event.id),
-          {
-            id: event.id,
-            remainingRounds: event.durationRounds,
-            durationRounds: event.durationRounds,
-            startedRound: state.currentRound ?? 1,
-          },
-        ]
-      : state.activeCityEvents ?? [];
+  const secondaryEventId = shouldDrawDoubleCityEvent(event, restDeck, allowDouble)
+    ? pickSecondCityEventId(restDeck, event.id)
+    : undefined;
+  const secondaryEvent = secondaryEventId ? getCityEventDefinition(secondaryEventId) : undefined;
+  const events = secondaryEvent ? [event, secondaryEvent] : [event];
+  const nextDeck = secondaryEventId ? removeFirstCityEventId(restDeck, secondaryEventId) : restDeck;
+  const activeCityEvents = activateCityEvents(state.activeCityEvents ?? [], events, state.currentRound ?? 1);
   const nextBeforeStartEffects: GameState = {
     ...state,
-    cityEventDeck: restDeck,
-    cityEventDiscard: [...(state.cityEventDiscard ?? []), event.id],
+    cityEventDeck: nextDeck,
+    cityEventDiscard: [...(state.cityEventDiscard ?? []), ...events.map((cityEvent) => cityEvent.id)],
     activeCityEvents,
-    pendingCityEvent: {
-      id: event.id,
-      title: event.title,
-      text: event.text,
-      round: state.currentRound ?? 1,
-    },
-    log: appendLog(state, `Подія міста: ${event.title}. ${event.text}`, 'good'),
+    pendingCityEvent: createPendingCityEvent(events, state.currentRound ?? 1),
+    log: appendLog(state, formatCityEventDrawLog(events), 'good'),
   };
-  const next = applyCityEventStartEffects(nextBeforeStartEffects, event);
+  const next = events.reduce((current, cityEvent) => applyCityEventStartEffects(current, cityEvent), nextBeforeStartEffects);
+  const auctionEvent = events.find((cityEvent) => cityEvent.effects.startAuctionOnUnowned);
 
-  return event.effects.startAuctionOnUnowned ? startCityEventAuction(next, event) : next;
+  return auctionEvent ? startCityEventAuction(next, auctionEvent) : next;
+};
+
+const shouldDrawDoubleCityEvent = (
+  primaryEvent: CityEventDefinition,
+  restDeck: CityEventId[],
+  allowDouble: boolean,
+): boolean => allowDouble && restDeck.some((eventId) => eventId !== primaryEvent.id) && Math.random() < CITY_EVENT_DOUBLE_CHANCE;
+
+const pickSecondCityEventId = (restDeck: CityEventId[], primaryEventId: CityEventId): CityEventId | undefined => {
+  const candidates = Array.from(new Set(restDeck.filter((eventId) => eventId !== primaryEventId)));
+  if (candidates.length === 0) return undefined;
+
+  if (
+    primaryEventId === STEP_FEE_CITY_EVENT_ID &&
+    candidates.includes(ROAD_REPAIR_CITY_EVENT_ID) &&
+    Math.random() < STEP_FEE_SECOND_SINGLE_DIE_CHANCE
+  ) {
+    return ROAD_REPAIR_CITY_EVENT_ID;
+  }
+
+  return candidates[Math.floor(Math.random() * candidates.length)];
+};
+
+const removeFirstCityEventId = (deck: CityEventId[], eventId: CityEventId): CityEventId[] => {
+  const index = deck.indexOf(eventId);
+  if (index < 0) return deck;
+  return [...deck.slice(0, index), ...deck.slice(index + 1)];
+};
+
+const activateCityEvents = (
+  activeCityEvents: ActiveCityEvent[],
+  events: CityEventDefinition[],
+  currentRound: number,
+): ActiveCityEvent[] =>
+  events.reduce((active, event) => {
+    if (event.durationRounds <= 0) return active;
+    return [
+      ...active.filter((candidate) => candidate.id !== event.id),
+      {
+        id: event.id,
+        remainingRounds: event.durationRounds,
+        durationRounds: event.durationRounds,
+        startedRound: currentRound,
+      },
+    ];
+  }, activeCityEvents);
+
+const createPendingCityEvent = (events: CityEventDefinition[], round: number): GameState['pendingCityEvent'] => {
+  const [primary, secondary] = events;
+  return {
+    id: primary.id,
+    title: primary.title,
+    text: primary.text,
+    round,
+    secondary: secondary
+      ? {
+          id: secondary.id,
+          title: secondary.title,
+          text: secondary.text,
+        }
+      : undefined,
+    isDouble: events.length > 1,
+  };
+};
+
+const formatCityEventDrawLog = (events: CityEventDefinition[]): string => {
+  const [primary, secondary] = events;
+  if (!secondary) return `Подія міста: ${primary.title}. ${primary.text}`;
+  return `Подвійна подія міста: ${primary.title} + ${secondary.title}. ${primary.text} ${secondary.text}`;
 };
 
 const applyCityEventStartEffects = (state: GameState, event: CityEventDefinition): GameState => {
@@ -1650,8 +1870,9 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
 const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const debtor = getPlayer(state, playerId);
   const pendingRent = state.pendingRent?.payerId === playerId ? state.pendingRent : undefined;
+  const isPendingPaymentPayer = state.pendingPayment?.payerId === playerId;
   const pendingPayment =
-    state.pendingPayment?.payerId === playerId && state.pendingPayment.recipients?.length === 1
+    isPendingPaymentPayer && state.pendingPayment?.recipients?.length === 1
       ? state.pendingPayment
       : undefined;
   const paymentCreditorId =
@@ -1660,6 +1881,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
       : undefined;
   const creditorId = pendingRent?.ownerId ?? paymentCreditorId;
   const creditorAmount = Math.min(debtor.money, pendingRent?.amount ?? pendingPayment?.recipients?.[0]?.amount ?? 0);
+  const shouldAdvanceTurn = state.currentPlayerId === playerId || Boolean(pendingRent) || isPendingPaymentPayer;
   let next: GameState = {
     ...state,
     players: state.players.map((player) => {
@@ -1681,17 +1903,37 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
           : property,
       ]),
     ),
-    pendingRent: undefined,
-    pendingPayment: undefined,
-    pendingJail: undefined,
+    pendingRent: pendingRent ? undefined : state.pendingRent,
+    pendingPayment: isPendingPaymentPayer ? undefined : state.pendingPayment,
+    pendingJail: state.pendingJail?.playerId === playerId ? undefined : state.pendingJail,
     rentServices: (state.rentServices ?? []).filter(
       (service) => service.ownerId !== playerId && service.beneficiaryId !== playerId,
+    ),
+    tradeOffers: state.tradeOffers.filter(
+      (offer) => offer.fromPlayerId !== playerId && offer.toPlayerId !== playerId,
     ),
     log: appendLog(state, `${debtor.name} оголошує банкрутство.`, 'bad'),
   };
   const survivors = next.players.filter((player) => !player.isBankrupt);
   if (survivors.length === 1) {
     next = { ...next, phase: 'finished', winnerId: survivors[0].id };
+  } else if (!shouldAdvanceTurn) {
+    next = {
+      ...next,
+      currentPlayerId: survivors.some((player) => player.id === next.currentPlayerId)
+        ? next.currentPlayerId
+        : survivors[0].id,
+    };
+  } else if (
+    pendingRent?.unoReverse?.originalTurnPlayerId &&
+    pendingRent.unoReverse.originalTurnPlayerId !== playerId &&
+    survivors.some((player) => player.id === pendingRent.unoReverse?.originalTurnPlayerId)
+  ) {
+    next = {
+      ...next,
+      currentPlayerId: pendingRent.unoReverse.originalTurnPlayerId,
+      phase: 'turnEnd',
+    };
   } else {
     next = endTurn({ ...next, phase: 'turnEnd' }, playerId);
   }
@@ -1724,17 +1966,28 @@ const drawCard = (state: GameState, playerId: string, deck: CardDeck): GameState
   const source = deck === 'chance' ? state.chanceDeck : state.communityDeck;
   const discard = deck === 'chance' ? state.discardChance : state.discardCommunity;
   const fullDeck = deck === 'chance' ? chanceCards : communityCards;
-  const replenished = source.length ? source : discard;
+  const recyclableDiscard = getRecyclableCardDiscard(deck, discard);
+  const replenished = source.length
+    ? source
+    : recyclableDiscard.length
+      ? recyclableDiscard
+      : createCardDeck(fullDeck.filter((candidate) => isReusableCard(deck, candidate.id)));
   const [cardId, ...rest] = replenished;
   const card = fullDeck.find((candidate) => candidate.id === cardId) ?? fullDeck[0];
+  const nextDiscard = source.length ? discard : [];
   const applied = card.apply(
     {
       ...state,
       chanceDeck: deck === 'chance' ? rest : state.chanceDeck,
       communityDeck: deck === 'community' ? rest : state.communityDeck,
-      discardChance: deck === 'chance' ? [...(source.length ? state.discardChance : []), card.id] : state.discardChance,
+      discardChance:
+        deck === 'chance'
+          ? isReusableCard(deck, card.id)
+            ? [...nextDiscard, card.id]
+            : nextDiscard
+          : state.discardChance,
       discardCommunity:
-        deck === 'community' ? [...(source.length ? state.discardCommunity : []), card.id] : state.discardCommunity,
+        deck === 'community' ? [...nextDiscard, card.id] : state.discardCommunity,
       pendingCard: { deck, cardId: card.id, title: card.title, text: card.text },
     },
     playerId,
@@ -1963,6 +2216,8 @@ const getPlayer = (state: GameState, playerId: string): Player => {
   return player;
 };
 
+const getUnoReverseCardCount = (player: Player): number => Math.min(UNO_REVERSE_CARD_LIMIT, player.unoReverseCards ?? 0);
+
 const assertCurrent = (state: GameState, playerId: string) => {
   if (state.currentPlayerId !== playerId) throw new Error('Зараз хід іншого гравця.');
 };
@@ -1988,16 +2243,31 @@ const randomDice = (diceCount: 1 | 2 = 2): [number, number] => {
 };
 
 const createCardDeck = (cards: typeof chanceCards): number[] => {
-  const weighted = cards.flatMap((card) => Array(card.rarity === 'rare' ? 1 : 4).fill(card.id));
+  const weighted = cards.flatMap((card) => Array(getCardDeckCopies(card)).fill(card.id));
   return shuffle(weighted);
 };
+
+const getCardDeckCopies = (card: (typeof chanceCards)[number]): number => {
+  if (card.deck === 'chance' && card.id === UNO_REVERSE_CARD_ID) return UNO_REVERSE_CARD_DECK_COPIES;
+  return card.rarity === 'rare' ? 1 : 4;
+};
+
+const getRecyclableCardDiscard = (deck: CardDeck, discard: number[]): number[] =>
+  discard.filter((cardId) => isReusableCard(deck, cardId));
+
+const isReusableCard = (deck: CardDeck, cardId: number): boolean =>
+  !(deck === 'chance' && cardId === UNO_REVERSE_CARD_ID);
 
 const createCityEventDeck = (recentDiscard: CityEventId[] = []): CityEventId[] => {
   const recentSet = new Set(recentDiscard.slice(-5));
   const candidates = cityEventDefinitions
     .map((event) => event.id)
     .filter((eventId) => !recentSet.has(eventId));
-  return shuffle(candidates.length > 0 ? candidates : cityEventDefinitions.map((event) => event.id));
+  const baseDeck = candidates.length > 0 ? candidates : cityEventDefinitions.map((event) => event.id);
+  const boostedDeck = baseDeck.includes(STEP_FEE_CITY_EVENT_ID)
+    ? [...baseDeck, ...Array(STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES).fill(STEP_FEE_CITY_EVENT_ID)]
+    : baseDeck;
+  return shuffle(boostedDeck);
 };
 
 const formatTradeOfferLog = (offer: Omit<TradeOffer, 'id' | 'status'> | TradeOffer): string =>
@@ -2024,6 +2294,8 @@ const formatRentService = (service: RentServiceOffer): string =>
   )}`;
 
 const formatTurnWord = (turns: number) => (turns === 1 ? 'хід' : turns >= 2 && turns <= 4 ? 'ходи' : 'ходів');
+
+const formatStepWord = (steps: number) => (steps === 1 ? 'крок' : steps >= 2 && steps <= 4 ? 'кроки' : 'кроків');
 
 const shuffle = <T>(items: T[]): T[] => {
   const shuffled = [...items];

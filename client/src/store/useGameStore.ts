@@ -71,6 +71,8 @@ const MAX_EMOTE_EVENTS = 8;
 
 let roomRejoinRetryTimer: number | undefined;
 
+const screenForGame = (game: GameState): Screen => (game.phase === 'finished' ? 'finished' : 'game');
+
 function readSavedSession(): SavedSession | undefined {
   if (typeof window === 'undefined') return undefined;
   try {
@@ -103,7 +105,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     if (saved.mode === 'local') {
       savePlayerName(savedPlayerName);
       set({
-        screen: saved.screen,
+        screen: saved.game ? screenForGame(saved.game) : saved.screen,
         localPlayerId: saved.localPlayerId,
         playerName: savedPlayerName,
         game: saved.game,
@@ -118,7 +120,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     savePlayerName(savedPlayerName);
     const roomClient = configureRoomClient();
     set({
-      screen: saved.game ? 'game' : 'lobby',
+      screen: saved.game ? screenForGame(saved.game) : 'lobby',
       localPlayerId: saved.localPlayerId,
       playerName: savedPlayerName,
       room: saved.room,
@@ -133,7 +135,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const localPlayerId = resolveLocalPlayerId(room, saved.localPlayerId);
       const peerMesh = configurePeerMesh(localPlayerId, roomClient, room.code);
       await peerMesh.syncPeers(room.players);
-      const nextScreen = saved.game ? 'game' : 'lobby';
+      const nextScreen = saved.game ? screenForGame(saved.game) : 'lobby';
       set({ screen: nextScreen, room, localPlayerId, peerMesh, connection: { signalr: 'connected', p2p: {} } });
       saveSession({ ...saved, screen: nextScreen, localPlayerId, playerName: savedPlayerName, room });
 
@@ -251,7 +253,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:state', state: next });
       set({
         game: next,
-        screen: next.phase === 'finished' ? 'finished' : 'game',
+        screen: screenForGame(next),
         connection: withoutConnectionError(get().connection),
       });
       persistCurrentSession(get());
@@ -278,7 +280,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       return;
     }
     if (message.type === 'game:init' || message.type === 'game:state') {
-      set({ game: message.state, screen: message.state.phase === 'finished' ? 'finished' : 'game' });
+      set({ game: message.state, screen: screenForGame(message.state) });
       persistCurrentSession(get());
     }
     if (message.type === 'game:action' && isHost) {
@@ -288,7 +290,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       broadcastRoomMessage(room, get().roomClient, peerMesh, { type: 'sync:response', state: game });
     }
     if (message.type === 'sync:response') {
-      set({ game: message.state, screen: 'game' });
+      set({ game: message.state, screen: screenForGame(message.state) });
       persistCurrentSession(get());
     }
   },
@@ -467,7 +469,7 @@ const tryRestoreRoomIfHost = async (
     clearRejoinRetryTimer();
     savePlayerName(playerName);
     useGameStore.setState({
-      screen: game ? 'game' : 'lobby',
+      screen: game ? screenForGame(game) : 'lobby',
       room: restoredRoom,
       localPlayerId,
       playerName,
