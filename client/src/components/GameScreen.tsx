@@ -50,14 +50,20 @@ import { money } from '../engine/economy';
 import {
   AUCTION_BID_INCREMENT,
   calculateRent,
+  getBankDepositInfo,
+  getBankDepositPayout,
+  getDistrictCreationCost,
+  getEffectiveBuildingRefund,
   getEffectiveFineAmount,
   getEffectiveHouseCost,
+  getEffectiveMortgageValue,
   getEffectivePropertyPrice,
   getEffectiveUnmortgageCost,
 } from '../engine/gameEngine';
 import type {
   CityTile,
   CityEventId,
+  DistrictPath,
   GameState,
   MoneyHistoryPoint,
   PendingCityEvent,
@@ -81,7 +87,7 @@ const CASINO_DEFAULT_BET = money(100);
 const CASINO_SEGMENTS = [
   { multiplier: 0, weight: 2, color: '#991b1b' },
   { multiplier: 4, weight: 1, color: '#4338ca' },
-  { multiplier: 1, weight: 2, color: '#0f766e' },
+  { multiplier: 1, weight: 1.5, color: '#0f766e' },
   { multiplier: 6, weight: 1, color: '#0369a1' },
   { multiplier: 2, weight: 1, color: '#15803d' },
   { multiplier: 5, weight: 1, color: '#be123c' },
@@ -105,6 +111,7 @@ const CASINO_SPIN_MS = 5400;
 const CASINO_RESULT_HOLD_MS = 850;
 const JAIL_FINE = money(100);
 const BUILDING_ANIMATION_MS = 2600;
+const DISTRICT_PATH_ANIMATION_MS = 3400;
 const AUCTION_WIN_ANIMATION_MS = 3000;
 const MORTGAGE_ANIMATION_MS = 2800;
 const UNO_REVERSE_ANIMATION_MS = 3200;
@@ -162,6 +169,15 @@ type BuildingAnimationEvent = {
   toHouses: number;
   color: string;
 };
+type DistrictPathAnimationEvent = {
+  id: string;
+  group: string;
+  path: DistrictPath;
+  ownerName: string;
+  color: string;
+  tileIds: number[];
+  tileNames: string[];
+};
 type AuctionWinAnimationEvent = {
   id: string;
   tileId: number;
@@ -200,6 +216,41 @@ const EMOTE_OPTIONS: EmoteOption[] = [
   { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: 1.5 },
 ];
 const EMOTE_OPTION_MAP = new Map(EMOTE_OPTIONS.map((option) => [option.id, option]));
+
+const DISTRICT_PATH_OPTIONS: Array<{
+  path: DistrictPath;
+  label: string;
+  shortLabel: string;
+  effect: string;
+  Icon: LucideIcon;
+}> = [
+  {
+    path: 'tourist',
+    label: 'Туристичний район',
+    shortLabel: 'Турист',
+    effect: 'Оренда і будівництво працюють як зараз.',
+    Icon: MapPinned,
+  },
+  {
+    path: 'oldTown',
+    label: 'Старе місто',
+    shortLabel: 'Старе',
+    effect: 'Нижча оренда, а перехожі сплачують за прохід старим районом.',
+    Icon: Landmark,
+  },
+  {
+    path: 'residential',
+    label: 'Спальний район',
+    shortLabel: 'Спальний',
+    effect: 'Дешевше будувати, нижча оренда і швидший розвиток району.',
+    Icon: Home,
+  },
+];
+
+const DISTRICT_PATH_VIEW = new Map(DISTRICT_PATH_OPTIONS.map((option) => [option.path, option]));
+const DISTRICT_RENT_DIVISOR = 2.5;
+const PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR = 4;
+const PREMIUM_DISTRICT_RENT_GROUPS = new Set(['Зелена', 'Золота']);
 
 const CITY_TILE_ART: Record<string, CityArtKind> = {
   pavlohrad: 'industrial',
@@ -897,10 +948,12 @@ const GameBoard = ({
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const pendingTile = game.pendingPurchaseTileId !== undefined ? getTile(game.pendingPurchaseTileId) : undefined;
   const buildingEvents = useBuildingAnimationEvents(game);
+  const districtPathEvents = useDistrictPathAnimationEvents(game);
   const auctionWinEvents = useAuctionWinAnimationEvents(game);
   const mortgageEvents = useMortgageAnimationEvents(game);
   const unoReverseEvents = useUnoReverseAnimationEvents(game);
   const hasBuildingShock = buildingEvents.length > 0;
+  const hasDistrictShock = districtPathEvents.length > 0;
   const hasHotelShock = buildingEvents.some((event) => event.kind === 'build' && event.toHouses >= 5);
   const shouldShowCasino = Boolean(game.pendingCasino && (isLocalTurn || game.pendingCasino.spinEndsAt));
   const isCardPaymentDecision = Boolean(
@@ -911,6 +964,7 @@ const GameBoard = ({
     !isBoardBusy &&
     ((game.phase === 'awaitingJailDecision' && Boolean(game.pendingJail) && isLocalTurn) ||
       (game.phase === 'casino' && shouldShowCasino) ||
+      (game.phase === 'bankDeposit' && Boolean(game.pendingBankDeposit) && isLocalTurn) ||
       (game.phase === 'awaitingPurchase' && Boolean(pendingTile && isPropertyTile(pendingTile)) && isLocalTurn) ||
       (game.phase === 'rent' && Boolean(game.pendingRent)) ||
       (game.phase === 'payment' && Boolean(game.pendingPayment)));
@@ -925,7 +979,7 @@ const GameBoard = ({
 
   return (
     <section className="board-wrap">
-      <div className={`board ${hasBuildingShock ? 'building-shock' : ''} ${hasHotelShock ? 'hotel-shock' : ''}`}>
+      <div className={`board ${hasBuildingShock || hasDistrictShock ? 'building-shock' : ''} ${hasHotelShock ? 'hotel-shock' : ''}`}>
         <div className="board-center">
           <div className="board-status-pill" aria-live="polite">
             <Landmark size={34} />
@@ -946,6 +1000,8 @@ const GameBoard = ({
             <BoardJailTurnPrompt game={game} dispatch={dispatch} />
           ) : game.phase === 'casino' && shouldShowCasino && !isBoardBusy ? (
             <BoardCasinoPrompt game={game} canControl={isLocalTurn} canResolve={canResolveCasino} dispatch={dispatch} />
+          ) : game.phase === 'bankDeposit' && game.pendingBankDeposit && isLocalTurn && !isBoardBusy ? (
+            <BoardBankDepositPrompt game={game} isLocalTurn={isLocalTurn} dispatch={dispatch} />
           ) : game.phase === 'awaitingPurchase' &&
           pendingTile &&
           isPropertyTile(pendingTile) &&
@@ -1000,6 +1056,7 @@ const GameBoard = ({
             key={tile.id}
           />
         ))}
+        <DistrictPathAnimationLayer events={districtPathEvents} />
         <BuildingAnimationLayer events={buildingEvents} />
         <AuctionWinAnimationLayer events={auctionWinEvents} />
         <MortgageAnimationLayer events={mortgageEvents} />
@@ -1970,6 +2027,10 @@ const BoardActionDock = ({
 
         {game.phase === 'casino' && <span className="dock-note">Рішення в казино</span>}
 
+        {game.phase === 'bankDeposit' && game.pendingBankDeposit && (
+          <span className="dock-note">Депозит {formatMoney(game.pendingBankDeposit.amount)}</span>
+        )}
+
         {game.phase === 'awaitingJailDecision' && <span className="dock-note">Рішення щодо вʼязниці</span>}
 
         {game.phase === 'rent' && game.pendingRent && (
@@ -2481,6 +2542,8 @@ const TileCell = ({
   const rent = game && property?.ownerId && isPropertyTile(tile) ? calculateRent(game, tile, game.dice[0] + game.dice[1]) : undefined;
   const price = game && isPropertyTile(tile) ? getEffectivePropertyPrice(game, tile) : undefined;
   const mortgageTurnsLeft = game && property?.mortgaged ? getMortgageTurnsLeft(game, property) : undefined;
+  const district = game && tile.type === 'city' ? game.districtPaths?.[tile.group] : undefined;
+  const districtView = district ? getDistrictPathView(district.path) : undefined;
   const tradeState =
     game && isInspectable
       ? getTradeTileState(game, tile.id, tradePlayerId, tradeDraft) ?? getActiveTradeTileState(tile.id, activeTradeOffer)
@@ -2488,7 +2551,7 @@ const TileCell = ({
 
   return (
     <motion.article
-      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${tradeState ? `trade-${tradeState}` : ''} ${hasPawn ? 'occupied' : ''}`}
+      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${district ? `district-${district.path}` : ''} ${tradeState ? `trade-${tradeState}` : ''} ${hasPawn ? 'occupied' : ''}`}
       role={isInspectable ? 'button' : undefined}
       tabIndex={isInspectable ? 0 : undefined}
       style={
@@ -2532,6 +2595,11 @@ const TileCell = ({
             {ownerNameMark}
           </span>
         </>
+      )}
+      {districtView && (
+        <span className={`district-tile-badge district-${district!.path}`} title={`${districtView.label}: ${districtView.effect}`}>
+          {districtView.shortLabel}
+        </span>
       )}
       {mortgageTurnsLeft !== undefined && (
         <>
@@ -2726,6 +2794,63 @@ const BoardPawns = ({ game, displayPositions }: { game: GameState; displayPositi
     </div>
   );
 };
+
+const DistrictPathAnimationLayer = ({ events }: { events: DistrictPathAnimationEvent[] }) => (
+  <div className="district-path-animation-layer" aria-live="polite">
+    <AnimatePresence>
+      {events.map((event) => {
+        const view = getDistrictPathView(event.path);
+        const Icon = view.Icon;
+        return (
+          <motion.div
+            className={`district-path-event district-${event.path}`}
+            key={event.id}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            style={{ '--district-color': event.color } as CSSProperties}
+          >
+            {event.tileIds.map((tileId, index) => {
+              const point = tileCenterPoint(tileId);
+              return (
+                <span
+                  className="district-path-tile-pulse"
+                  key={`${event.id}-${tileId}`}
+                  style={
+                    {
+                      left: `${point.x}%`,
+                      top: `${point.y}%`,
+                      animationDelay: `${index * 130}ms`,
+                    } as CSSProperties
+                  }
+                />
+              );
+            })}
+            <motion.div
+              className="district-path-card"
+              initial={{ y: 24, scale: 0.82, rotateX: -18 }}
+              animate={{ y: 0, scale: 1, rotateX: 0 }}
+              exit={{ y: 12, scale: 0.92 }}
+              transition={{ duration: 0.46, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <span className="district-path-icon">
+                <Icon size={24} />
+              </span>
+              <div>
+                <strong>{view.label}</strong>
+                <small>
+                  {event.group} · {event.ownerName}
+                </small>
+              </div>
+              <em>{event.tileNames.join(' · ')}</em>
+            </motion.div>
+          </motion.div>
+        );
+      })}
+    </AnimatePresence>
+  </div>
+);
 
 const BuildingAnimationLayer = ({ events }: { events: BuildingAnimationEvent[] }) => (
   <div className="building-animation-layer" aria-hidden>
@@ -3254,24 +3379,45 @@ const ManagePanel = () => {
         </div>
       )}
 
+      {(game.bankDeposits ?? {})[player.id] && (
+        <div className="bonus-card bank-deposit">
+          <HandCoins size={18} />
+          <div>
+            <strong>Банківський депозит</strong>
+            <span>{formatMoney(getBankDepositPayout((game.bankDeposits ?? {})[player.id]))}</span>
+          </div>
+        </div>
+      )}
+
       {ownedTiles.length === 0 && <p className="muted empty-note">Купіть місто або банк, щоб тут зʼявились картки майна.</p>}
 
-      {cityGroups.map((group) => (
-        <section className="asset-group" style={{ '--group-color': group.color } as CSSProperties} key={group.name}>
-          <div className="asset-group-header">
-            <span className="group-dot" />
-            <div>
-              <h4>{group.name}</h4>
-              <p>{ownsAllCities(game, player.id, group.tiles) ? 'Монополія є' : 'Потрібна вся група для будівництва'}</p>
+      {cityGroups.map((group) => {
+        const ownsGroup = ownsAllCities(game, player.id, group.tiles);
+        const district = game.districtPaths?.[group.name];
+        const districtView = district ? getDistrictPathView(district.path) : undefined;
+        return (
+          <section className="asset-group" style={{ '--group-color': group.color } as CSSProperties} key={group.name}>
+            <div className="asset-group-header">
+              <span className="group-dot" />
+              <div>
+                <h4>{group.name}</h4>
+                <p>
+                  {districtView
+                    ? districtView.label
+                    : ownsGroup
+                      ? 'Район треба створити перед будівництвом'
+                      : 'Потрібна вся група для будівництва'}
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="asset-grid">
-            {group.tiles.map((tile) => (
-              <CityAssetCard game={game} player={player} tile={tile} dispatch={dispatch} key={tile.id} />
-            ))}
-          </div>
-        </section>
-      ))}
+            <div className="asset-grid">
+              {group.tiles.map((tile) => (
+                <CityAssetCard game={game} player={player} tile={tile} dispatch={dispatch} key={tile.id} />
+              ))}
+            </div>
+          </section>
+        );
+      })}
 
       {(banks.length > 0 || utilities.length > 0) && (
         <section className="asset-group neutral">
@@ -3310,6 +3456,9 @@ const CityAssetCard = ({
   const buildInfo = getBuildInfo(game, player, tile);
   const demolishInfo = getDemolishInfo(game, player, tile);
   const mortgageInfo = getMortgageInfo(game, player, tile);
+  const district = game.districtPaths?.[tile.group];
+  const districtView = district ? getDistrictPathView(district.path) : undefined;
+  const DistrictIcon = districtView?.Icon;
 
   return (
     <article className={`asset-card city-asset ${property.mortgaged ? 'mortgaged' : ''}`}>
@@ -3320,6 +3469,12 @@ const CityAssetCard = ({
           <h5>{tile.name}</h5>
           <p>Оренда {formatMoney(rent)}</p>
         </div>
+        {districtView && DistrictIcon && (
+          <div className={`district-mini-card district-${district!.path}`}>
+            <DistrictIcon size={14} />
+            <span>{districtView.label}</span>
+          </div>
+        )}
         <div className="asset-stats">
           <span title="Поточна забудова">
             {property.houses === 5 ? <Hotel size={14} /> : <Home size={14} />}
@@ -3331,6 +3486,7 @@ const CityAssetCard = ({
           tile={tile}
           currentHouses={property.houses}
           hasDistrict={ownsAllCities(game, player.id, getCityGroup(tile))}
+          districtPath={district?.path}
           compact
         />
         <div className={`build-status ${buildInfo.canBuild ? 'ready' : 'blocked'}`}>{buildInfo.reason}</div>
@@ -3380,7 +3536,10 @@ const SimpleAssetCard = ({
 }) => {
   const property = game.properties[tile.id];
   const rent = calculateRent(game, tile, game.dice[0] + game.dice[1]);
+  const mortgageValue = getEffectiveMortgageValue(game, tile);
   const mortgageInfo = getMortgageInfo(game, player, tile);
+  const bankDepositInfo = tile.type === 'bank' ? getBankDepositInfo(game, player.id) : undefined;
+  const activeBankDeposit = bankDepositInfo?.activeDeposit;
 
   return (
     <article className={`asset-card service-asset ${property.mortgaged ? 'mortgaged' : ''}`}>
@@ -3393,10 +3552,35 @@ const SimpleAssetCard = ({
           <p>Оренда {formatMoney(rent)}</p>
         </div>
         <div className="asset-stats">
-          <span>Застава {formatMoney(tile.mortgage)}</span>
-          <span>{property.mortgaged ? 'Заставлено' : 'Активне'}</span>
+          <span>Застава {formatMoney(mortgageValue)}</span>
+          <span>
+            {activeBankDeposit
+              ? `Депозит ${formatMoney(bankDepositInfo?.payout ?? 0)}`
+              : property.mortgaged
+                ? 'Заставлено'
+                : 'Активне'}
+          </span>
         </div>
-        <div className="asset-actions">
+        {activeBankDeposit && (
+          <div className="bank-deposit-chip">
+            <HandCoins size={14} />
+            <span>
+              {getBankDepositTurnCount(activeBankDeposit)} ход. · {formatMoney(bankDepositInfo?.payout ?? 0)}
+            </span>
+          </div>
+        )}
+        <div className={`asset-actions ${tile.type === 'bank' ? 'bank-asset-actions' : ''}`}>
+          {tile.type === 'bank' && (
+            <button
+              className="primary compact"
+              disabled={!bankDepositInfo?.canStart}
+              title={bankDepositInfo?.disabledReason}
+              onClick={() => dispatch({ type: 'start_bank_deposit', playerId: player.id })}
+            >
+              <HandCoins size={15} />
+              Депозит
+            </button>
+          )}
           <button
             className="secondary compact"
             disabled={mortgageInfo.disabled}
@@ -3578,6 +3762,68 @@ const TradeOfferCard = ({
         </div>
       )}
     </article>
+  );
+};
+
+const BoardBankDepositPrompt = ({
+  game,
+  isLocalTurn,
+  dispatch,
+}: {
+  game: GameState;
+  isLocalTurn: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const pendingDeposit = game.pendingBankDeposit;
+  if (!pendingDeposit) return null;
+
+  const tile = getTile(pendingDeposit.tileId);
+  const depositInfo = getBankDepositInfo(game, pendingDeposit.playerId);
+  const canDeposit = isLocalTurn && depositInfo.canStart;
+
+  return (
+    <motion.article
+      className="board-rent-prompt board-bank-deposit-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="rent-prompt-head">
+        <div>
+          <p className="eyebrow">Банківський депозит</p>
+          <h3>{tile.name}</h3>
+        </div>
+        <strong>{formatMoney(pendingDeposit.amount)}</strong>
+      </div>
+      <p>
+        Чи бажаєте ви внести депозит у розмірі {formatMoney(pendingDeposit.amount)}?
+      </p>
+      {!depositInfo.canStart && (
+        <p className="purchase-status bad">
+          {depositInfo.disabledReason} Можна підготувати гроші через заставу майна або продаж будинків.
+        </p>
+      )}
+      <div className="rent-actions">
+        <button
+          className="primary compact"
+          disabled={!canDeposit}
+          title={depositInfo.disabledReason}
+          onClick={() => dispatch({ type: 'start_bank_deposit', playerId: pendingDeposit.playerId })}
+        >
+          <HandCoins size={16} />
+          Так
+        </button>
+        <button
+          className="secondary compact"
+          disabled={!isLocalTurn}
+          onClick={() => dispatch({ type: 'decline_bank_deposit', playerId: pendingDeposit.playerId })}
+        >
+          <X size={16} />
+          Ні
+        </button>
+      </div>
+    </motion.article>
   );
 };
 
@@ -3980,11 +4226,13 @@ const CityRentTable = ({
   tile,
   currentHouses,
   hasDistrict = false,
+  districtPath,
   compact = false,
 }: {
   tile: CityTile;
   currentHouses?: number;
   hasDistrict?: boolean;
+  districtPath?: DistrictPath;
   compact?: boolean;
 }) => {
   const activeKey =
@@ -3997,13 +4245,13 @@ const CityRentTable = ({
         : currentHouses === 5
           ? 'hotel'
           : `house-${currentHouses}`;
-  const rows = getCityRentRows(tile);
+  const rows = getCityRentRows(tile, districtPath);
 
   return (
     <section className={`city-rent-table ${compact ? 'compact' : ''}`} aria-label={`Таблиця оренди ${tile.name}`}>
       <div className="city-rent-table-head">
         <h4>Оренда</h4>
-        <span>Район: {formatMoney(tile.rents[0] * 2)}</span>
+        <span>{districtPath === 'oldTown' || districtPath === 'residential' ? 'Знижена оренда' : `Район: ${formatMoney(tile.rents[0] * 2)}`}</span>
       </div>
       <div className="city-rent-grid">
         {rows.map((row) => (
@@ -4017,15 +4265,23 @@ const CityRentTable = ({
   );
 };
 
-const getCityRentRows = (tile: CityTile) => [
+const getCityRentRows = (tile: CityTile, districtPath?: DistrictPath) => [
   { key: 'base', label: 'Без району', amount: tile.rents[0] },
-  { key: 'district', label: 'Район', amount: tile.rents[0] * 2 },
-  { key: 'house-1', label: '1 буд.', amount: tile.rents[1] },
-  { key: 'house-2', label: '2 буд.', amount: tile.rents[2] },
-  { key: 'house-3', label: '3 буд.', amount: tile.rents[3] },
-  { key: 'house-4', label: '4 буд.', amount: tile.rents[4] },
-  { key: 'hotel', label: 'Готель', amount: tile.rents[5] },
+  { key: 'district', label: 'Район', amount: getDistrictDisplayRent(tile, tile.rents[0] * 2, 0, districtPath) },
+  { key: 'house-1', label: '1 буд.', amount: getDistrictDisplayRent(tile, tile.rents[1], 1, districtPath) },
+  { key: 'house-2', label: '2 буд.', amount: getDistrictDisplayRent(tile, tile.rents[2], 2, districtPath) },
+  { key: 'house-3', label: '3 буд.', amount: getDistrictDisplayRent(tile, tile.rents[3], 3, districtPath) },
+  { key: 'house-4', label: '4 буд.', amount: getDistrictDisplayRent(tile, tile.rents[4], 4, districtPath) },
+  { key: 'hotel', label: 'Готель', amount: getDistrictDisplayRent(tile, tile.rents[5], 5, districtPath) },
 ];
+
+const getDistrictDisplayRent = (tile: CityTile, rent: number, houses: number, districtPath?: DistrictPath) =>
+  districtPath === 'oldTown' || districtPath === 'residential'
+    ? Math.ceil(rent / getDistrictDisplayRentDivisor(tile, houses))
+    : rent;
+
+const getDistrictDisplayRentDivisor = (tile: CityTile, houses: number) =>
+  houses > 0 && PREMIUM_DISTRICT_RENT_GROUPS.has(tile.group) ? PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR : DISTRICT_RENT_DIVISOR;
 
 const CityModal = ({
   game,
@@ -4072,9 +4328,15 @@ const CityModal = ({
   const purchasePrice = getEffectivePropertyPrice(game, tile);
   const houseCost = getEffectiveHouseCost(game, tile);
   const unmortgageCost = getEffectiveUnmortgageCost(game, tile);
+  const mortgageValue = getEffectiveMortgageValue(game, tile);
   const mortgageTurnsLeft = getMortgageTurnsLeft(game, property);
   const missingCities = group.filter((groupTile) => game.properties[groupTile.id]?.ownerId !== manager.id);
   const ownerHasDistrict = owner ? ownsAllCities(game, owner.id, group) : false;
+  const district = game.districtPaths?.[tile.group];
+  const districtView = district ? getDistrictPathView(district.path) : undefined;
+  const DistrictIcon = districtView?.Icon;
+  const districtCreationCost = getDistrictCreationCost(game, tile.group);
+  const districtCreationInfo = getDistrictCreationInfo(game, manager, group, district?.path);
 
   const handleMortgage = () => {
     if (!canManage || mortgageInfo.disabled) return;
@@ -4086,6 +4348,11 @@ const CityModal = ({
     dispatch({ type: 'build', playerId: manager.id, tileId: tile.id });
   };
 
+  const handleCreateDistrict = (path: DistrictPath) => {
+    if (!canManage || districtCreationInfo.disabled) return;
+    dispatch({ type: 'create_district', playerId: manager.id, group: tile.group, path });
+  };
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <motion.article
@@ -4094,6 +4361,7 @@ const CityModal = ({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 18, scale: 0.98 }}
         transition={{ type: 'spring', stiffness: 240, damping: 22 }}
+        style={{ '--group-color': tile.groupColor } as CSSProperties}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="modal-head">
@@ -4133,7 +4401,7 @@ const CityModal = ({
               </div>
               <div>
                 <dt>Застава</dt>
-                <dd>{formatMoney(tile.mortgage)}</dd>
+                <dd>{formatMoney(mortgageValue)}</dd>
               </div>
               <div>
                 <dt>Викуп</dt>
@@ -4145,7 +4413,12 @@ const CityModal = ({
               </div>
             </dl>
 
-            <CityRentTable tile={tile} currentHouses={property.houses} hasDistrict={ownerHasDistrict} />
+            <CityRentTable
+              tile={tile}
+              currentHouses={property.houses}
+              hasDistrict={ownerHasDistrict}
+              districtPath={district?.path}
+            />
 
             {property.mortgaged && (
               <div className="mortgage-deadline">
@@ -4161,7 +4434,7 @@ const CityModal = ({
             {canManage ? (
               <button className="secondary full" disabled={mortgageInfo.disabled} title={mortgageInfo.reason} onClick={handleMortgage}>
                 <BadgeDollarSign size={16} />
-                {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(tile.mortgage)}`}
+                {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(mortgageValue)}`}
               </button>
             ) : (
               <p className="muted">
@@ -4172,6 +4445,45 @@ const CityModal = ({
 
           <section className="city-modal-section">
             <h3>Будівництво</h3>
+            {districtView && DistrictIcon ? (
+              <div className={`district-summary-card district-${district!.path}`}>
+                <DistrictIcon size={18} />
+                <div>
+                  <strong>{districtView.label}</strong>
+                  <span>{districtView.effect}</span>
+                </div>
+              </div>
+            ) : canManage && missingCities.length === 0 ? (
+              <div className="district-create-panel">
+                <div className="district-create-head">
+                  <div>
+                    <strong>Оберіть шлях району</strong>
+                    <span>Створення коштує {formatMoney(districtCreationCost)} і не змінюється.</span>
+                  </div>
+                </div>
+                <div className="district-path-options">
+                  {DISTRICT_PATH_OPTIONS.map((option) => {
+                    const Icon = option.Icon;
+                    return (
+                      <button
+                        className={`district-path-option district-${option.path}`}
+                        disabled={districtCreationInfo.disabled}
+                        title={districtCreationInfo.reason}
+                        onClick={() => handleCreateDistrict(option.path)}
+                        type="button"
+                        key={option.path}
+                      >
+                        <Icon size={17} />
+                        <span>
+                          <strong>{option.label}</strong>
+                          <small>{option.effect}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
             <p className={`build-status ${buildInfo.canBuild && canManage ? 'ready' : 'blocked'}`}>
               {canManage ? buildInfo.reason : 'Будувати може тільки власник повної кольорової групи.'}
             </p>
@@ -4249,14 +4561,21 @@ const ServicePropertyModal = ({
   const mortgageInfo = getMortgageInfo(game, manager, tile);
   const purchasePrice = getEffectivePropertyPrice(game, tile);
   const unmortgageCost = getEffectiveUnmortgageCost(game, tile);
+  const mortgageValue = getEffectiveMortgageValue(game, tile);
   const ownedSameTypeCount = owner
     ? owner.properties.map((tileId) => getTile(tileId)).filter((ownedTile) => ownedTile.type === tile.type).length
     : 0;
   const serviceLabel = tile.type === 'bank' ? 'Банк' : 'Сервіс';
+  const bankDepositInfo = tile.type === 'bank' ? getBankDepositInfo(game, manager.id) : undefined;
 
   const handleMortgage = () => {
     if (!canManage || mortgageInfo.disabled) return;
     dispatch({ type: property.mortgaged ? 'unmortgage' : 'mortgage', playerId: manager.id, tileId: tile.id });
+  };
+
+  const handleBankDeposit = () => {
+    if (!canManage || !bankDepositInfo?.canStart) return;
+    dispatch({ type: 'start_bank_deposit', playerId: manager.id });
   };
 
   return (
@@ -4310,7 +4629,7 @@ const ServicePropertyModal = ({
             </div>
             <div>
               <dt>Застава</dt>
-              <dd>{formatMoney(tile.mortgage)}</dd>
+              <dd>{formatMoney(mortgageValue)}</dd>
             </div>
             <div>
               <dt>Викуп</dt>
@@ -4332,10 +4651,36 @@ const ServicePropertyModal = ({
             </p>
           )}
 
+          {tile.type === 'bank' && bankDepositInfo && owner?.id === manager.id && (
+            <div className="bank-deposit-panel">
+              <div>
+                <strong>Банківський депозит</strong>
+                <span>
+                  {bankDepositInfo.activeDeposit
+                    ? `${getBankDepositTurnCount(bankDepositInfo.activeDeposit)} ${formatTurnWord(getBankDepositTurnCount(bankDepositInfo.activeDeposit))} · повернення ${formatMoney(bankDepositInfo.payout)}`
+                    : bankDepositInfo.canStart
+                      ? `Доступний внесок ${formatMoney(bankDepositInfo.amount)}`
+                      : bankDepositInfo.bankCount >= 2
+                        ? 'Доступно після зупинки на своєму банку'
+                      : 'Потрібно мінімум 2 банки'}
+                </span>
+              </div>
+              <button
+                className="primary compact"
+                disabled={!canManage || !bankDepositInfo.canStart}
+                title={bankDepositInfo.disabledReason}
+                onClick={handleBankDeposit}
+              >
+                <HandCoins size={15} />
+                Депозит
+              </button>
+            </div>
+          )}
+
           {canManage ? (
             <button className="secondary full" disabled={mortgageInfo.disabled} title={mortgageInfo.reason} onClick={handleMortgage}>
               <BadgeDollarSign size={16} />
-              {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(tile.mortgage)}`}
+              {property.mortgaged ? `Викупити за ${formatMoney(unmortgageCost)}` : `Закласти за ${formatMoney(mortgageValue)}`}
             </button>
           ) : (
             <p className="muted">{owner ? 'Керувати заставою може тільки власник.' : 'Купівля доступна, коли гравець зупиняється на цьому полі.'}</p>
@@ -4363,6 +4708,29 @@ const ownsAllCities = (game: GameState, playerId: string, tiles: CityTile[]) =>
 const getCityGroup = (tile: CityTile): CityTile[] =>
   boardTiles.filter((candidate): candidate is CityTile => candidate.type === 'city' && candidate.group === tile.group);
 
+const getDistrictPathView = (path: DistrictPath) => DISTRICT_PATH_VIEW.get(path) ?? DISTRICT_PATH_OPTIONS[0];
+
+const getDistrictCreationInfo = (
+  game: GameState,
+  player: Player,
+  group: CityTile[],
+  currentPath?: DistrictPath,
+) => {
+  if (currentPath) return { disabled: true, reason: 'Район уже створено і його не можна змінити.' };
+  if (game.currentPlayerId !== player.id) return { disabled: true, reason: 'Район можна створити тільки під час власного ходу.' };
+  if (game.phase !== 'rolling') return { disabled: true, reason: 'Район створюється до кидка кубиків.' };
+  if (player.jailTurns > 0) return { disabled: true, reason: 'У вʼязниці не можна створювати район.' };
+  if (hasBuildingBlockedCityEvent(game)) return { disabled: true, reason: 'Будівництво заборонене через подію міста.' };
+  if (!group.every((groupTile) => game.properties[groupTile.id]?.ownerId === player.id)) {
+    return { disabled: true, reason: 'Потрібна повна кольорова група.' };
+  }
+  const groupName = group[0]?.group;
+  if (!groupName) return { disabled: true, reason: 'Групу міст не знайдено.' };
+  const cost = getDistrictCreationCost(game, groupName);
+  if (player.money < cost) return { disabled: true, reason: `Потрібно ${formatMoney(cost)} для створення району.` };
+  return { disabled: false, reason: `Створити район за ${formatMoney(cost)}.` };
+};
+
 const getBuildInfo = (game: GameState, player: Player, tile: CityTile) => {
   const property = game.properties[tile.id];
   const group = getCityGroup(tile);
@@ -4382,9 +4750,28 @@ const getBuildInfo = (game: GameState, player: Player, tile: CityTile) => {
   if (!group.every((groupTile) => game.properties[groupTile.id]?.ownerId === player.id)) {
     return { canBuild: false, reason: 'Потрібна вся кольорова група.' };
   }
+  const district = game.districtPaths?.[tile.group];
+  if (!district || district.ownerId !== player.id) {
+    return { canBuild: false, reason: 'Спочатку створіть район для цієї групи.' };
+  }
   if (property.mortgaged) return { canBuild: false, reason: 'Спочатку викупіть заставу.' };
-  if (game.builtThisRoll?.playerId === player.id && game.builtThisRoll.diceRollId === game.diceRollId) {
-    return { canBuild: false, reason: 'За цей кидок уже побудовано один будинок.' };
+  const buildTracker =
+    game.buildsThisRoll ??
+    (game.builtThisRoll
+      ? { playerId: game.builtThisRoll.playerId, diceRollId: game.builtThisRoll.diceRollId, group: tile.group, count: 1 }
+      : undefined);
+  if (buildTracker?.playerId === player.id && buildTracker.diceRollId === game.diceRollId) {
+    const isResidentialSlot =
+      district.path === 'residential' && buildTracker.group === tile.group && buildTracker.count < 2;
+    if (!isResidentialSlot) {
+      return {
+        canBuild: false,
+        reason:
+          district.path === 'residential'
+            ? 'Спальний район дозволяє тільки 2 будівництва за цей кидок у цьому районі.'
+            : 'За цей кидок уже побудовано один будинок.',
+      };
+    }
   }
   if (property.houses >= 5) return { canBuild: false, reason: 'Максимум: готель уже збудовано.' };
   if (player.money < houseCost) return { canBuild: false, reason: `Недостатньо грошей: треба ${formatMoney(houseCost)}.` };
@@ -4399,7 +4786,8 @@ const canUseEmergencyMoneyManagement = (game: GameState, playerId: string): bool
   game.phase === 'rolling' ||
   game.phase === 'awaitingPurchase' ||
   (game.phase === 'rent' && game.pendingRent?.payerId === playerId) ||
-  (game.phase === 'payment' && game.pendingPayment?.payerId === playerId);
+  (game.phase === 'payment' && game.pendingPayment?.payerId === playerId) ||
+  (game.phase === 'bankDeposit' && game.pendingBankDeposit?.playerId === playerId);
 
 const getDemolishInfo = (game: GameState, player: Player, tile: CityTile) => {
   const property = game.properties[tile.id];
@@ -4421,7 +4809,7 @@ const getDemolishInfo = (game: GameState, player: Player, tile: CityTile) => {
     return { canDemolish: false, reason: 'Зносити треба рівномірно по групі.' };
   }
 
-  return { canDemolish: true, reason: `Знести і повернути ${formatMoney(Math.floor(tile.houseCost / 2))}.` };
+  return { canDemolish: true, reason: `Знести і повернути ${formatMoney(getEffectiveBuildingRefund(game, tile))}.` };
 };
 
 const getMortgageInfo = (game: GameState, player: Player, tile: PropertyTile) => {
@@ -4431,7 +4819,8 @@ const getMortgageInfo = (game: GameState, player: Player, tile: PropertyTile) =>
     return { disabled: true, reason: 'Застава доступна до кидка або під час платежу/купівлі.' };
   }
   if (property.houses > 0) return { disabled: true, reason: 'Спочатку продайте будинки.' };
-  if (!property.mortgaged) return { disabled: false, reason: `Отримати ${formatMoney(tile.mortgage)} застави.` };
+  const mortgageValue = getEffectiveMortgageValue(game, tile);
+  if (!property.mortgaged) return { disabled: false, reason: `Отримати ${formatMoney(mortgageValue)} застави.` };
   if (game.phase !== 'rolling') {
     return { disabled: true, reason: 'Викуп застави доступний тільки до кидка кубиків.' };
   }
@@ -4583,6 +4972,8 @@ const hasBuildingBlockedCityEvent = (game: GameState) =>
 
 const formatMoney = (amount: number) => `${amount}₴`;
 
+const getBankDepositTurnCount = (deposit: { turns?: number; steps?: number }) => Math.max(0, deposit.turns ?? deposit.steps ?? 0);
+
 const getOwnerNameMark = (players: Player[], owner: Player): string => {
   const normalizedPrefix = getNameLetters(owner.name, 2).toLocaleLowerCase('uk-UA');
   const hasDuplicatePrefix = players.some(
@@ -4676,6 +5067,69 @@ const createBuildingSnapshot = (game: GameState): Record<number, { houses: numbe
       .filter((tile): tile is CityTile => tile.type === 'city')
       .map((tile) => [tile.id, { houses: game.properties[tile.id].houses, ownerId: game.properties[tile.id].ownerId }]),
   );
+
+const useDistrictPathAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<DistrictPathAnimationEvent[]>([]);
+  const previousSnapshotRef = useRef(createDistrictPathSnapshot(game));
+  const timersRef = useRef<number[]>([]);
+  const districtKey = Object.entries(game.districtPaths ?? {})
+    .map(([group, district]) => `${group}:${district.ownerId}:${district.path}:${district.createdAtTurn}`)
+    .sort()
+    .join('|');
+
+  useEffect(() => {
+    previousSnapshotRef.current = createDistrictPathSnapshot(game);
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const previousSnapshot = previousSnapshotRef.current;
+    const nextSnapshot = createDistrictPathSnapshot(game);
+    const nextEvents: DistrictPathAnimationEvent[] = [];
+
+    Object.entries(nextSnapshot).forEach(([group, district]) => {
+      const previous = previousSnapshot[group];
+      if (previous?.path === district.path && previous.ownerId === district.ownerId && previous.createdAtTurn === district.createdAtTurn) {
+        return;
+      }
+      const groupTiles = boardTiles.filter((tile): tile is CityTile => tile.type === 'city' && tile.group === group);
+      const owner = game.players.find((player) => player.id === district.ownerId);
+      nextEvents.push({
+        id: crypto.randomUUID(),
+        group,
+        path: district.path,
+        ownerName: owner?.name ?? 'Гравець',
+        color: groupTiles[0]?.groupColor ?? owner?.color ?? '#f8c24e',
+        tileIds: groupTiles.map((tile) => tile.id),
+        tileNames: groupTiles.map((tile) => tile.name),
+      });
+    });
+
+    previousSnapshotRef.current = nextSnapshot;
+    if (nextEvents.length === 0) return;
+
+    setEvents((current) => [...current, ...nextEvents].slice(-4));
+    nextEvents.forEach((event) => {
+      const timer = window.setTimeout(() => {
+        setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+      }, DISTRICT_PATH_ANIMATION_MS);
+      timersRef.current.push(timer);
+    });
+  }, [districtKey, game]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
+const createDistrictPathSnapshot = (game: GameState) => game.districtPaths ?? {};
 
 const useAuctionWinAnimationEvents = (game: GameState) => {
   const [events, setEvents] = useState<AuctionWinAnimationEvent[]>([]);
@@ -5287,6 +5741,11 @@ const useTurnTimer = (
     if (game.phase === 'casino') {
       if (game.pendingCasino?.spinEndsAt) return;
       dispatch({ type: 'skip_casino', playerId: game.currentPlayerId });
+      return;
+    }
+
+    if (game.phase === 'bankDeposit' && game.pendingBankDeposit) {
+      dispatch({ type: 'decline_bank_deposit', playerId: game.pendingBankDeposit.playerId });
       return;
     }
 

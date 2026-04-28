@@ -4,10 +4,12 @@ import { CITY_EVENT_ROUND_INTERVAL, cityEventDefinitions, getCityEventDefinition
 import type {
   ActiveCityEvent,
   ActiveRentService,
+  BankDepositState,
   CardDeck,
   CityEventDefinition,
   CityEventId,
   CityTile,
+  DistrictPath,
   GameAction,
   GameState,
   LogEntry,
@@ -27,7 +29,7 @@ export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 6;
 export const PLAYER_TOKENS = ['⚓', '✦', '◆', '●', '▲', '■'];
 export const PLAYER_COLORS = ['#f8c24e', '#43b3ff', '#f0645f', '#3ccf91', '#a78bfa', '#fb923c'];
-const STARTING_MONEY = money(1500);
+const STARTING_MONEY = money(1700);
 const MORTGAGE_GRACE_TURNS = 10;
 const AUCTION_DURATION_MS = 15_000;
 export const AUCTION_BID_INCREMENT = money(10);
@@ -44,6 +46,38 @@ const ROAD_REPAIR_CITY_EVENT_ID: CityEventId = 'road-repair';
 const CITY_EVENT_DOUBLE_CHANCE = 0.18;
 const STEP_FEE_SECOND_SINGLE_DIE_CHANCE = 0.65;
 const STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES = 1;
+const RESIDENTIAL_BUILD_LIMIT_PER_ROLL = 2;
+const DISTRICT_RENT_DIVISOR = 2.5;
+const PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR = 4;
+const OLD_TOWN_PASS_THROUGH_DIVISOR = 3.5;
+const PREMIUM_DISTRICT_RENT_GROUPS = new Set(['Зелена', 'Золота']);
+const BANK_DEPOSIT_MIN_BANKS = 2;
+const BANK_DEPOSIT_TURN_RATE = 0.1;
+const BANK_RENT_BY_COUNT = [0, money(25), money(50), money(100), money(200)] as const;
+const OLD_TOWN_PASS_THROUGH_MESSAGES: Record<string, string> = {
+  pavlohrad: 'Ви проминули старі промислові квартали Павлограда.',
+  ternivka: 'Ви пройшли повз тихі вулички Тернівки.',
+  kropyvnytskyi: 'Ви побачили історичний центр Кропивницького.',
+  cherkasy: 'Ви пройшли черкаською набережною.',
+  zhytomyr: 'Ви проминули старі квартали Житомира.',
+  sumy: 'Ви прогулялись затишними вулицями Сум.',
+  poltava: 'Ви пройшли повз полтавські історичні будинки.',
+  chernihiv: 'Ви побачили стародавні пагорби Чернігова.',
+  khmelnytskyi: 'Ви проминули центр Хмельницького.',
+  rivne: 'Ви пройшли повз старі дворики Рівного.',
+  lutsk: 'Ви побачили вежі старого Луцька.',
+  zaporizhzhia: 'Ви проминули козацькі місця Запоріжжя.',
+  mykolaiv: 'Ви пройшли повз корабельні вулиці Миколаєва.',
+  vinnytsia: 'Ви прогулялись вечірньою Вінницею.',
+  dnipro: 'Ви побачили дніпровські краєвиди.',
+  kharkiv: 'Ви проминули широкі проспекти Харкова.',
+  odesa: 'Ви пройшли одеськими старими двориками.',
+  'ivano-frankivsk': 'Ви насолодились камеральним центром Франківська.',
+  uzhhorod: 'Ви пройшли повз ужгородські сакури.',
+  chernivtsi: 'Ви побачили архітектуру старих Чернівців.',
+  lviv: 'Ви прогулялись бруківкою старого Львова.',
+  kyiv: 'Ви насолодились вечірнім Києвом.',
+};
 
 interface CreateInitialGameOptions {
   determineTurnOrder?: boolean;
@@ -100,9 +134,11 @@ export const createInitialGame = (
     cityEventDeck: createCityEventDeck(),
     cityEventDiscard: [],
     activeCityEvents: [],
+    districtPaths: {},
     tradeOffers: [],
     rentServices: [],
     rentServiceCooldowns: {},
+    bankDeposits: {},
     dice: [1, 1],
     diceRollId: 0,
     doublesInRow: 0,
@@ -162,6 +198,15 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
     case 'go_to_jail':
       next = goToJailFromDecision(state, action.playerId);
       break;
+    case 'start_bank_deposit':
+      next = startBankDeposit(state, action.playerId);
+      break;
+    case 'decline_bank_deposit':
+      next = declineBankDeposit(state, action.playerId);
+      break;
+    case 'create_district':
+      next = createDistrictPath(state, action.playerId, action.group, action.path);
+      break;
     case 'build':
       next = buildOnCity(state, action.playerId, action.tileId);
       break;
@@ -217,13 +262,13 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       next = state;
   }
 
-  return recordMoneyHistory(state, next);
+  return recordMoneyHistory(state, normalizeBankDeposits(normalizeDistrictPaths(next)));
 };
 
 const MONEY_HISTORY_LIMIT = 240;
 
 const createMoneyHistorySnapshot = (
-  state: Pick<GameState, 'players' | 'turn' | 'currentRound' | 'properties'>,
+  state: Pick<GameState, 'players' | 'turn' | 'currentRound' | 'properties'> & Partial<Pick<GameState, 'bankDeposits'>>,
 ): MoneyHistoryPoint => ({
   turn: state.turn,
   round: state.currentRound ?? 1,
@@ -262,7 +307,7 @@ const recordMoneyHistory = (previous: GameState, next: GameState): GameState => 
   return next.moneyHistory === moneyHistory ? next : { ...next, moneyHistory };
 };
 
-const calculatePlayerWorth = (state: Pick<GameState, 'properties'>, player: Player): number =>
+const calculatePlayerWorth = (state: Pick<GameState, 'properties'> & Partial<Pick<GameState, 'bankDeposits'>>, player: Player): number =>
   player.money +
   player.properties.reduce((sum, tileId) => {
     const tile = getTile(tileId);
@@ -270,7 +315,8 @@ const calculatePlayerWorth = (state: Pick<GameState, 'properties'>, player: Play
     const property = state.properties[tile.id];
     const buildingValue = tile.type === 'city' ? property.houses * tile.houseCost : 0;
     return sum + tile.price + buildingValue;
-  }, 0);
+  }, 0) +
+  getBankDepositPayout((state.bankDeposits ?? {})[player.id]);
 
 export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 0): number => {
   const ownerId = state.properties[tile.id]?.ownerId;
@@ -278,15 +324,15 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
 
   let rent = 0;
   if (tile.type === 'bank') {
-    const bankCount = ownedProperties(state, ownerId).filter((owned) => owned.type === 'bank').length;
-    rent = [0, money(25), money(50), money(100), money(200)][bankCount] ?? money(200);
+    rent = getBankRentForCount(ownedBankCount(state, ownerId));
   } else if (tile.type === 'utility') {
     const utilityCount = ownedProperties(state, ownerId).filter((owned) => owned.type === 'utility').length;
     rent = diceTotal * (utilityCount === 2 ? money(12) : money(6));
   } else {
     const houses = state.properties[tile.id].houses;
     const base = tile.rents[houses];
-    rent = houses === 0 && ownsFullGroup(state, ownerId, tile.group) ? base * 2 : base;
+    const cityRent = houses === 0 && ownsFullGroup(state, ownerId, tile.group) ? base * 2 : base;
+    rent = getDistrictAdjustedCityRent(state, tile, cityRent, houses);
   }
 
   return ceilMoney(rent * getCityEventRentMultiplier(state, tile));
@@ -295,13 +341,153 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
 export const getEffectivePropertyPrice = (state: GameState, tile: PropertyTile): number =>
   ceilMoney(tile.price * getCityEventPropertyPriceMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
 
-export const getEffectiveHouseCost = (state: GameState, tile: CityTile): number =>
-  ceilMoney(tile.houseCost * getCityEventHouseCostMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
+export const getEffectiveHouseCost = (state: GameState, tile: CityTile): number => {
+  return ceilMoney(
+    tile.houseCost *
+      getDistrictHouseCostMultiplier(state, tile) *
+      getCityEventHouseCostMultiplier(state, tile) *
+      getLateGamePriceMultiplier(state.turn),
+  );
+};
+
+export const getEffectiveBuildingRefund = (state: GameState, tile: CityTile): number =>
+  Math.floor(ceilMoney(tile.houseCost * getDistrictHouseCostMultiplier(state, tile)) / 2);
+
+export const getDistrictCreationCost = (state: GameState, group: string): number => {
+  const groupTiles = cityGroup(group);
+  if (groupTiles.length === 0) throw new Error('Unknown city group.');
+  return Math.max(...groupTiles.map((tile) => getDistrictCreationHouseCost(state, tile))) * 2;
+};
+
+export const getEffectiveMortgageValue = (state: GameState, tile: PropertyTile): number => {
+  if (tile.type !== 'city') return tile.mortgage;
+
+  const district = getDistrictPath(state, tile.group);
+  if (!district) return tile.mortgage;
+
+  return tile.mortgage + getDistrictMortgageShare(state, tile.group, district);
+};
 
 export const getEffectiveUnmortgageCost = (state: GameState, tile: PropertyTile): number =>
-  ceilMoney(tile.mortgage * 1.1 * getCityEventUnmortgageMultiplier(state) * getLateGamePriceMultiplier(state.turn));
+  ceilMoney(getEffectiveMortgageValue(state, tile) * 1.1 * getCityEventUnmortgageMultiplier(state) * getLateGamePriceMultiplier(state.turn));
+
+export const getBankRentForCount = (bankCount: number): number =>
+  BANK_RENT_BY_COUNT[Math.min(Math.max(0, Math.floor(bankCount)), BANK_RENT_BY_COUNT.length - 1)] ?? BANK_RENT_BY_COUNT[BANK_RENT_BY_COUNT.length - 1];
+
+const getBankDepositTurnCount = (deposit: BankDepositState | undefined): number => Math.max(0, deposit?.turns ?? deposit?.steps ?? 0);
+
+export const getBankDepositPayout = (deposit: BankDepositState | undefined): number =>
+  deposit ? compoundBankDepositPayout(deposit.amount, getBankDepositTurnCount(deposit)) : 0;
+
+const compoundBankDepositPayout = (amount: number, turns: number): number => {
+  let payout = amount;
+  for (let index = 0; index < turns; index += 1) {
+    payout = ceilMoney(payout * (1 + BANK_DEPOSIT_TURN_RATE));
+  }
+  return payout;
+};
+
+export const getBankDepositInfo = (state: GameState, playerId: string) => {
+  const player = getPlayer(state, playerId);
+  const bankCount = ownedBankCount(state, playerId);
+  const amount = bankCount >= BANK_DEPOSIT_MIN_BANKS ? getBankRentForCount(bankCount) : 0;
+  const activeDeposit = (state.bankDeposits ?? {})[playerId];
+  const payout = getBankDepositPayout(activeDeposit);
+  const isOnOwnBank = isPlayerOnOwnBank(state, playerId);
+  const pendingDeposit = state.pendingBankDeposit?.playerId === playerId ? state.pendingBankDeposit : undefined;
+  const depositAmount = pendingDeposit?.amount ?? amount;
+  const canStart =
+    state.currentPlayerId === playerId &&
+    state.phase === 'bankDeposit' &&
+    Boolean(pendingDeposit) &&
+    !player.isBankrupt &&
+    !activeDeposit &&
+    isOnOwnBank &&
+    bankCount >= BANK_DEPOSIT_MIN_BANKS &&
+    depositAmount > 0 &&
+    player.money >= depositAmount;
+  const disabledReason = activeDeposit
+    ? 'Депозит уже активний. Заберіть його, зупинившись на своєму банку.'
+    : state.currentPlayerId !== playerId
+      ? 'Депозит можна зробити тільки у свій хід.'
+      : state.phase !== 'bankDeposit' || !pendingDeposit
+        ? 'Депозит можна зробити тільки після зупинки на своєму банку.'
+        : bankCount < BANK_DEPOSIT_MIN_BANKS
+          ? 'Для депозиту потрібно мінімум 2 банки.'
+          : !isOnOwnBank
+            ? 'Депозит можна зробити тільки у своєму банку.'
+            : player.money < depositAmount
+              ? `Потрібно ${depositAmount}₴ для депозиту.`
+              : `Зробити депозит ${depositAmount}₴.`;
+
+  return {
+    bankCount,
+    amount: depositAmount,
+    activeDeposit,
+    payout,
+    canStart,
+    canCollect: Boolean(activeDeposit && bankCount >= BANK_DEPOSIT_MIN_BANKS),
+    disabledReason,
+  };
+};
+
+const isPlayerOnOwnBank = (state: GameState, playerId: string): boolean => {
+  const player = getPlayer(state, playerId);
+  const tile = getTile(player.position);
+  if (tile.type !== 'bank') return false;
+  const property = state.properties[tile.id];
+  return property?.ownerId === playerId && !property.mortgaged;
+};
 
 const ceilMoney = (value: number): number => Math.ceil(value - 1e-6);
+
+const getDistrictPath = (state: GameState, group: string) => (state.districtPaths ?? {})[group];
+
+const getDistrictCreationHouseCost = (state: GameState, tile: CityTile): number =>
+  ceilMoney(tile.houseCost * getCityEventHouseCostMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
+
+const getDistrictMortgageShare = (
+  state: GameState,
+  group: string,
+  district: { creationCost?: number },
+): number => {
+  const groupTiles = cityGroup(group);
+  if (groupTiles.length === 0) return 0;
+  const creationCost = district.creationCost ?? getDistrictCreationCost(state, group);
+  return ceilMoney(creationCost / groupTiles.length / 2);
+};
+
+const getDistrictAdjustedCityRent = (state: GameState, tile: CityTile, baseRent: number, houses: number): number => {
+  const path = getDistrictPath(state, tile.group)?.path;
+  if (isDistrictRentReduced(path)) return ceilMoney(baseRent / getDistrictRentDivisor(tile, houses));
+  return baseRent;
+};
+
+const getDistrictHouseCostMultiplier = (state: GameState, tile: CityTile): number =>
+  getDistrictPath(state, tile.group)?.path === 'residential' ? 0.5 : 1;
+
+const isDistrictRentReduced = (path: DistrictPath | undefined): boolean => path === 'oldTown' || path === 'residential';
+
+const getDistrictRentDivisor = (tile: CityTile, houses: number): number =>
+  houses > 0 && PREMIUM_DISTRICT_RENT_GROUPS.has(tile.group) ? PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR : DISTRICT_RENT_DIVISOR;
+
+const getOldTownPassThroughDivisor = (state: GameState, tile: CityTile): number =>
+  state.properties[tile.id].houses > 0 && PREMIUM_DISTRICT_RENT_GROUPS.has(tile.group)
+    ? PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR
+    : OLD_TOWN_PASS_THROUGH_DIVISOR;
+
+const districtPathLabel = (path: DistrictPath): string => {
+  switch (path) {
+    case 'tourist':
+      return 'Туристичний район';
+    case 'oldTown':
+      return 'Старе місто';
+    case 'residential':
+      return 'Спальний район';
+    default:
+      return path;
+  }
+};
 
 const findRentService = (
   state: GameState,
@@ -452,6 +638,7 @@ const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, num
     currentRound: 1,
     doublesInRow: 0,
     builtThisRoll: undefined,
+    buildsThisRoll: undefined,
     lastOrderRollPlayerId: playerId,
     log: appendLog(base, `Чергу визначено: ${orderText}. ${orderedPlayers[0].name} починає партію.`, 'good'),
   };
@@ -475,6 +662,7 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
     lastDice: normalizedDice,
     doublesInRow,
     builtThisRoll: undefined,
+    buildsThisRoll: undefined,
   };
 
   if (isJailed && !isDouble) {
@@ -534,14 +722,29 @@ const movePlayer = (state: GameState, playerId: string, steps: number): GameStat
     ),
     log: appendLog(state, `${player.name} рухається на ${steps} клітинок${startRewardText}.`),
   };
+  next = addBankDepositTurn(next, playerId, steps);
 
   const stepFee = getCityEventStepFee(next, steps);
-  if (stepFee > 0) {
+  const oldTownTolls = getOldTownMovementTolls(next, playerId, player.position, nextPosition, steps);
+  const oldTownTotal = oldTownTolls.reduce((sum, toll) => sum + toll.amount, 0);
+  const movementPayment = stepFee + oldTownTotal;
+  if (movementPayment > 0) {
+    const stepReason = stepFee > 0 ? `Платні дороги: ${steps} ${formatStepWord(steps)}` : '';
+    const tollReason =
+      oldTownTolls.length > 0
+        ? oldTownTolls
+            .map(
+              (toll) =>
+                `Пройдено район "Старе місто". ${toll.message} Плата ${toll.amount}₴`,
+            )
+            .join('; ')
+        : '';
     return createPendingPayment(next, {
       payerId: playerId,
-      amount: stepFee,
-      reason: `Платні дороги: ${steps} ${formatStepWord(steps)}`,
-      source: 'cityEvent',
+      amount: movementPayment,
+      reason: [stepReason, tollReason].filter(Boolean).join('; '),
+      source: oldTownTolls.length > 0 ? 'movement' : 'cityEvent',
+      recipients: oldTownTolls.map((toll) => ({ playerId: toll.ownerId, amount: toll.amount })),
       afterPayment: {
         type: 'resolveTile',
         playerId,
@@ -552,6 +755,64 @@ const movePlayer = (state: GameState, playerId: string, steps: number): GameStat
 
   return resolveTile(next, playerId, steps);
 };
+
+const addBankDepositTurn = (state: GameState, playerId: string, steps: number): GameState => {
+  const deposit = (state.bankDeposits ?? {})[playerId];
+  if (!deposit || steps <= 0) return state;
+  return {
+    ...state,
+    bankDeposits: {
+      ...(state.bankDeposits ?? {}),
+      [playerId]: {
+        playerId: deposit.playerId,
+        amount: deposit.amount,
+        turns: getBankDepositTurnCount(deposit) + 1,
+        createdAtTurn: deposit.createdAtTurn,
+        createdAtDiceRollId: deposit.createdAtDiceRollId,
+      },
+    },
+  };
+};
+
+const getOldTownMovementTolls = (
+  state: GameState,
+  playerId: string,
+  fromPosition: number,
+  destinationPosition: number,
+  steps: number,
+): Array<{ group: string; ownerId: string; message: string; amount: number }> => {
+  if (steps <= 1) return [];
+  const destination = getTile(destinationPosition);
+  const destinationGroup = destination.type === 'city' ? destination.group : undefined;
+  const tolls = new Map<string, { group: string; ownerId: string; message: string; amount: number }>();
+
+  for (let step = 1; step < steps; step += 1) {
+    const tile = getTile((fromPosition + step) % boardTiles.length);
+    if (tile.type !== 'city' || tile.group === destinationGroup) continue;
+
+    const district = getDistrictPath(state, tile.group);
+    if (district?.path !== 'oldTown' || district.ownerId === playerId) continue;
+    if (!ownsFullGroup(state, district.ownerId, tile.group)) continue;
+
+    const rent = calculateRent(state, tile, 0);
+    if (rent <= 0) continue;
+    const amount = ceilMoney(rent / getOldTownPassThroughDivisor(state, tile));
+    const previous = tolls.get(tile.group);
+    if (!previous || amount > previous.amount) {
+      tolls.set(tile.group, {
+        group: tile.group,
+        ownerId: district.ownerId,
+        message: getOldTownPassThroughMessage(tile),
+        amount,
+      });
+    }
+  }
+
+  return Array.from(tolls.values());
+};
+
+const getOldTownPassThroughMessage = (tile: CityTile): string =>
+  OLD_TOWN_PASS_THROUGH_MESSAGES[tile.citySlug] ?? `Ви пройшли повз ${tile.name}.`;
 
 const resolveTile = (state: GameState, playerId: string, diceTotal: number): GameState => {
   const player = getPlayer(state, playerId);
@@ -612,6 +873,13 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
       };
     }
 
+    if (tile.type === 'bank' && property.ownerId === playerId) {
+      const depositResolution = resolveBankDepositOnOwnBank(state, playerId, tile.name);
+      if (depositResolution) return depositResolution;
+      const depositDecision = createBankDepositDecision(state, playerId, tile);
+      if (depositDecision) return depositDecision;
+    }
+
     if (property.ownerId !== playerId) {
       const baseRent = calculateRent(state, tile, diceTotal);
       const rentService = findRentService(state, property.ownerId, playerId, tile.id);
@@ -654,6 +922,67 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
   }
 
   return { ...state, phase: 'turnEnd', log: appendLog(state, `${player.name} зупиняється на ${tile.name}.`) };
+};
+
+const resolveBankDepositOnOwnBank = (state: GameState, playerId: string, bankName: string): GameState | undefined => {
+  const deposit = (state.bankDeposits ?? {})[playerId];
+  if (!deposit) return undefined;
+
+  const player = getPlayer(state, playerId);
+  const bankCount = ownedBankCount(state, playerId);
+  if (bankCount < BANK_DEPOSIT_MIN_BANKS) {
+    return {
+      ...state,
+      phase: 'turnEnd',
+      log: appendLog(
+        state,
+        `${player.name} зупиняється на ${bankName}, але депозит заморожений: потрібно мінімум 2 банки, щоб забрати кошти.`,
+      ),
+    };
+  }
+
+  const payout = getBankDepositPayout(deposit);
+  const depositTurns = getBankDepositTurnCount(deposit);
+  const profit = payout - deposit.amount;
+  const nextDeposits = { ...(state.bankDeposits ?? {}) };
+  delete nextDeposits[playerId];
+
+  return {
+    ...state,
+    phase: 'turnEnd',
+    bankDeposits: nextDeposits,
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, money: candidate.money + payout } : candidate,
+    ),
+    log: appendLog(
+      state,
+      `${player.name} забирає депозит у ${bankName}: ${deposit.amount}₴ + ${profit}₴ за ${depositTurns} ${formatTurnWord(depositTurns)}.`,
+      'good',
+    ),
+  };
+};
+
+const createBankDepositDecision = (
+  state: GameState,
+  playerId: string,
+  tile: Extract<PropertyTile, { type: 'bank' }>,
+): GameState | undefined => {
+  if ((state.bankDeposits ?? {})[playerId]) return undefined;
+  if (state.properties[tile.id]?.mortgaged) return undefined;
+
+  const player = getPlayer(state, playerId);
+  const bankCount = ownedBankCount(state, playerId);
+  if (bankCount < BANK_DEPOSIT_MIN_BANKS) return undefined;
+
+  const amount = getBankRentForCount(bankCount);
+  if (amount <= 0) return undefined;
+
+  return {
+    ...state,
+    phase: 'bankDeposit',
+    pendingBankDeposit: { playerId, tileId: tile.id, amount },
+    log: appendLog(state, `${player.name} зупиняється у своєму банку ${tile.name} і може зробити депозит ${amount}₴.`, 'good'),
+  };
 };
 
 const buyPendingProperty = (state: GameState, playerId: string): GameState => {
@@ -932,6 +1261,7 @@ const adminMoveCurrentPlayer = (state: GameState, tileId: number): GameState => 
     pendingRent: undefined,
     pendingPayment: undefined,
     pendingCasino: undefined,
+    pendingBankDeposit: undefined,
     pendingJail: undefined,
     pendingCard: undefined,
     pendingCardDraw: undefined,
@@ -1014,6 +1344,89 @@ const goToJailFromDecision = (state: GameState, playerId: string): GameState => 
   );
 };
 
+const startBankDeposit = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  if (state.phase !== 'bankDeposit' || state.pendingBankDeposit?.playerId !== playerId) {
+    throw new Error('Зараз немає рішення щодо банківського депозиту.');
+  }
+  const player = getPlayer(state, playerId);
+  const pendingDeposit = state.pendingBankDeposit;
+  if (!pendingDeposit || player.position !== pendingDeposit.tileId) throw new Error('Гравець уже не стоїть у банку для депозиту.');
+  if (player.isBankrupt) throw new Error('Гравець вибув.');
+  if ((state.bankDeposits ?? {})[playerId]) throw new Error('У гравця вже є активний депозит.');
+  if (!isPlayerOnOwnBank(state, playerId)) throw new Error('Депозит можна зробити тільки у своєму банку.');
+
+  const bankCount = ownedBankCount(state, playerId);
+  if (bankCount < BANK_DEPOSIT_MIN_BANKS) throw new Error('Для депозиту потрібно мінімум 2 банки.');
+
+  const amount = pendingDeposit.amount;
+  if (amount <= 0) throw new Error('Немає доступної суми депозиту.');
+  if (player.money < amount) throw new Error('Недостатньо грошей для депозиту.');
+
+  return {
+    ...state,
+    phase: 'turnEnd',
+    pendingBankDeposit: undefined,
+    bankDeposits: {
+      ...(state.bankDeposits ?? {}),
+      [playerId]: {
+        playerId,
+        amount,
+        turns: 0,
+        createdAtTurn: state.turn,
+        createdAtDiceRollId: state.diceRollId,
+      },
+    },
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, money: candidate.money - amount } : candidate,
+    ),
+    log: appendLog(state, `${player.name} робить банківський депозит ${amount}₴. Відсоток зростає за кожен хід після депозиту.`, 'good'),
+  };
+};
+
+const declineBankDeposit = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  if (state.phase !== 'bankDeposit' || state.pendingBankDeposit?.playerId !== playerId) {
+    throw new Error('Зараз немає рішення щодо банківського депозиту.');
+  }
+  const player = getPlayer(state, playerId);
+  const tile = getTile(state.pendingBankDeposit.tileId);
+  return {
+    ...state,
+    phase: 'turnEnd',
+    pendingBankDeposit: undefined,
+    log: appendLog(state, `${player.name} не робить депозит у ${tile.name}.`),
+  };
+};
+
+const createDistrictPath = (state: GameState, playerId: string, group: string, path: DistrictPath): GameState => {
+  assertCurrent(state, playerId);
+  assertPropertyManagementPhase(state);
+  const groupTiles = cityGroup(group);
+  if (groupTiles.length === 0) throw new Error('Такої групи міст не існує.');
+  if (!['tourist', 'oldTown', 'residential'].includes(path)) throw new Error('Невідомий тип району.');
+  const player = getPlayer(state, playerId);
+  if (player.jailTurns > 0) throw new Error('Гравець у в’язниці не може створювати район.');
+  if (isBuildingBlockedByCityEvent(state)) throw new Error('Будівництво заборонене через подію міста.');
+  if (!ownsFullGroup(state, playerId, group)) throw new Error('Потрібна повна група міст для створення району.');
+  if (getDistrictPath(state, group)) throw new Error('Шлях району вже створено і його не можна змінити.');
+
+  const cost = getDistrictCreationCost(state, group);
+  if (player.money < cost) throw new Error('Недостатньо грошей для створення району.');
+
+  return {
+    ...state,
+    districtPaths: {
+      ...(state.districtPaths ?? {}),
+      [group]: { ownerId: playerId, path, createdAtTurn: state.turn, creationCost: cost },
+    },
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, money: candidate.money - cost } : candidate,
+    ),
+    log: appendLog(state, `${player.name} створює "${districtPathLabel(path)}" у групі ${group} за ${cost}₴.`, 'good'),
+  };
+};
+
 const buildOnCity = (state: GameState, playerId: string, tileId: number): GameState => {
   assertCurrent(state, playerId);
   assertPropertyManagementPhase(state);
@@ -1025,7 +1438,9 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
   if (isBuildingBlockedByCityEvent(state)) throw new Error('Будівництво заборонене через подію міста.');
   if (property.ownerId !== playerId) throw new Error('Місто належить іншому гравцю.');
   if (!ownsFullGroup(state, playerId, tile.group)) throw new Error('Потрібна монополія групи.');
-  if (state.builtThisRoll?.playerId === playerId && state.builtThisRoll.diceRollId === state.diceRollId) {
+  const district = getDistrictPath(state, tile.group);
+  if (!district || district.ownerId !== playerId) throw new Error('Спочатку створіть район для цієї групи.');
+  if (!canBuildInDistrictThisRoll(state, playerId, tile.group, district.path)) {
     throw new Error('За один кидок можна побудувати лише один будинок.');
   }
   if (property.houses >= 5) throw new Error('Уже є готель.');
@@ -1044,6 +1459,7 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
       [tileId]: { ...property, houses: property.houses + 1 },
     },
     builtThisRoll: { playerId, diceRollId: state.diceRollId, tileId },
+    buildsThisRoll: nextBuildsThisRoll(state, playerId, tile.group),
     players: state.players.map((candidate) =>
       candidate.id === playerId ? { ...candidate, money: candidate.money - houseCost } : candidate,
     ),
@@ -1053,6 +1469,25 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
       'good',
     ),
   };
+};
+
+const canBuildInDistrictThisRoll = (state: GameState, playerId: string, group: string, path: DistrictPath): boolean => {
+  const tracker = state.buildsThisRoll;
+  if (!tracker || tracker.playerId !== playerId || tracker.diceRollId !== state.diceRollId) return true;
+  if (path !== 'residential') return false;
+  return tracker.group === group && tracker.count < RESIDENTIAL_BUILD_LIMIT_PER_ROLL;
+};
+
+const nextBuildsThisRoll = (
+  state: GameState,
+  playerId: string,
+  group: string,
+): NonNullable<GameState['buildsThisRoll']> => {
+  const tracker = state.buildsThisRoll;
+  if (tracker?.playerId === playerId && tracker.diceRollId === state.diceRollId && tracker.group === group) {
+    return { ...tracker, count: tracker.count + 1 };
+  }
+  return { playerId, diceRollId: state.diceRollId, group, count: 1 };
 };
 
 const sellBuilding = (state: GameState, playerId: string, tileId: number): GameState => {
@@ -1074,7 +1509,7 @@ const sellBuilding = (state: GameState, playerId: string, tileId: number): GameS
     throw new Error('Зносити треба рівномірно по групі.');
   }
 
-  const refund = Math.floor(tile.houseCost / 2);
+  const refund = getEffectiveBuildingRefund(state, tile);
   return {
     ...state,
     properties: {
@@ -1100,6 +1535,7 @@ const mortgageProperty = (state: GameState, playerId: string, tileId: number): G
   if (property.ownerId !== playerId) throw new Error('Майно належить іншому гравцю.');
   if (property.houses > 0) throw new Error('Спочатку продайте будинки.');
   if (property.mortgaged) throw new Error('Майно вже заставлене.');
+  const mortgageValue = getEffectiveMortgageValue(state, tile);
   return {
     ...state,
     properties: {
@@ -1112,9 +1548,9 @@ const mortgageProperty = (state: GameState, playerId: string, tileId: number): G
       },
     },
     players: state.players.map((player) =>
-      player.id === playerId ? { ...player, money: player.money + tile.mortgage } : player,
+      player.id === playerId ? { ...player, money: player.money + mortgageValue } : player,
     ),
-    log: appendLog(state, `${getPlayer(state, playerId).name} заставляє ${tile.name} і отримує ${tile.mortgage}₴.`),
+    log: appendLog(state, `${getPlayer(state, playerId).name} заставляє ${tile.name} і отримує ${mortgageValue}₴.`),
   };
 };
 
@@ -1543,8 +1979,10 @@ const endTurn = (state: GameState, playerId: string): GameState => {
     pendingRent: undefined,
     pendingPayment: undefined,
     pendingCasino: undefined,
+    pendingBankDeposit: undefined,
     pendingJail: undefined,
     builtThisRoll: undefined,
+    buildsThisRoll: undefined,
     pendingCard: undefined,
     pendingCardDraw: undefined,
     doublesInRow: 0,
@@ -1856,6 +2294,7 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
       pendingRent: undefined,
       pendingPayment: undefined,
       pendingCasino: undefined,
+      pendingBankDeposit: undefined,
       pendingJail: undefined,
       pendingCard: undefined,
       pendingPurchaseTileId: undefined,
@@ -1871,22 +2310,19 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const debtor = getPlayer(state, playerId);
   const pendingRent = state.pendingRent?.payerId === playerId ? state.pendingRent : undefined;
   const isPendingPaymentPayer = state.pendingPayment?.payerId === playerId;
-  const pendingPayment =
-    isPendingPaymentPayer && state.pendingPayment?.recipients?.length === 1
-      ? state.pendingPayment
-      : undefined;
-  const paymentCreditorId =
-    pendingPayment
-      ? pendingPayment.recipients?.[0]?.playerId
-      : undefined;
-  const creditorId = pendingRent?.ownerId ?? paymentCreditorId;
-  const creditorAmount = Math.min(debtor.money, pendingRent?.amount ?? pendingPayment?.recipients?.[0]?.amount ?? 0);
-  const shouldAdvanceTurn = state.currentPlayerId === playerId || Boolean(pendingRent) || isPendingPaymentPayer;
+  const pendingPayment = isPendingPaymentPayer ? state.pendingPayment : undefined;
+  const pendingBankDeposit = state.pendingBankDeposit?.playerId === playerId ? state.pendingBankDeposit : undefined;
+  const creditorPayments = distributeCreditorPayments(
+    debtor.money,
+    pendingRent ? [{ playerId: pendingRent.ownerId, amount: pendingRent.amount }] : pendingPayment?.recipients ?? [],
+  );
+  const shouldAdvanceTurn = state.currentPlayerId === playerId || Boolean(pendingRent) || isPendingPaymentPayer || Boolean(pendingBankDeposit);
   let next: GameState = {
     ...state,
     players: state.players.map((player) => {
       if (player.id === playerId) return { ...player, isBankrupt: true, properties: [], money: 0 };
-      if (player.id === creditorId && creditorAmount > 0) return { ...player, money: player.money + creditorAmount };
+      const received = creditorPayments.get(player.id) ?? 0;
+      if (received > 0) return { ...player, money: player.money + received };
       return player;
     }),
     properties: Object.fromEntries(
@@ -1905,6 +2341,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     ),
     pendingRent: pendingRent ? undefined : state.pendingRent,
     pendingPayment: isPendingPaymentPayer ? undefined : state.pendingPayment,
+    pendingBankDeposit: pendingBankDeposit ? undefined : state.pendingBankDeposit,
     pendingJail: state.pendingJail?.playerId === playerId ? undefined : state.pendingJail,
     rentServices: (state.rentServices ?? []).filter(
       (service) => service.ownerId !== playerId && service.beneficiaryId !== playerId,
@@ -1938,6 +2375,21 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     next = endTurn({ ...next, phase: 'turnEnd' }, playerId);
   }
   return next;
+};
+
+const distributeCreditorPayments = (
+  availableCash: number,
+  recipients: Array<{ playerId: string; amount: number }>,
+): Map<string, number> => {
+  const payments = new Map<string, number>();
+  let remaining = Math.max(0, availableCash);
+  recipients.forEach((recipient) => {
+    if (remaining <= 0 || recipient.amount <= 0) return;
+    const paid = Math.min(remaining, recipient.amount);
+    remaining -= paid;
+    payments.set(recipient.playerId, (payments.get(recipient.playerId) ?? 0) + paid);
+  });
+  return payments;
 };
 
 const hasPendingTrade = (state: GameState): boolean => state.tradeOffers.some((offer) => offer.status === 'pending');
@@ -2007,7 +2459,8 @@ const drawCard = (state: GameState, playerId: string, deck: CardDeck): GameState
       resolved.phase === 'awaitingJailDecision' ||
       resolved.phase === 'rent' ||
       resolved.phase === 'payment' ||
-      resolved.phase === 'casino'
+      resolved.phase === 'casino' ||
+      resolved.phase === 'bankDeposit'
         ? resolved.phase
         : 'turnEnd',
     log: appendLog(resolved, `${playerBeforeCard.name} бере карту: ${card.title}.${moneyText}`),
@@ -2087,6 +2540,12 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
         log: appendLog(state, `${player.name} може купити ${tile.name} за ${price}₴.`),
       };
     }
+    if (tile.type === 'bank' && property.ownerId === playerId) {
+      const depositResolution = resolveBankDepositOnOwnBank(state, playerId, tile.name);
+      if (depositResolution) return depositResolution;
+      const depositDecision = createBankDepositDecision(state, playerId, tile);
+      if (depositDecision) return depositDecision;
+    }
     if (property.ownerId !== playerId) {
       const baseRent = calculateRent(state, tile, state.dice[0] + state.dice[1]);
       const rentService = findRentService(state, property.ownerId, playerId, tile.id);
@@ -2141,6 +2600,7 @@ const sendToJail = (state: GameState, playerId: string, message: string): GameSt
   pendingCasino: undefined,
   pendingPurchaseTileId: undefined,
   pendingPayment: undefined,
+  pendingBankDeposit: undefined,
   players: state.players.map((player) =>
     player.id === playerId ? { ...player, position: 10, jailTurns: JAIL_TURNS } : player,
   ),
@@ -2201,6 +2661,25 @@ const moveProperties = (state: GameState, fromId: string, toId: string, tileIds:
   }),
 });
 
+const normalizeDistrictPaths = (state: GameState): GameState => {
+  const currentDistricts = state.districtPaths ?? {};
+  const normalizedEntries = Object.entries(currentDistricts).filter(
+    ([group, district]) => cityGroup(group).length > 0 && ownsFullGroup(state, district.ownerId, group),
+  );
+  if (normalizedEntries.length === Object.keys(currentDistricts).length && state.districtPaths) return state;
+  return { ...state, districtPaths: Object.fromEntries(normalizedEntries) };
+};
+
+const normalizeBankDeposits = (state: GameState): GameState => {
+  const currentDeposits = state.bankDeposits ?? {};
+  const activePlayerIds = new Set(state.players.filter((player) => !player.isBankrupt).map((player) => player.id));
+  const normalizedEntries = Object.entries(currentDeposits).filter(
+    ([playerId, deposit]) => activePlayerIds.has(playerId) && deposit.amount > 0,
+  );
+  if (normalizedEntries.length === Object.keys(currentDeposits).length && state.bankDeposits) return state;
+  return { ...state, bankDeposits: Object.fromEntries(normalizedEntries) };
+};
+
 const ownsFullGroup = (state: GameState, playerId: string, group: string): boolean =>
   cityGroup(group).every((tile) => state.properties[tile.id]?.ownerId === playerId);
 
@@ -2209,6 +2688,9 @@ const cityGroup = (group: string): CityTile[] =>
 
 const ownedProperties = (state: GameState, playerId: string): PropertyTile[] =>
   propertyTiles.filter((tile) => state.properties[tile.id]?.ownerId === playerId);
+
+const ownedBankCount = (state: GameState, playerId: string): number =>
+  ownedProperties(state, playerId).filter((tile) => tile.type === 'bank').length;
 
 const getPlayer = (state: GameState, playerId: string): Player => {
   const player = state.players.find((candidate) => candidate.id === playerId);
@@ -2230,8 +2712,9 @@ const assertEmergencyMoneyManagementPhase = (state: GameState, playerId: string,
   const isPurchaseDecision = state.phase === 'awaitingPurchase';
   const isRentDecision = state.phase === 'rent' && state.pendingRent?.payerId === playerId;
   const isPaymentDecision = state.phase === 'payment' && state.pendingPayment?.payerId === playerId;
+  const isBankDepositDecision = state.phase === 'bankDeposit' && state.pendingBankDeposit?.playerId === playerId;
 
-  if (state.phase !== 'rolling' && !isPurchaseDecision && !isRentDecision && !isPaymentDecision) {
+  if (state.phase !== 'rolling' && !isPurchaseDecision && !isRentDecision && !isPaymentDecision && !isBankDepositDecision) {
     throw new Error(message);
   }
 };

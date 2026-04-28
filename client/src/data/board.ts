@@ -44,7 +44,7 @@ const utility = (id: number, name: string, utilityKey: UtilityTile['utilityKey']
 
 export const boardTiles: Tile[] = [
   { id: 0, name: 'Старт', type: 'go', description: `+${moneyText(200)} за проходження, +${moneyText(300)} за зупинку` },
-  city(1, 'Павлоград', 'pavlohrad', 'Бурштинова', '#d9a322', 60, [2, 28, 66, 144, 232, 340], 50),
+  city(1, 'Павлоград', 'pavlohrad', 'Бурштинова', '#d9a322', 60, [2, 28, 66, 200, 350, 500], 50),
   { id: 2, name: 'Громада', type: 'community' },
   city(3, 'Тернівка', 'ternivka', 'Бурштинова', '#d9a322', 60, [4, 20, 60, 180, 320, 450], 50),
   { id: 4, name: 'Податок на місто', type: 'tax', amount: money(200) },

@@ -36,6 +36,7 @@ export type GamePhase =
   | 'awaitingJailDecision'
   | 'auction'
   | 'casino'
+  | 'bankDeposit'
   | 'payment'
   | 'rent'
   | 'manage'
@@ -169,6 +170,15 @@ export interface ActiveRentService extends RentServiceOffer {
   createdAtTurn: number;
 }
 
+export interface BankDepositState {
+  playerId: string;
+  amount: number;
+  turns: number;
+  steps?: number;
+  createdAtTurn: number;
+  createdAtDiceRollId: number;
+}
+
 export interface CityEventEffect {
   rentMultiplier?: number;
   rentGroups?: string[];
@@ -215,12 +225,21 @@ export interface PendingCityEvent {
   isDouble?: boolean;
 }
 
+export type DistrictPath = 'tourist' | 'oldTown' | 'residential';
+
+export interface DistrictPathState {
+  ownerId: string;
+  path: DistrictPath;
+  createdAtTurn: number;
+  creationCost?: number;
+}
+
 export interface PendingPayment {
   payerId: string;
   amount: number;
   reason: string;
   tileId?: number;
-  source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent';
+  source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent' | 'movement';
   recipients?: Array<{
     playerId: string;
     amount: number;
@@ -271,6 +290,7 @@ export interface GameState {
   cityEventDeck: CityEventId[];
   cityEventDiscard: CityEventId[];
   activeCityEvents: ActiveCityEvent[];
+  districtPaths: Record<string, DistrictPathState>;
   pendingCityEvent?: PendingCityEvent;
   turnOrderRolls?: Record<string, [number, number]>;
   pendingPurchaseTileId?: number;
@@ -294,6 +314,11 @@ export interface GameState {
     spinStartedAt?: number;
     spinEndsAt?: number;
   };
+  pendingBankDeposit?: {
+    playerId: string;
+    tileId: number;
+    amount: number;
+  };
   pendingJail?: {
     playerId: string;
     tileId: number;
@@ -312,6 +337,7 @@ export interface GameState {
   tradeOffers: TradeOffer[];
   rentServices: ActiveRentService[];
   rentServiceCooldowns: Record<string, number>;
+  bankDeposits: Record<string, BankDepositState>;
   dice: [number, number];
   diceRollId: number;
   lastDice?: [number, number];
@@ -321,6 +347,12 @@ export interface GameState {
     playerId: string;
     diceRollId: number;
     tileId: number;
+  };
+  buildsThisRoll?: {
+    playerId: string;
+    diceRollId: number;
+    group: string;
+    count: number;
   };
   winnerId?: string;
   log: LogEntry[];
@@ -341,6 +373,9 @@ export type GameAction =
   | { type: 'casino_bet'; playerId: string; amount: number; multiplier: number }
   | { type: 'pay_jail_fine'; playerId: string }
   | { type: 'go_to_jail'; playerId: string }
+  | { type: 'start_bank_deposit'; playerId: string }
+  | { type: 'decline_bank_deposit'; playerId: string }
+  | { type: 'create_district'; playerId: string; group: string; path: DistrictPath }
   | { type: 'build'; playerId: string; tileId: number }
   | { type: 'sell_building'; playerId: string; tileId: number }
   | { type: 'mortgage'; playerId: string; tileId: number }
