@@ -122,6 +122,7 @@ const UNO_REVERSE_CARD_IMAGE = '/assets/cards/uno-reverse.png';
 const UNO_REVERSE_CARD_ID = 13;
 const UNO_REVERSE_SPARK_INDICES = Array.from({ length: 10 }, (_, index) => index);
 const EMOTE_COOLDOWN_WINDOW_MS = 30_000;
+const EMOTE_AUDIO_GAIN = 2.0;
 type EmoteOption = {
   id: string;
   label: string;
@@ -203,17 +204,17 @@ type UnoReverseAnimationEvent = {
 };
 
 const EMOTE_OPTIONS: EmoteOption[] = [
-  { id: 'halepa', label: 'Халепа', Icon: CircleHelp, color: '#38bdf8', audioSrc: '/assets/emotes/halepa.mp3', gain: 1.5 },
-  { id: 'unlucky', label: 'Un-un-un-un-un-unlucky', Icon: ShieldAlert, color: '#fb923c', audioSrc: '/assets/emotes/unlucky.mp3', gain: 1.5 },
-  { id: 'i-feel-nothing', label: 'I feel nothing', Icon: HeartCrack, color: '#f472b6', audioSrc: '/assets/emotes/i-feel-nothing.mp3', gain: 1.5 },
-  { id: 'ready-catch-you', label: '准备好了吗，要来抓你咯', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/ready-catch-you.mp3', gain: 1.5 },
-  { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: 1.5 },
-  { id: 'absolute-cinema', label: 'Absolute cinema', Icon: MessageCircleHeart, color: '#fb7185', audioSrc: '/assets/emotes/absolute-cinema.mp3', gain: 1.5 },
-  { id: 'sigma-moment', label: 'Sigma moment', Icon: Sigma, color: '#f472b6', audioSrc: '/assets/emotes/sigma-moment.mp3', gain: 1.5 },
-  { id: 'call-an-ambulance', label: 'Oh, call an ambulance', Icon: Ambulance, color: '#fbbf24', audioSrc: '/assets/emotes/call-an-ambulance.mp3', gain: 1.5 },
-  { id: 'ks-ks-chk-pk-a', label: 'Кс-кс-чк-чк-пк-пк-а!', Icon: Flag, color: '#60a5fa', audioSrc: '/assets/emotes/ks-ks-chk-pk-a.mp3', gain: 1.5 },
-  { id: 'ay-que-buena-jugada', label: '¡Ay, ay ay! ¡Qué buena jugada', Icon: TrendingUp, color: '#22c55e', audioSrc: '/assets/emotes/ay-que-buena-jugada.mp3', gain: 1.5 },
-  { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: 1.5 },
+  { id: 'halepa', label: 'Халепа', Icon: CircleHelp, color: '#38bdf8', audioSrc: '/assets/emotes/halepa.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'unlucky', label: 'Un-un-un-un-un-unlucky', Icon: ShieldAlert, color: '#fb923c', audioSrc: '/assets/emotes/unlucky.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'i-feel-nothing', label: 'I feel nothing', Icon: HeartCrack, color: '#f472b6', audioSrc: '/assets/emotes/i-feel-nothing.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'ready-catch-you', label: '准备好了吗，要来抓你咯', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/ready-catch-you.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'absolute-cinema', label: 'Absolute cinema', Icon: MessageCircleHeart, color: '#fb7185', audioSrc: '/assets/emotes/absolute-cinema.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'sigma-moment', label: 'Sigma moment', Icon: Sigma, color: '#f472b6', audioSrc: '/assets/emotes/sigma-moment.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'call-an-ambulance', label: 'Oh, call an ambulance', Icon: Ambulance, color: '#fbbf24', audioSrc: '/assets/emotes/call-an-ambulance.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'ks-ks-chk-pk-a', label: 'Кс-кс-чк-чк-пк-пк-а!', Icon: Flag, color: '#60a5fa', audioSrc: '/assets/emotes/ks-ks-chk-pk-a.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'ay-que-buena-jugada', label: '¡Ay, ay ay! ¡Qué buena jugada', Icon: TrendingUp, color: '#22c55e', audioSrc: '/assets/emotes/ay-que-buena-jugada.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: EMOTE_AUDIO_GAIN },
 ];
 const EMOTE_OPTION_MAP = new Map(EMOTE_OPTIONS.map((option) => [option.id, option]));
 
