@@ -205,6 +205,13 @@ export const communityCards: CardDefinition[] = [
     text: `Перейдіть до Одеси. Якщо проходите Старт, отримайте ${moneyText(200)}.`,
     apply: (state, playerId) => moveTo(state, playerId, 29, true),
   },
+  {
+    id: 12,
+    deck: 'community',
+    title: 'Комунізм',
+    text: 'День Максима Богатого. Розподіліть 25% своїх грошей між іншими гравцями.',
+    apply: (state, playerId) => redistributeMoneyToOpponents(state, playerId, 0.25),
+  },
 ];
 
 const addMoney = (state: GameState, playerId: string, amount: number): GameState => {
@@ -241,6 +248,22 @@ const collectFromEachOpponent = (state: GameState, playerId: string, amount: num
 
 const payEachOpponent = (state: GameState, playerId: string, amount: number): GameState =>
   activeOpponents(state, playerId).reduce((next, opponent) => transferMoney(next, playerId, opponent.id, amount), state);
+
+const redistributeMoneyToOpponents = (state: GameState, playerId: string, percent: number): GameState => {
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  const opponents = activeOpponents(state, playerId);
+  if (!player || opponents.length === 0) return state;
+
+  const total = Math.min(player.money, Math.ceil(Math.max(0, player.money) * percent));
+  if (total <= 0) return state;
+
+  const baseShare = Math.floor(total / opponents.length);
+  const remainder = total % opponents.length;
+  return opponents.reduce(
+    (next, opponent, index) => transferMoney(next, playerId, opponent.id, baseShare + (index < remainder ? 1 : 0)),
+    state,
+  );
+};
 
 const addMoneyForOwnedProperties = (state: GameState, playerId: string, amount: number): GameState => {
   const player = state.players.find((candidate) => candidate.id === playerId);

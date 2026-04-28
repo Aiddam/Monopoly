@@ -17,13 +17,12 @@ export const cityEventDefinitions: CityEventDefinition[] = [
   {
     id: 'tax-crisis',
     title: 'Податкова криза',
-    text: 'Міста, викуп застави та будівлі 2 раунди коштують на 30% дорожче. Оренда не змінюється.',
+    text: 'Міста та будівлі 2 раунди коштують на 30% дорожче. Оренда не змінюється.',
     durationRounds: 2,
     effects: {
       propertyPriceTypes: ['city', 'bank', 'utility'],
       propertyPriceMultiplier: 1.3,
       houseCostMultiplier: 1.3,
-      unmortgageMultiplier: 1.3,
     },
   },
   {

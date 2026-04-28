@@ -170,6 +170,37 @@ export interface ActiveRentService extends RentServiceOffer {
   createdAtTurn: number;
 }
 
+export type LoanKind = 'player' | 'bank';
+
+export interface LoanOffer {
+  id: string;
+  lenderId: string;
+  borrowerId: string;
+  principal: number;
+  totalRepayment: number;
+  durationTurns: number;
+  collateralTileIds: number[];
+  status: 'pending' | 'accepted' | 'declined';
+  createdAtTurn: number;
+}
+
+export interface ActiveLoan {
+  id: string;
+  kind: LoanKind;
+  lenderId?: string;
+  borrowerId: string;
+  principal: number;
+  totalRepayment: number;
+  remainingDue: number;
+  installmentAmount: number;
+  remainingTurns: number;
+  deferredDue?: number;
+  deferredTurns?: number;
+  missedPayments: number;
+  collateralTileIds: number[];
+  createdAtTurn: number;
+}
+
 export interface BankDepositState {
   playerId: string;
   amount: number;
@@ -187,7 +218,6 @@ export interface CityEventEffect {
   propertyPriceTypes?: PropertyKind[];
   houseCostMultiplier?: number;
   houseCostGroups?: string[];
-  unmortgageMultiplier?: number;
   fineMultiplier?: number;
   startAuctionOnUnowned?: boolean;
   auctionMinimumMultiplier?: number;
@@ -239,9 +269,13 @@ export interface PendingPayment {
   amount: number;
   reason: string;
   tileId?: number;
-  source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent' | 'movement';
+  source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent' | 'movement' | 'loan';
   recipients?: Array<{
     playerId: string;
+    amount: number;
+  }>;
+  loanPayments?: Array<{
+    loanId: string;
     amount: number;
   }>;
   afterPayment?: {
@@ -335,6 +369,8 @@ export interface GameState {
   };
   auction?: AuctionState;
   tradeOffers: TradeOffer[];
+  loanOffers: LoanOffer[];
+  loans: ActiveLoan[];
   rentServices: ActiveRentService[];
   rentServiceCooldowns: Record<string, number>;
   bankDeposits: Record<string, BankDepositState>;
@@ -383,6 +419,11 @@ export type GameAction =
   | { type: 'propose_trade'; offer: Omit<TradeOffer, 'id' | 'status'> }
   | { type: 'accept_trade'; playerId: string; offerId: string }
   | { type: 'decline_trade'; playerId: string; offerId: string }
+  | { type: 'propose_loan'; offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> }
+  | { type: 'accept_loan'; playerId: string; offerId: string }
+  | { type: 'decline_loan'; playerId: string; offerId: string }
+  | { type: 'take_bank_loan'; playerId: string; amount: number }
+  | { type: 'miss_loan_payment'; playerId: string }
   | { type: 'pay_rent'; playerId: string }
   | { type: 'use_uno_reverse'; playerId: string }
   | { type: 'pay_payment'; playerId: string }

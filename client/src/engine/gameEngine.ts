@@ -3,6 +3,7 @@ import { chanceCards, communityCards } from '../data/cards';
 import { CITY_EVENT_ROUND_INTERVAL, cityEventDefinitions, getCityEventDefinition } from '../data/cityEvents';
 import type {
   ActiveCityEvent,
+  ActiveLoan,
   ActiveRentService,
   BankDepositState,
   CardDeck,
@@ -13,6 +14,7 @@ import type {
   GameAction,
   GameState,
   LogEntry,
+  LoanOffer,
   MoneyHistoryPoint,
   PendingPayment,
   Player,
@@ -31,6 +33,7 @@ export const PLAYER_TOKENS = ['⚓', '✦', '◆', '●', '▲', '■'];
 export const PLAYER_COLORS = ['#f8c24e', '#43b3ff', '#f0645f', '#3ccf91', '#a78bfa', '#fb923c'];
 const STARTING_MONEY = money(1700);
 const MORTGAGE_GRACE_TURNS = 10;
+const UNMORTGAGE_INTEREST_MULTIPLIER = 1.05;
 const AUCTION_DURATION_MS = 15_000;
 export const AUCTION_BID_INCREMENT = money(10);
 const CASINO_MAX_BET = money(600);
@@ -39,7 +42,7 @@ const CASINO_SPIN_DURATION_MS = 5_400;
 const JAIL_FINE = money(100);
 const JAIL_TURNS = 3;
 const UNO_REVERSE_CARD_ID = 13;
-const UNO_REVERSE_CARD_DECK_COPIES = 6;
+const UNO_REVERSE_CARD_DECK_COPIES = 4;
 const UNO_REVERSE_CARD_LIMIT = 1;
 const STEP_FEE_CITY_EVENT_ID: CityEventId = 'paid-roads';
 const ROAD_REPAIR_CITY_EVENT_ID: CityEventId = 'road-repair';
@@ -47,13 +50,30 @@ const CITY_EVENT_DOUBLE_CHANCE = 0.18;
 const STEP_FEE_SECOND_SINGLE_DIE_CHANCE = 0.65;
 const STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES = 1;
 const RESIDENTIAL_BUILD_LIMIT_PER_ROLL = 2;
+const RESIDENTIAL_HOUSE_COST_MULTIPLIER = 0.45;
 const DISTRICT_RENT_DIVISOR = 2.5;
-const PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR = 4;
+const GREEN_DISTRICT_BUILDING_RENT_DIVISOR = 4;
+const GOLD_DISTRICT_BUILDING_RENT_DIVISOR = 3.5;
 const OLD_TOWN_PASS_THROUGH_DIVISOR = 3.5;
-const PREMIUM_DISTRICT_RENT_GROUPS = new Set(['Зелена', 'Золота']);
+const GREEN_DISTRICT_RENT_GROUPS = new Set(['Зелена']);
+const GOLD_DISTRICT_RENT_GROUPS = new Set(['Золота']);
 const BANK_DEPOSIT_MIN_BANKS = 2;
 const BANK_DEPOSIT_TURN_RATE = 0.1;
 const BANK_RENT_BY_COUNT = [0, money(25), money(50), money(100), money(200)] as const;
+const PLAYER_LOAN_MIN_PRINCIPAL = money(50);
+const PLAYER_LOAN_MAX_PRINCIPAL = money(800);
+const PLAYER_LOAN_MIN_DURATION = 2;
+const PLAYER_LOAN_MAX_DURATION = 10;
+const PLAYER_LOAN_MAX_REPAYMENT_MULTIPLIER = 1.8;
+const PLAYER_LOAN_MAX_ACTIVE_AS_BORROWER = 3;
+const PLAYER_LOAN_MAX_COLLATERAL_MULTIPLIER = 2;
+const BANK_LOAN_MIN_AMOUNT = money(50);
+const BANK_LOAN_MAX_AMOUNT = money(500);
+const BANK_LOAN_WORTH_MULTIPLIER = 0.3;
+const BANK_LOAN_DURATION = 6;
+const BANK_LOAN_REPAYMENT_MULTIPLIER = 1.15;
+const PLAYER_LOAN_LATE_FEE = 0.1;
+const BANK_LOAN_LATE_FEE = 0.2;
 const OLD_TOWN_PASS_THROUGH_MESSAGES: Record<string, string> = {
   pavlohrad: 'Ви проминули старі промислові квартали Павлограда.',
   ternivka: 'Ви пройшли повз тихі вулички Тернівки.',
@@ -136,6 +156,8 @@ export const createInitialGame = (
     activeCityEvents: [],
     districtPaths: {},
     tradeOffers: [],
+    loanOffers: [],
+    loans: [],
     rentServices: [],
     rentServiceCooldowns: {},
     bankDeposits: {},
@@ -228,6 +250,21 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
     case 'decline_trade':
       next = updateTradeStatus(state, action.playerId, action.offerId, 'declined');
       break;
+    case 'propose_loan':
+      next = proposeLoan(state, action.offer);
+      break;
+    case 'accept_loan':
+      next = acceptLoan(state, action.playerId, action.offerId);
+      break;
+    case 'decline_loan':
+      next = updateLoanOfferStatus(state, action.playerId, action.offerId, 'declined');
+      break;
+    case 'take_bank_loan':
+      next = takeBankLoan(state, action.playerId, action.amount);
+      break;
+    case 'miss_loan_payment':
+      next = missLoanPayment(state, action.playerId);
+      break;
     case 'pay_rent':
       next = payRent(state, action.playerId);
       break;
@@ -262,13 +299,13 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       next = state;
   }
 
-  return recordMoneyHistory(state, normalizeBankDeposits(normalizeDistrictPaths(next)));
+  return recordMoneyHistory(state, normalizeLoans(normalizeBankDeposits(normalizeDistrictPaths(next))));
 };
 
 const MONEY_HISTORY_LIMIT = 240;
 
 const createMoneyHistorySnapshot = (
-  state: Pick<GameState, 'players' | 'turn' | 'currentRound' | 'properties'> & Partial<Pick<GameState, 'bankDeposits'>>,
+  state: Pick<GameState, 'players' | 'turn' | 'currentRound' | 'properties'> & Partial<Pick<GameState, 'bankDeposits' | 'loans'>>,
 ): MoneyHistoryPoint => ({
   turn: state.turn,
   round: state.currentRound ?? 1,
@@ -307,7 +344,10 @@ const recordMoneyHistory = (previous: GameState, next: GameState): GameState => 
   return next.moneyHistory === moneyHistory ? next : { ...next, moneyHistory };
 };
 
-const calculatePlayerWorth = (state: Pick<GameState, 'properties'> & Partial<Pick<GameState, 'bankDeposits'>>, player: Player): number =>
+const calculatePlayerWorth = (
+  state: Pick<GameState, 'properties'> & Partial<Pick<GameState, 'bankDeposits' | 'loans'>>,
+  player: Player,
+): number =>
   player.money +
   player.properties.reduce((sum, tileId) => {
     const tile = getTile(tileId);
@@ -316,7 +356,8 @@ const calculatePlayerWorth = (state: Pick<GameState, 'properties'> & Partial<Pic
     const buildingValue = tile.type === 'city' ? property.houses * tile.houseCost : 0;
     return sum + tile.price + buildingValue;
   }, 0) +
-  getBankDepositPayout((state.bankDeposits ?? {})[player.id]);
+  getBankDepositPayout((state.bankDeposits ?? {})[player.id]) +
+  getLoanNetWorth(state.loans ?? [], player.id);
 
 export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 0): number => {
   const ownerId = state.properties[tile.id]?.ownerId;
@@ -360,16 +401,17 @@ export const getDistrictCreationCost = (state: GameState, group: string): number
 };
 
 export const getEffectiveMortgageValue = (state: GameState, tile: PropertyTile): number => {
-  if (tile.type !== 'city') return tile.mortgage;
+  const district = tile.type === 'city' ? getDistrictPath(state, tile.group) : undefined;
+  const baseMortgage =
+    tile.type === 'city'
+      ? tile.mortgage + (district ? getDistrictMortgageShare(state, tile.group, district) : 0)
+      : tile.mortgage;
 
-  const district = getDistrictPath(state, tile.group);
-  if (!district) return tile.mortgage;
-
-  return tile.mortgage + getDistrictMortgageShare(state, tile.group, district);
+  return ceilMoney(baseMortgage * getCityEventPropertyPriceMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
 };
 
 export const getEffectiveUnmortgageCost = (state: GameState, tile: PropertyTile): number =>
-  ceilMoney(getEffectiveMortgageValue(state, tile) * 1.1 * getCityEventUnmortgageMultiplier(state) * getLateGamePriceMultiplier(state.turn));
+  ceilMoney(getEffectiveMortgageValue(state, tile) * UNMORTGAGE_INTEREST_MULTIPLIER);
 
 export const getBankRentForCount = (bankCount: number): number =>
   BANK_RENT_BY_COUNT[Math.min(Math.max(0, Math.floor(bankCount)), BANK_RENT_BY_COUNT.length - 1)] ?? BANK_RENT_BY_COUNT[BANK_RENT_BY_COUNT.length - 1];
@@ -464,17 +506,19 @@ const getDistrictAdjustedCityRent = (state: GameState, tile: CityTile, baseRent:
 };
 
 const getDistrictHouseCostMultiplier = (state: GameState, tile: CityTile): number =>
-  getDistrictPath(state, tile.group)?.path === 'residential' ? 0.5 : 1;
+  getDistrictPath(state, tile.group)?.path === 'residential' ? RESIDENTIAL_HOUSE_COST_MULTIPLIER : 1;
 
 const isDistrictRentReduced = (path: DistrictPath | undefined): boolean => path === 'oldTown' || path === 'residential';
 
-const getDistrictRentDivisor = (tile: CityTile, houses: number): number =>
-  houses > 0 && PREMIUM_DISTRICT_RENT_GROUPS.has(tile.group) ? PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR : DISTRICT_RENT_DIVISOR;
+const getDistrictRentDivisor = (tile: CityTile, houses: number): number => {
+  if (houses <= 0) return DISTRICT_RENT_DIVISOR;
+  if (GOLD_DISTRICT_RENT_GROUPS.has(tile.group)) return GOLD_DISTRICT_BUILDING_RENT_DIVISOR;
+  if (GREEN_DISTRICT_RENT_GROUPS.has(tile.group)) return GREEN_DISTRICT_BUILDING_RENT_DIVISOR;
+  return DISTRICT_RENT_DIVISOR;
+};
 
 const getOldTownPassThroughDivisor = (state: GameState, tile: CityTile): number =>
-  state.properties[tile.id].houses > 0 && PREMIUM_DISTRICT_RENT_GROUPS.has(tile.group)
-    ? PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR
-    : OLD_TOWN_PASS_THROUGH_DIVISOR;
+  state.properties[tile.id].houses > 0 ? getDistrictRentDivisor(tile, state.properties[tile.id].houses) : OLD_TOWN_PASS_THROUGH_DIVISOR;
 
 const districtPathLabel = (path: DistrictPath): string => {
   switch (path) {
@@ -535,12 +579,6 @@ const getCityEventHouseCostMultiplier = (state: GameState, tile: CityTile): numb
     const matchesGroup = !effect.houseCostGroups || effect.houseCostGroups.includes(tile.group);
     return matchesGroup ? multiplier * effect.houseCostMultiplier : multiplier;
   }, 1);
-
-const getCityEventUnmortgageMultiplier = (state: GameState): number =>
-  getActiveCityEventDefinitions(state).reduce(
-    (multiplier, event) => multiplier * (event.effects.unmortgageMultiplier ?? 1),
-    1,
-  );
 
 const getCityEventFineMultiplier = (state: GameState): number =>
   getActiveCityEventDefinitions(state).reduce((multiplier, event) => multiplier * (event.effects.fineMultiplier ?? 1), 1);
@@ -1437,6 +1475,7 @@ const buildOnCity = (state: GameState, playerId: string, tileId: number): GameSt
   if (player.jailTurns > 0) throw new Error('Гравець у вʼязниці не може будувати.');
   if (isBuildingBlockedByCityEvent(state)) throw new Error('Будівництво заборонене через подію міста.');
   if (property.ownerId !== playerId) throw new Error('Місто належить іншому гравцю.');
+  if (isLoanCollateral(state, tileId)) throw new Error('Майно в заставі кредиту не можна змінювати.');
   if (!ownsFullGroup(state, playerId, tile.group)) throw new Error('Потрібна монополія групи.');
   const district = getDistrictPath(state, tile.group);
   if (!district || district.ownerId !== playerId) throw new Error('Спочатку створіть район для цієї групи.');
@@ -1535,6 +1574,7 @@ const mortgageProperty = (state: GameState, playerId: string, tileId: number): G
   if (property.ownerId !== playerId) throw new Error('Майно належить іншому гравцю.');
   if (property.houses > 0) throw new Error('Спочатку продайте будинки.');
   if (property.mortgaged) throw new Error('Майно вже заставлене.');
+  if (isLoanCollateral(state, tileId)) throw new Error('Майно в заставі кредиту не можна заставити.');
   const mortgageValue = getEffectiveMortgageValue(state, tile);
   return {
     ...state,
@@ -1676,6 +1716,7 @@ const validateTradeProperties = (state: GameState, tileIds: number[], ownerId: s
     const property = state.properties[tileId];
     if (property.ownerId !== ownerId) throw new Error('Майно належить іншому гравцю.');
     if (property.houses > 0) throw new Error('Майно з будинками не можна додати до угоди.');
+    if (isLoanCollateral(state, tileId)) throw new Error('Майно в заставі кредиту не можна додати до угоди.');
   });
 };
 
@@ -1812,6 +1853,302 @@ const updateTradeStatus = (
 
 const getTradeResolutionPhase = (state: GameState): GameState['phase'] => (state.phase === 'trade' ? 'manage' : state.phase);
 
+const proposeLoan = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'>): GameState => {
+  if (state.currentPlayerId !== offer.lenderId) throw new Error('Кредит може запропонувати тільки гравець, який зараз ходить.');
+  if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(state.phase)) throw new Error('Зараз не можна створити кредит.');
+  const normalized = normalizeLoanOffer(offer);
+  validateLoanOffer(state, normalized);
+  const lender = getPlayer(state, normalized.lenderId);
+  const borrower = getPlayer(state, normalized.borrowerId);
+
+  return {
+    ...state,
+    loanOffers: [
+      ...(state.loanOffers ?? []),
+      { ...normalized, id: crypto.randomUUID(), status: 'pending', createdAtTurn: state.turn },
+    ],
+    log: appendLog(
+      state,
+      `${lender.name} пропонує кредит ${borrower.name}: ${normalized.principal}₴, повернення ${normalized.totalRepayment}₴ за ${normalized.durationTurns} ходів.`,
+    ),
+  };
+};
+
+const acceptLoan = (state: GameState, playerId: string, offerId: string): GameState => {
+  const offer = (state.loanOffers ?? []).find((candidate) => candidate.id === offerId);
+  if (!offer || offer.status !== 'pending') throw new Error('Кредитна пропозиція не активна.');
+  if (offer.borrowerId !== playerId) throw new Error('Прийняти кредит може тільки позичальник.');
+  const normalized = normalizeLoanOffer(offer);
+  validateLoanOffer(state, normalized);
+
+  const lender = getPlayer(state, offer.lenderId);
+  const borrower = getPlayer(state, offer.borrowerId);
+  const loan = createActiveLoanFromOffer(state, normalized);
+  return {
+    ...transfer(state, offer.lenderId, offer.borrowerId, offer.principal),
+    loanOffers: (state.loanOffers ?? []).map((candidate) =>
+      candidate.id === offerId ? { ...candidate, status: 'accepted' } : candidate,
+    ),
+    loans: [...(state.loans ?? []), loan],
+    log: appendLog(
+      state,
+      `${borrower.name} приймає кредит від ${lender.name}: ${offer.principal}₴, повернення ${offer.totalRepayment}₴.`,
+      'good',
+    ),
+  };
+};
+
+const updateLoanOfferStatus = (
+  state: GameState,
+  playerId: string,
+  offerId: string,
+  status: LoanOffer['status'],
+): GameState => {
+  const offer = (state.loanOffers ?? []).find((candidate) => candidate.id === offerId);
+  if (!offer || offer.status !== 'pending') throw new Error('Кредитна пропозиція не активна.');
+  if (offer.borrowerId !== playerId && offer.lenderId !== playerId) throw new Error('Немає прав змінити кредитну пропозицію.');
+  const actor = getPlayer(state, playerId);
+  return {
+    ...state,
+    loanOffers: (state.loanOffers ?? []).map((candidate) => (candidate.id === offerId ? { ...candidate, status } : candidate)),
+    log: appendLog(state, `${actor.name} відхиляє кредитну пропозицію.`),
+  };
+};
+
+const takeBankLoan = (state: GameState, playerId: string, amount: number): GameState => {
+  assertLoanManagementPhase(state, playerId);
+  const player = getPlayer(state, playerId);
+  if (player.isBankrupt) throw new Error('Банкрут не може взяти кредит.');
+  if ((state.loans ?? []).some((loan) => loan.kind === 'bank' && loan.borrowerId === playerId)) {
+    throw new Error('У гравця вже є активний банківський кредит.');
+  }
+  const principal = normalizeMoney(amount);
+  if (principal < BANK_LOAN_MIN_AMOUNT || principal > BANK_LOAN_MAX_AMOUNT) {
+    throw new Error(`Банківський кредит має бути від ${BANK_LOAN_MIN_AMOUNT}₴ до ${BANK_LOAN_MAX_AMOUNT}₴.`);
+  }
+  const cap = getBankLoanLimit(state, playerId);
+  if (principal > cap) throw new Error(`Банк може видати максимум ${cap}₴ цьому гравцю.`);
+  const totalRepayment = ceilMoney(principal * BANK_LOAN_REPAYMENT_MULTIPLIER);
+  const loan: ActiveLoan = {
+    id: crypto.randomUUID(),
+    kind: 'bank',
+    borrowerId: playerId,
+    principal,
+    totalRepayment,
+    remainingDue: totalRepayment,
+    installmentAmount: ceilMoney(totalRepayment / BANK_LOAN_DURATION),
+    remainingTurns: BANK_LOAN_DURATION,
+    deferredDue: 0,
+    deferredTurns: 0,
+    missedPayments: 0,
+    collateralTileIds: [],
+    createdAtTurn: state.turn,
+  };
+
+  return {
+    ...state,
+    loans: [...(state.loans ?? []), loan],
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, money: candidate.money + principal } : candidate,
+    ),
+    log: appendLog(state, `${player.name} бере кредит у банку ${principal}₴. Повернути треба ${totalRepayment}₴.`, 'good'),
+  };
+};
+
+const normalizeLoanOffer = (
+  offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> | LoanOffer,
+): Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> => ({
+  lenderId: offer.lenderId,
+  borrowerId: offer.borrowerId,
+  principal: normalizeMoney(offer.principal),
+  totalRepayment: normalizeMoney(offer.totalRepayment),
+  durationTurns: Math.floor(offer.durationTurns),
+  collateralTileIds: normalizePropertyIds(offer.collateralTileIds ?? []),
+});
+
+const validateLoanOffer = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> | LoanOffer) => {
+  const lender = getPlayer(state, offer.lenderId);
+  const borrower = getPlayer(state, offer.borrowerId);
+  if (lender.id === borrower.id) throw new Error('Не можна видати кредит самому собі.');
+  if (lender.isBankrupt || borrower.isBankrupt) throw new Error('Кредити доступні тільки активним гравцям.');
+  if (offer.principal < PLAYER_LOAN_MIN_PRINCIPAL || offer.principal > PLAYER_LOAN_MAX_PRINCIPAL) {
+    throw new Error(`Кредит між гравцями має бути від ${PLAYER_LOAN_MIN_PRINCIPAL}₴ до ${PLAYER_LOAN_MAX_PRINCIPAL}₴.`);
+  }
+  if (offer.durationTurns < PLAYER_LOAN_MIN_DURATION || offer.durationTurns > PLAYER_LOAN_MAX_DURATION) {
+    throw new Error(`Строк кредиту має бути від ${PLAYER_LOAN_MIN_DURATION} до ${PLAYER_LOAN_MAX_DURATION} ходів.`);
+  }
+  if (offer.totalRepayment < offer.principal || offer.totalRepayment > Math.floor(offer.principal * PLAYER_LOAN_MAX_REPAYMENT_MULTIPLIER)) {
+    throw new Error('Повернення має бути від 100% до 180% суми кредиту.');
+  }
+  if (lender.money < offer.principal) throw new Error('Кредитору не вистачає грошей.');
+  const activeBorrowedLoans = (state.loans ?? []).filter((loan) => loan.kind === 'player' && loan.borrowerId === borrower.id);
+  if (activeBorrowedLoans.length >= PLAYER_LOAN_MAX_ACTIVE_AS_BORROWER) {
+    throw new Error(`Позичальник уже має ${PLAYER_LOAN_MAX_ACTIVE_AS_BORROWER} активні кредити від гравців.`);
+  }
+  validateLoanCollateral(state, borrower.id, offer.collateralTileIds ?? [], offer.totalRepayment);
+};
+
+const validateLoanCollateral = (state: GameState, borrowerId: string, tileIds: number[], totalRepayment: number) => {
+  validateUniqueTradeProperties(tileIds);
+  const lockedCollateral = getCollateralTileIdSet(state);
+  const collateralValue = tileIds.reduce((sum, tileId) => {
+    const tile = getTile(tileId);
+    if (!isPropertyTile(tile)) throw new Error('Заставою може бути тільки майно.');
+    const property = state.properties[tileId];
+    if (property.ownerId !== borrowerId) throw new Error('Застава має належати позичальнику.');
+    if (property.mortgaged) throw new Error('Заставлене майно не можна додати як заставу кредиту.');
+    if (tile.type === 'city' && property.houses > 0) throw new Error('Місто з будинками не можна додати як заставу кредиту.');
+    if (lockedCollateral.has(tileId)) throw new Error('Це майно вже використано як застава кредиту.');
+    return sum + getEffectiveMortgageValue(state, tile);
+  }, 0);
+  if (collateralValue > Math.floor(totalRepayment * PLAYER_LOAN_MAX_COLLATERAL_MULTIPLIER)) {
+    throw new Error('Застава занадто велика для цього кредиту.');
+  }
+};
+
+const createActiveLoanFromOffer = (
+  state: GameState,
+  offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'>,
+): ActiveLoan => ({
+  id: crypto.randomUUID(),
+  kind: 'player',
+  lenderId: offer.lenderId,
+  borrowerId: offer.borrowerId,
+  principal: offer.principal,
+  totalRepayment: offer.totalRepayment,
+  remainingDue: offer.totalRepayment,
+  installmentAmount: ceilMoney(offer.totalRepayment / offer.durationTurns),
+  remainingTurns: offer.durationTurns,
+  deferredDue: 0,
+  deferredTurns: 0,
+  missedPayments: 0,
+  collateralTileIds: offer.collateralTileIds,
+  createdAtTurn: state.turn,
+});
+
+export const getBankLoanLimit = (state: GameState, playerId: string): number => {
+  const player = getPlayer(state, playerId);
+  if (player.isBankrupt) return 0;
+  return Math.min(BANK_LOAN_MAX_AMOUNT, Math.floor(Math.max(0, calculatePlayerWorth(state, player)) * BANK_LOAN_WORTH_MULTIPLIER));
+};
+
+const createLoanPaymentIfDue = (state: GameState, playerId: string): GameState => {
+  if (state.phase !== 'rolling') return state;
+  const dueLoans = (state.loans ?? []).filter((loan) => loan.borrowerId === playerId);
+  if (dueLoans.length === 0) return state;
+  const loanPayments = dueLoans.map((loan) => ({ loanId: loan.id, amount: getLoanInstallmentDue(loan) })).filter((payment) => payment.amount > 0);
+  if (loanPayments.length === 0) return state;
+  const total = loanPayments.reduce((sum, payment) => sum + payment.amount, 0);
+  const recipients = loanPayments.flatMap((payment) => {
+    const loan = dueLoans.find((candidate) => candidate.id === payment.loanId);
+    return loan?.kind === 'player' && loan.lenderId ? [{ playerId: loan.lenderId, amount: payment.amount }] : [];
+  });
+
+  return createPendingPayment(state, {
+    payerId: playerId,
+    amount: total,
+    reason: 'виплата за кредитом',
+    source: 'loan',
+    recipients: mergeRecipients(recipients),
+    loanPayments,
+  });
+};
+
+const getLoanInstallmentDue = (loan: ActiveLoan): number => {
+  if (loan.remainingDue <= 0) return 0;
+  const deferredDue = loan.deferredDue ?? 0;
+  const scheduledDebt = Math.max(0, loan.remainingDue - deferredDue);
+  const scheduledDue = loan.remainingTurns <= 1 ? scheduledDebt : Math.min(scheduledDebt, loan.installmentAmount);
+  return Math.min(loan.remainingDue, deferredDue + scheduledDue);
+};
+
+const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: NonNullable<GameState['pendingPayment']>): GameState => {
+  const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
+  const paidLoans = new Map((payment.loanPayments ?? []).map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
+  const remainingLoans = (state.loans ?? [])
+    .map((loan) => {
+      const paid = paidLoans.get(loan.id) ?? 0;
+      if (paid <= 0) return loan;
+      const remainingDue = Math.max(0, loan.remainingDue - paid);
+      return {
+        ...loan,
+        remainingDue,
+        remainingTurns: Math.max(0, loan.remainingTurns - 1 - (loan.deferredTurns ?? 0)),
+        deferredDue: 0,
+        deferredTurns: 0,
+      };
+    })
+    .filter((loan) => loan.remainingDue > 0);
+
+  return {
+    ...state,
+    phase: 'turnEnd',
+    pendingPayment: undefined,
+    loans: remainingLoans,
+    players: state.players.map((player) => {
+      if (player.id === playerId) return { ...player, money: player.money - payment.amount };
+      const received = recipientAmounts.get(player.id) ?? 0;
+      return received > 0 ? { ...player, money: player.money + received } : player;
+    }),
+    log: appendLog(state, `${getPlayer(state, playerId).name} сплачує ${payment.amount}₴ за кредитом.`, 'bad'),
+  };
+};
+
+const missLoanPayment = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  const payment = state.pendingPayment;
+  if (state.phase !== 'payment' || payment?.source !== 'loan' || payment.payerId !== playerId || !payment.loanPayments?.length) {
+    throw new Error('Зараз немає кредитного платежу до пропуску.');
+  }
+  const dueById = new Map(payment.loanPayments.map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
+  const blockingLoan = (state.loans ?? []).find((loan) => dueById.has(loan.id) && loan.missedPayments > 0 && !canCollateralDefault(loan));
+  if (blockingLoan) throw new Error('Цей кредит уже прострочено. Треба сплатити або здатися.');
+
+  let next: GameState = { ...state, pendingPayment: undefined, phase: 'turnEnd' };
+  const defaultedLoanIds = new Set<string>();
+  const updatedLoans = (state.loans ?? []).map((loan) => {
+    const missedAmount = dueById.get(loan.id);
+    if (!missedAmount) return loan;
+    if (loan.missedPayments > 0 && canCollateralDefault(loan)) {
+      defaultedLoanIds.add(loan.id);
+      next = transferCollateralToLender(next, loan);
+      return loan;
+    }
+    const lateFee = ceilMoney(missedAmount * (loan.kind === 'bank' ? BANK_LOAN_LATE_FEE : PLAYER_LOAN_LATE_FEE));
+    return {
+      ...loan,
+      missedPayments: loan.missedPayments + 1,
+      remainingDue: loan.remainingDue + lateFee,
+      deferredDue: (loan.deferredDue ?? 0) + missedAmount + lateFee,
+      deferredTurns: (loan.deferredTurns ?? 0) + 1,
+    };
+  });
+
+  next = {
+    ...next,
+    loans: updatedLoans.filter((loan) => !defaultedLoanIds.has(loan.id)),
+    log: appendLog(
+      next,
+      defaultedLoanIds.size > 0
+        ? `${getPlayer(state, playerId).name} не сплачує кредит. Застава переходить кредитору.`
+        : `${getPlayer(state, playerId).name} пропускає виплату за кредитом. Наступна виплата стане дорожчою.`,
+      'bad',
+    ),
+  };
+
+  return endTurn(next, playerId);
+};
+
+const canCollateralDefault = (loan: ActiveLoan): boolean =>
+  loan.kind === 'player' && Boolean(loan.lenderId) && loan.collateralTileIds.length > 0;
+
+const transferCollateralToLender = (state: GameState, loan: ActiveLoan): GameState => {
+  if (!loan.lenderId || loan.collateralTileIds.length === 0) return state;
+  const lender = state.players.find((player) => player.id === loan.lenderId && !player.isBankrupt);
+  if (!lender) return state;
+  return moveProperties(state, loan.borrowerId, loan.lenderId, loan.collateralTileIds);
+};
+
 const payRent = (state: GameState, playerId: string): GameState => {
   assertCurrent(state, playerId);
   const pendingRent = state.pendingRent;
@@ -1897,6 +2234,10 @@ const payPendingPayment = (state: GameState, playerId: string): GameState => {
   const payment = state.pendingPayment;
   const payer = getPlayer(state, playerId);
   if (payer.money < payment.amount) throw new Error('Недостатньо грошей для сплати.');
+
+  if (payment.source === 'loan' && payment.loanPayments?.length) {
+    return payLoanInstallmentPayment(state, playerId, payment);
+  }
 
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
   const paid: GameState = {
@@ -1989,7 +2330,8 @@ const endTurn = (state: GameState, playerId: string): GameState => {
     log: appendLog(stateAfterCityEventTicks, `Хід переходить до ${nextPlayer.name}.`),
   };
 
-  return startsNewRound && shouldDrawCityEvent(nextRound) ? drawCityEvent(next) : next;
+  const stateAfterRoundStart = startsNewRound && shouldDrawCityEvent(nextRound) ? drawCityEvent(next) : next;
+  return createLoanPaymentIfDue(stateAfterRoundStart, nextPlayer.id);
 };
 
 const shouldDrawCityEvent = (round: number): boolean => round > 1 && (round - 1) % CITY_EVENT_ROUND_INTERVAL === 0;
@@ -2312,6 +2654,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const isPendingPaymentPayer = state.pendingPayment?.payerId === playerId;
   const pendingPayment = isPendingPaymentPayer ? state.pendingPayment : undefined;
   const pendingBankDeposit = state.pendingBankDeposit?.playerId === playerId ? state.pendingBankDeposit : undefined;
+  const collateralTransfers = getBankruptcyCollateralTransfers(state, playerId);
   const creditorPayments = distributeCreditorPayments(
     debtor.money,
     pendingRent ? [{ playerId: pendingRent.ownerId, amount: pendingRent.amount }] : pendingPayment?.recipients ?? [],
@@ -2322,7 +2665,12 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     players: state.players.map((player) => {
       if (player.id === playerId) return { ...player, isBankrupt: true, properties: [], money: 0 };
       const received = creditorPayments.get(player.id) ?? 0;
-      if (received > 0) return { ...player, money: player.money + received };
+      const collateralTileIds = collateralTransfers
+        .filter((transfer) => transfer.lenderId === player.id)
+        .map((transfer) => transfer.tileId);
+      if (received > 0 || collateralTileIds.length > 0) {
+        return { ...player, money: player.money + received, properties: Array.from(new Set([...player.properties, ...collateralTileIds])) };
+      }
       return player;
     }),
     properties: Object.fromEntries(
@@ -2334,7 +2682,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
               mortgaged: false,
               mortgagedAtTurn: undefined,
               mortgageTurnsLeft: undefined,
-              ownerId: undefined,
+              ownerId: collateralTransfers.find((transfer) => transfer.tileId === Number(tileId))?.lenderId,
             }
           : property,
       ]),
@@ -2349,6 +2697,10 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     tradeOffers: state.tradeOffers.filter(
       (offer) => offer.fromPlayerId !== playerId && offer.toPlayerId !== playerId,
     ),
+    loanOffers: (state.loanOffers ?? []).filter(
+      (offer) => offer.lenderId !== playerId && offer.borrowerId !== playerId,
+    ),
+    loans: (state.loans ?? []).filter((loan) => loan.lenderId !== playerId && loan.borrowerId !== playerId),
     log: appendLog(state, `${debtor.name} оголошує банкрутство.`, 'bad'),
   };
   const survivors = next.players.filter((player) => !player.isBankrupt);
@@ -2661,6 +3013,40 @@ const moveProperties = (state: GameState, fromId: string, toId: string, tileIds:
   }),
 });
 
+const mergeRecipients = (recipients: Array<{ playerId: string; amount: number }>): Array<{ playerId: string; amount: number }> => {
+  const amounts = new Map<string, number>();
+  recipients.forEach((recipient) => {
+    if (recipient.amount <= 0) return;
+    amounts.set(recipient.playerId, (amounts.get(recipient.playerId) ?? 0) + recipient.amount);
+  });
+  return [...amounts.entries()].map(([playerId, amount]) => ({ playerId, amount }));
+};
+
+const getCollateralTileIdSet = (state: Pick<GameState, 'loans'> | Partial<Pick<GameState, 'loans'>>): Set<number> =>
+  new Set((state.loans ?? []).flatMap((loan) => loan.collateralTileIds ?? []));
+
+const isLoanCollateral = (state: Pick<GameState, 'loans'> | Partial<Pick<GameState, 'loans'>>, tileId: number): boolean =>
+  getCollateralTileIdSet(state).has(tileId);
+
+const getBankruptcyCollateralTransfers = (state: GameState, borrowerId: string): Array<{ tileId: number; lenderId: string }> =>
+  (state.loans ?? [])
+    .filter((loan) => loan.kind === 'player' && loan.borrowerId === borrowerId && loan.lenderId && loan.collateralTileIds.length > 0)
+    .flatMap((loan) => {
+      const lenderId = loan.lenderId!;
+      const lender = state.players.find((player) => player.id === lenderId && !player.isBankrupt);
+      if (!lender) return [];
+      return loan.collateralTileIds
+        .filter((tileId) => state.properties[tileId]?.ownerId === borrowerId)
+        .map((tileId) => ({ tileId, lenderId }));
+    });
+
+const getLoanNetWorth = (loans: ActiveLoan[], playerId: string): number =>
+  loans.reduce((sum, loan) => {
+    if (loan.borrowerId === playerId) return sum - loan.remainingDue;
+    if (loan.kind === 'player' && loan.lenderId === playerId) return sum + loan.remainingDue;
+    return sum;
+  }, 0);
+
 const normalizeDistrictPaths = (state: GameState): GameState => {
   const currentDistricts = state.districtPaths ?? {};
   const normalizedEntries = Object.entries(currentDistricts).filter(
@@ -2678,6 +3064,23 @@ const normalizeBankDeposits = (state: GameState): GameState => {
   );
   if (normalizedEntries.length === Object.keys(currentDeposits).length && state.bankDeposits) return state;
   return { ...state, bankDeposits: Object.fromEntries(normalizedEntries) };
+};
+
+const normalizeLoans = (state: GameState): GameState => {
+  const loans = state.loans ?? [];
+  const offers = state.loanOffers ?? [];
+  const activePlayerIds = new Set(state.players.filter((player) => !player.isBankrupt).map((player) => player.id));
+  const normalizedLoans = loans.filter(
+    (loan) =>
+      loan.remainingDue > 0 &&
+      activePlayerIds.has(loan.borrowerId) &&
+      (loan.kind === 'bank' || (loan.lenderId !== undefined && activePlayerIds.has(loan.lenderId))),
+  );
+  const normalizedOffers = offers.filter(
+    (offer) => activePlayerIds.has(offer.borrowerId) && activePlayerIds.has(offer.lenderId),
+  );
+  if (normalizedLoans.length === loans.length && normalizedOffers.length === offers.length && state.loans && state.loanOffers) return state;
+  return { ...state, loans: normalizedLoans, loanOffers: normalizedOffers };
 };
 
 const ownsFullGroup = (state: GameState, playerId: string, group: string): boolean =>
@@ -2716,6 +3119,18 @@ const assertEmergencyMoneyManagementPhase = (state: GameState, playerId: string,
 
   if (state.phase !== 'rolling' && !isPurchaseDecision && !isRentDecision && !isPaymentDecision && !isBankDepositDecision) {
     throw new Error(message);
+  }
+};
+
+const assertLoanManagementPhase = (state: GameState, playerId: string) => {
+  assertCurrent(state, playerId);
+  const isEmergencyDecision =
+    (state.phase === 'payment' && state.pendingPayment?.payerId === playerId) ||
+    (state.phase === 'rent' && state.pendingRent?.payerId === playerId) ||
+    state.phase === 'awaitingPurchase' ||
+    (state.phase === 'bankDeposit' && state.pendingBankDeposit?.playerId === playerId);
+  if (!['rolling', 'manage', 'trade', 'turnEnd'].includes(state.phase) && !isEmergencyDecision) {
+    throw new Error('Кредит можна взяти лише під час свого ходу або фінансового рішення.');
   }
 };
 

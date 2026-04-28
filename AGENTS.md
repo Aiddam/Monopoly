@@ -64,7 +64,7 @@ This is the single source of truth for game rules. Main exported API:
 
 - `createInitialGame(...)` - creates the initial `GameState`.
 - `reduceGame(state, action)` - the only reducer for gameplay actions.
-- `calculateRent(...)`, `getEffectivePropertyPrice(...)`, `getEffectiveHouseCost(...)`, `getEffectiveBuildingRefund(...)`, `getEffectiveMortgageValue(...)`, `getEffectiveUnmortgageCost(...)`, `getEffectiveFineAmount(...)` - UI should use these helpers instead of duplicating formulas.
+- `calculateRent(...)`, `getEffectivePropertyPrice(...)`, `getEffectiveHouseCost(...)`, `getEffectiveBuildingRefund(...)`, `getEffectiveMortgageValue(...)`, `getEffectiveUnmortgageCost(...)`, `getEffectiveFineAmount(...)`, `getBankLoanLimit(...)` - UI should use these helpers instead of duplicating formulas.
 
 Types live in `client/src/engine/types.ts`.
 
@@ -86,6 +86,7 @@ Important pending fields in `GameState`:
 - `pendingPurchaseTileId` - player must buy or decline a property.
 - `pendingRent` - player must pay rent, including optional UNO Reverse context.
 - `pendingPayment` - taxes, cards, casino, bank, and city-event payments.
+- loan installments also use `pendingPayment` with `source: 'loan'` and `loanPayments`.
 - `pendingBankDeposit` - player landed on their own bank and must confirm or skip starting a deposit.
 - `pendingCasino` - casino roulette flow.
 - `pendingJail` - jail decision.
@@ -93,6 +94,7 @@ Important pending fields in `GameState`:
 - `pendingCard` - card was drawn and is being shown.
 - `pendingCityEvent` - city event reveal/banner state.
 - `districtPaths` - permanent path choices for completed city color groups.
+- `loans` / `loanOffers` - active credits and pending player-to-player credit contracts.
 
 ## Board Mechanics
 
@@ -115,6 +117,7 @@ Engine:
 - District creation: `createDistrictPath`.
 - Buildings: `buildOnCity`, `sellBuilding`.
 - Mortgage/unmortgage: `mortgageProperty`, `unmortgageProperty`.
+- Credits: `proposeLoan`, `acceptLoan`, `takeBankLoan`, `missLoanPayment`.
 - Bankruptcy/surrender: `declareBankruptcy`.
 - Bank deposits: `startBankDeposit`, `getBankDepositInfo`, `getBankDepositPayout`.
 
@@ -150,6 +153,29 @@ UI:
 - Bank deposit status and the deposit button live in `SimpleAssetCard` and `ServicePropertyModal`.
 - The drawer bonus card shows the current projected payout for an active deposit.
 
+## Credits
+
+Credits are an engine-owned debt mechanic.
+
+Engine:
+
+- State lives in `GameState.loans` and `GameState.loanOffers`.
+- Types: `LoanOffer`, `ActiveLoan`, and `LoanKind` in `client/src/engine/types.ts`.
+- Actions: `propose_loan`, `accept_loan`, `decline_loan`, `take_bank_loan`, and `miss_loan_payment`.
+- Player-to-player loan offers are custom contracts: `50-800₴`, `2-10` borrower turns, total repayment from `100%` to `180%`, optional collateral.
+- A borrower may have up to 3 active player loans.
+- Collateral must be borrower-owned, unmortgaged, without buildings, and unused by another active loan. Collateral cannot be traded, mortgaged, or built on while locked.
+- Bank loans are available during the player turn or financial decisions, at most 1 active bank loan per borrower, up to `500₴` and capped by `30%` of player worth. They last 6 borrower turns and repay `115%`.
+- Loan installments are created as `pendingPayment.source === 'loan'` when the borrower’s own turn starts, before rolling.
+- Missing a first loan payment adds a late fee and carries the missed amount into the next installment. Player loans use a 10% late fee; bank loans use 20%.
+- A second miss on a collateralized player loan transfers the collateral to the lender and closes the loan. A second miss on unsecured or bank loans is mandatory pay-or-surrender.
+- Borrower bankruptcy transfers collateralized player-loan collateral before remaining borrower property returns to the bank. Other borrower debts clear. Lender bankruptcy cancels outgoing player loans.
+
+UI:
+
+- Credit management lives in the workspace drawer `Кредити` tab in `GameScreen.tsx`.
+- Loan due payments reuse `PaymentDecisionPanel`; only loan payments show the `Пропустити` action.
+
 ## District Paths
 
 District Paths are permanent route choices for completed city color groups.
@@ -173,16 +199,16 @@ Engine rules:
 Path behavior:
 
 - `tourist`: existing rent, build, and sale behavior.
-- `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.5`). For building/hotel rent in premium groups (`Зелена`, `Золота`), use `PREMIUM_DISTRICT_BUILDING_RENT_DIVISOR` (`4`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the premium divisor when the crossed premium city has buildings.
-- `residential`: house cost is halved before city-event and late-game multipliers, city rent follows the same district rent divisors as Old Town, and the owner may build exactly up to 2 times in that district per dice roll.
+- `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.5`). For building/hotel rent in the green group, use `GREEN_DISTRICT_BUILDING_RENT_DIVISOR` (`4`); for the gold Kyiv/Lviv group, use `GOLD_DISTRICT_BUILDING_RENT_DIVISOR` (`3.5`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the same group-specific building divisor when the crossed green/gold city has buildings.
+- `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent follows the same district rent divisors as Old Town, and the owner may build exactly up to 2 times in that district per dice roll.
 - Any created district increases city mortgage value by that city's share of half the district creation cost. Do not reduce mortgage value by the district rent divisor.
 
 Money helpers:
 
 - Use `getEffectiveHouseCost` for build cost.
 - Use `getEffectiveBuildingRefund` for sell-building refunds; Residential affects this.
-- Use `getEffectiveMortgageValue` for mortgage cash and UI labels; district creation value is included for cities in any created district.
-- Use `getEffectiveUnmortgageCost` for buyback cost; it is based on the effective mortgage value.
+- Use `getEffectiveMortgageValue` for mortgage cash and UI labels; district creation value, city-event property price modifiers, and late-game price multipliers are included.
+- Use `getEffectiveUnmortgageCost` for buyback cost; it is only the effective mortgage value with `UNMORTGAGE_INTEREST_MULTIPLIER` (`1.05`) and should not apply extra late-game or city-event multipliers again.
 - Do not use raw `tile.houseCost` or `tile.mortgage` in UI or engine actions when a district can affect the value.
 
 UI:
@@ -231,8 +257,8 @@ Rules:
 
 - A player can hold at most 1 UNO Reverse card.
 - After using it, the card is consumed and the player can draw one again later.
-- The starting Chance deck has 6 UNO Reverse copies.
-- After UNO Reverse is drawn, it does not go into discard and cannot be recycled, so it can appear at most 6 times per game.
+- The starting Chance deck has 4 UNO Reverse copies, matching a normal Chance card.
+- After UNO Reverse is drawn, it does not go into discard and cannot be recycled, so it can appear at most 4 times per game.
 - UNO Reverse works only during a rent decision against another player.
 - When the rent payer uses UNO Reverse, payer/owner are swapped for that decision.
 - If the new payer also has UNO Reverse, they can reverse it again.

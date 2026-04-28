@@ -4,6 +4,7 @@ import {
   createInitialGame,
   diceRotationForValue,
   getBankDepositInfo,
+  getBankLoanLimit,
   getDistrictCreationCost,
   getEffectiveBuildingRefund,
   getEffectiveFineAmount,
@@ -514,6 +515,40 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1650));
   });
 
+  it('redistributes 25 percent of player money for the Communism community card', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'community-communism');
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'community', tileId: 2 },
+      communityDeck: [12],
+      discardCommunity: [],
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, money: money(1000) } : player)),
+    };
+
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.pendingCard?.title).toBe('Комунізм');
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({
+      payerId: 'p1',
+      amount: money(250),
+      source: 'card',
+      recipients: [
+        { playerId: 'p2', amount: money(125) },
+        { playerId: 'p3', amount: money(125) },
+      ],
+    });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1000));
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p1' });
+
+    expect(game.phase).toBe('turnEnd');
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(750));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1825));
+    expect(game.players.find((player) => player.id === 'p3')?.money).toBe(money(1825));
+  });
+
   it('makes surrendered properties neutral and pays rent creditor from available cash', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'rent-surrender');
     game = withOwnership(game, 'p1', [3]);
@@ -968,7 +1003,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.phase).toBe('turnEnd');
   });
 
-  it('keeps travel chance cards rare and boosts UNO Reverse in the weighted deck', () => {
+  it('keeps travel chance cards rare and treats UNO Reverse as a normal weighted card', () => {
     const game = createInitialGame(['Olena', 'Taras'], 'rare-card-weight');
     const kyivCards = game.chanceDeck.filter((cardId) => cardId === 1);
     const lvivCards = game.chanceDeck.filter((cardId) => cardId === 10);
@@ -977,7 +1012,7 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(kyivCards).toHaveLength(1);
     expect(lvivCards).toHaveLength(1);
-    expect(unoReverseCards).toHaveLength(6);
+    expect(unoReverseCards).toHaveLength(4);
     expect(commonCards).toHaveLength(4);
   });
 
@@ -1139,10 +1174,12 @@ describe('Ukraine Monopoly engine', () => {
     expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(50));
   });
 
-  it('reduces Old Town district rent and applies stronger building rent reduction on green and gold groups', () => {
+  it('reduces district rent and raises gold building rent for Old Town and Residential paths', () => {
     const lviv = getTile(37);
+    const kyiv = getTile(39);
     const chernivtsi = getTile(34);
     if (lviv.type !== 'city') throw new Error('Expected Lviv to be a city.');
+    if (kyiv.type !== 'city') throw new Error('Expected Kyiv to be a city.');
     if (chernivtsi.type !== 'city') throw new Error('Expected Chernivtsi to be a city.');
     let game = createInitialGame(['Olena', 'Taras'], 'district-old-town-rent');
     game = withOwnership(game, 'p1', [37, 39]);
@@ -1158,7 +1195,20 @@ describe('Ukraine Monopoly engine', () => {
       },
     };
 
-    expect(calculateRent(game, lviv)).toBe(money(44));
+    expect(calculateRent(game, lviv)).toBe(money(50));
+
+    let residentialGoldGame = createInitialGame(['Olena', 'Taras'], 'district-residential-gold-rent');
+    residentialGoldGame = withOwnership(residentialGoldGame, 'p1', [37, 39]);
+    residentialGoldGame = withDistrict(residentialGoldGame, 'p1', 37, 'residential');
+    residentialGoldGame = {
+      ...residentialGoldGame,
+      properties: {
+        ...residentialGoldGame.properties,
+        39: { ...residentialGoldGame.properties[39], houses: 1 },
+      },
+    };
+
+    expect(calculateRent(residentialGoldGame, kyiv)).toBe(money(58));
 
     let greenGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-green-rent');
     greenGame = withOwnership(greenGame, 'p1', [31, 32, 34]);
@@ -1227,9 +1277,9 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(builtTollGame.pendingPayment).toMatchObject({
       payerId: 'p1',
-      amount: money(11),
-      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 11₴',
-      recipients: [{ playerId: 'p2', amount: money(11) }],
+      amount: money(15),
+      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 15₴',
+      recipients: [{ playerId: 'p2', amount: money(15) }],
     });
 
     let kyivTollGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-kyiv-toll');
@@ -1249,24 +1299,24 @@ describe('Ukraine Monopoly engine', () => {
     });
   });
 
-  it('halves Residential house cost and allows exactly two builds in that district per dice roll', () => {
+  it('discounts Residential house cost and allows exactly two builds in that district per dice roll', () => {
     const pavlohrad = getTile(1);
     if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
     let game = createInitialGame(['Olena', 'Taras'], 'district-residential');
     game = withOwnership(game, 'p1', [1, 3]);
     game = withDistrict(game, 'p1', 1, 'residential');
 
-    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(25));
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(23));
 
     game = reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 });
     game = reduceGame(game, { type: 'build', playerId: 'p1', tileId: 3 });
 
     expect(game.properties[1].houses).toBe(1);
     expect(game.properties[3].houses).toBe(1);
-    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1650));
-    expect(getEffectiveBuildingRefund(game, pavlohrad)).toBe(money(12));
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1654));
+    expect(getEffectiveBuildingRefund(game, pavlohrad)).toBe(money(11));
     game = reduceGame(game, { type: 'sell_building', playerId: 'p1', tileId: 1 });
-    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1662));
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1665));
     expect(() => reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 })).toThrow();
   });
 
@@ -1280,18 +1330,18 @@ describe('Ukraine Monopoly engine', () => {
     game = withDistrict(game, 'p1', 1, 'oldTown');
 
     expect(getEffectiveMortgageValue(game, pavlohrad)).toBe(money(55));
-    expect(getEffectiveUnmortgageCost(game, pavlohrad)).toBe(money(61));
+    expect(getEffectiveUnmortgageCost(game, pavlohrad)).toBe(money(58));
 
     game = reduceGame(game, { type: 'mortgage', playerId: 'p1', tileId: 1 });
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1755));
 
     game = reduceGame(game, { type: 'unmortgage', playerId: 'p1', tileId: 1 });
-    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1694));
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1697));
 
     const goldGame = withDistrict(withOwnership(createInitialGame(['Olena', 'Taras'], 'district-kyiv-mortgage'), 'p1', [37, 39]), 'p1', 39, 'oldTown');
 
     expect(getEffectiveMortgageValue(goldGame, kyiv)).toBe(money(300));
-    expect(getEffectiveUnmortgageCost(goldGame, kyiv)).toBe(money(330));
+    expect(getEffectiveUnmortgageCost(goldGame, kyiv)).toBe(money(315));
   });
 
   it('destroys a district when city ownership changes or the owner surrenders', () => {
@@ -1486,6 +1536,172 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.properties[1].houses).toBe(0);
   });
 
+  it('validates player loan offers and collateral eligibility', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-validation');
+    game = withOwnership(game, 'p2', [1]);
+
+    expect(() =>
+      reduceGame(game, {
+        type: 'propose_loan',
+        offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(900), totalRepayment: money(900), durationTurns: 4, collateralTileIds: [] },
+      }),
+    ).toThrow();
+
+    game = {
+      ...game,
+      properties: {
+        ...game.properties,
+        1: { ...game.properties[1], houses: 1 },
+      },
+    };
+
+    expect(() =>
+      reduceGame(game, {
+        type: 'propose_loan',
+        offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(200), totalRepayment: money(260), durationTurns: 4, collateralTileIds: [1] },
+      }),
+    ).toThrow();
+  });
+
+  it('accepts a player loan and creates due installments before the borrower rolls', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-player');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(300), totalRepayment: money(360), durationTurns: 3, collateralTileIds: [] },
+    });
+    const offerId = game.loanOffers[0].id;
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId });
+
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1400));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(2000));
+    expect(game.loans[0]).toMatchObject({ kind: 'player', borrowerId: 'p2', lenderId: 'p1', remainingDue: money(360), installmentAmount: money(120) });
+
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+
+    expect(game.currentPlayerId).toBe('p2');
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({
+      payerId: 'p2',
+      amount: money(120),
+      source: 'loan',
+      recipients: [{ playerId: 'p1', amount: money(120) }],
+    });
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p2' });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1520));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1880));
+    expect(game.loans[0]).toMatchObject({ remainingDue: money(240), remainingTurns: 2 });
+  });
+
+  it('creates bank loans with soft terms and respects the bank loan cap', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-bank');
+
+    expect(getBankLoanLimit(game, 'p1')).toBe(money(500));
+    game = reduceGame(game, { type: 'take_bank_loan', playerId: 'p1', amount: money(500) });
+
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(2200));
+    expect(game.loans[0]).toMatchObject({
+      kind: 'bank',
+      borrowerId: 'p1',
+      principal: money(500),
+      totalRepayment: money(575),
+      installmentAmount: money(96),
+      remainingTurns: 6,
+    });
+    expect(() => reduceGame(game, { type: 'take_bank_loan', playerId: 'p1', amount: money(50) })).toThrow();
+  });
+
+  it('aggregates multiple due loan payments', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'loan-aggregate');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(100), totalRepayment: money(120), durationTurns: 2, collateralTileIds: [] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+    game = {
+      ...game,
+      currentPlayerId: 'p3',
+      phase: 'rolling',
+    };
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p3', borrowerId: 'p2', principal: money(100), totalRepayment: money(140), durationTurns: 2, collateralTileIds: [] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[1].id });
+
+    game = reduceGame({ ...game, currentPlayerId: 'p1', phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({
+      payerId: 'p2',
+      amount: money(130),
+      source: 'loan',
+      recipients: expect.arrayContaining([
+        { playerId: 'p1', amount: money(60) },
+        { playerId: 'p3', amount: money(70) },
+      ]),
+    });
+  });
+
+  it('adds late fees on first missed loan payment and transfers collateral on a second miss', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-default-collateral');
+    game = withOwnership(game, 'p2', [1]);
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(300), totalRepayment: money(360), durationTurns: 3, collateralTileIds: [1] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+    game = reduceGame(game, { type: 'miss_loan_payment', playerId: 'p2' });
+
+    expect(game.currentPlayerId).toBe('p1');
+    expect(game.loans[0]).toMatchObject({ missedPayments: 1, remainingDue: money(372) });
+
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+    expect(game.pendingPayment).toMatchObject({ amount: money(252), source: 'loan' });
+    game = reduceGame(game, { type: 'miss_loan_payment', playerId: 'p2' });
+
+    expect(game.properties[1].ownerId).toBe('p1');
+    expect(game.players.find((player) => player.id === 'p1')?.properties).toContain(1);
+    expect(game.loans).toHaveLength(0);
+  });
+
+  it('forces payment or surrender on a second unsecured or bank loan miss', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-default-unsecured');
+    game = reduceGame(game, { type: 'take_bank_loan', playerId: 'p1', amount: money(300) });
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p2' });
+    game = reduceGame(game, { type: 'miss_loan_payment', playerId: 'p1' });
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p2' });
+
+    expect(game.phase).toBe('payment');
+    expect(() => reduceGame(game, { type: 'miss_loan_payment', playerId: 'p1' })).toThrow();
+  });
+
+  it('handles loan cleanup during borrower or lender bankruptcy', () => {
+    let borrowerGame = createInitialGame(['Olena', 'Taras'], 'loan-bankruptcy-borrower');
+    borrowerGame = withOwnership(borrowerGame, 'p2', [1]);
+    borrowerGame = reduceGame(borrowerGame, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(300), totalRepayment: money(360), durationTurns: 3, collateralTileIds: [1] },
+    });
+    borrowerGame = reduceGame(borrowerGame, { type: 'accept_loan', playerId: 'p2', offerId: borrowerGame.loanOffers[0].id });
+    borrowerGame = reduceGame(borrowerGame, { type: 'declare_bankruptcy', playerId: 'p2' });
+
+    expect(borrowerGame.properties[1].ownerId).toBe('p1');
+    expect(borrowerGame.loans).toHaveLength(0);
+
+    let lenderGame = createInitialGame(['Olena', 'Taras', 'Maria'], 'loan-bankruptcy-lender');
+    lenderGame = reduceGame(lenderGame, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(200), totalRepayment: money(240), durationTurns: 4, collateralTileIds: [] },
+    });
+    lenderGame = reduceGame(lenderGame, { type: 'accept_loan', playerId: 'p2', offerId: lenderGame.loanOffers[0].id });
+    lenderGame = reduceGame(lenderGame, { type: 'declare_bankruptcy', playerId: 'p1' });
+
+    expect(lenderGame.loans).toHaveLength(0);
+  });
+
   it('mortgages and unmortgages a property with a premium', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'mortgage-premium');
     game = withOwnership(game, 'p1', [1]);
@@ -1500,7 +1716,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.properties[1].mortgaged).toBe(false);
     expect(game.properties[1].mortgagedAtTurn).toBeUndefined();
     expect(game.properties[1].mortgageTurnsLeft).toBeUndefined();
-    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1697));
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1698));
   });
 
   it('counts mortgage turns only after the owner turn and returns overdue property to the bank', () => {
@@ -1849,7 +2065,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1635));
   });
 
-  it('raises purchase and unmortgage costs during a tax crisis city event', () => {
+  it('raises purchase and mortgage values during a tax crisis city event', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'city-event-tax');
     game = {
       ...game,
@@ -1873,7 +2089,8 @@ describe('Ukraine Monopoly engine', () => {
         1: { ...game.properties[1], mortgaged: true, mortgageTurnsLeft: 10 },
       },
     };
-    expect(getEffectiveUnmortgageCost(game, pavlohrad)).toBe(money(43));
+    expect(getEffectiveMortgageValue(game, pavlohrad)).toBe(money(39));
+    expect(getEffectiveUnmortgageCost(game, pavlohrad)).toBe(money(41));
   });
 
   it('doubles tax payments during tax madness city event', () => {
@@ -2004,7 +2221,8 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(getEffectivePropertyPrice(midGame, pavlohrad)).toBe(money(75));
     expect(getEffectiveHouseCost(midGame, pavlohrad)).toBe(money(63));
-    expect(getEffectiveUnmortgageCost(midGame, pavlohrad)).toBe(money(42));
+    expect(getEffectiveMortgageValue(midGame, pavlohrad)).toBe(money(38));
+    expect(getEffectiveUnmortgageCost(midGame, pavlohrad)).toBe(money(40));
     expect(getEffectiveFineAmount(midGame, money(200))).toBe(money(300));
 
     let lateGame = createInitialGame(['Olena', 'Taras'], 'late-prices-end');
@@ -2023,7 +2241,8 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(getEffectivePropertyPrice(lateGame, pavlohrad)).toBe(money(90));
     expect(getEffectiveHouseCost(lateGame, pavlohrad)).toBe(money(75));
-    expect(getEffectiveUnmortgageCost(lateGame, pavlohrad)).toBe(money(50));
+    expect(getEffectiveMortgageValue(lateGame, pavlohrad)).toBe(money(45));
+    expect(getEffectiveUnmortgageCost(lateGame, pavlohrad)).toBe(money(48));
     expect(getEffectiveFineAmount(lateGame, money(200))).toBe(money(400));
 
     const lateRentGame = withOwnership(

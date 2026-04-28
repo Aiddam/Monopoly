@@ -4213,6 +4213,80 @@ input:focus {
   font-weight: 800;
 }
 
+.credits-panel {
+  gap: 14px;
+}
+
+.loan-option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.loan-option-grid button {
+  justify-content: space-between;
+}
+
+.loan-option-grid button span {
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 11px;
+}
+
+.loan-builder {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 10px;
+  padding: 11px;
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.loan-builder-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.loan-builder-grid label,
+.loan-collateral-grid {
+  display: grid;
+  gap: 5px;
+}
+
+.loan-builder-grid span,
+.loan-collateral-grid > span {
+  color: rgba(219, 234, 254, 0.72);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.loan-builder-grid input,
+.loan-builder-grid select {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #f8fafc;
+  background: rgba(2, 6, 23, 0.42);
+  font-weight: 850;
+}
+
+.loan-collateral-grid {
+  grid-template-columns: 1fr;
+}
+
+.loan-collateral-grid small {
+  color: rgba(203, 213, 225, 0.56);
+  font-weight: 800;
+}
+
+.trade-selected-chip.selected {
+  border-color: rgba(250, 204, 21, 0.52);
+  color: #fef3c7;
+  background: rgba(202, 138, 4, 0.22);
+}
+
 .luck-check-card {
   border: 1px solid rgba(196, 181, 253, 0.22);
   background:
