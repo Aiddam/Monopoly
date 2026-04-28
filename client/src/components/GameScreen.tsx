@@ -122,7 +122,7 @@ const UNO_REVERSE_CARD_IMAGE = '/assets/cards/uno-reverse.png';
 const UNO_REVERSE_CARD_ID = 13;
 const UNO_REVERSE_SPARK_INDICES = Array.from({ length: 10 }, (_, index) => index);
 const EMOTE_COOLDOWN_WINDOW_MS = 30_000;
-const EMOTE_AUDIO_GAIN = 2.0;
+const EMOTE_AUDIO_GAIN = 3.0;
 type EmoteOption = {
   id: string;
   label: string;
