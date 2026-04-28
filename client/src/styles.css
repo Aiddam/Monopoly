@@ -1314,6 +1314,68 @@ input:focus {
   transform: translateX(-50%);
 }
 
+.tile.bank .service-owner-chip,
+.tile.utility .service-owner-chip {
+  top: 8px;
+  left: 8px;
+  z-index: 9;
+  min-width: 38px;
+  max-width: 62px;
+  height: 20px;
+  border-color: color-mix(in srgb, var(--owner-color) 66%, rgba(255, 255, 255, 0.48));
+  color: #f8fafc;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--owner-color) 70%, rgba(15, 23, 42, 0.9)), rgba(2, 6, 23, 0.88));
+  box-shadow:
+    0 0 0 2px rgba(2, 6, 23, 0.42),
+    0 8px 16px rgba(2, 6, 23, 0.38),
+    0 0 14px color-mix(in srgb, var(--owner-color) 38%, transparent);
+  font-size: 9px;
+  letter-spacing: 0;
+  text-shadow: 0 1px 4px rgba(2, 6, 23, 0.58);
+}
+
+.tile-left.bank .service-owner-chip,
+.tile-left.utility .service-owner-chip,
+.tile-right.bank .service-owner-chip,
+.tile-right.utility .service-owner-chip {
+  top: 5px;
+  left: 10px;
+  right: auto;
+}
+
+.tile-right.bank .service-owner-chip,
+.tile-right.utility .service-owner-chip {
+  right: 10px;
+  left: auto;
+}
+
+.tile.bank .owner-dot,
+.tile.utility .owner-dot {
+  right: auto;
+  left: 11px;
+  top: 33px;
+  z-index: 8;
+  width: 10px;
+  height: 10px;
+  box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.52), 0 0 12px color-mix(in srgb, var(--owner-color) 58%, transparent);
+}
+
+.tile-left.bank .owner-dot,
+.tile-left.utility .owner-dot,
+.tile-right.bank .owner-dot,
+.tile-right.utility .owner-dot {
+  top: 29px;
+  left: 15px;
+  right: auto;
+}
+
+.tile-right.bank .owner-dot,
+.tile-right.utility .owner-dot {
+  right: 15px;
+  left: auto;
+}
+
 .tile-left.city .owner-chip,
 .tile-right.city .owner-chip {
   top: 6px;

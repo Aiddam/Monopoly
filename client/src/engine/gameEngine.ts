@@ -1380,7 +1380,7 @@ const startBankDeposit = (state: GameState, playerId: string): GameState => {
     players: state.players.map((candidate) =>
       candidate.id === playerId ? { ...candidate, money: candidate.money - amount } : candidate,
     ),
-    log: appendLog(state, `${player.name} робить банківський депозит ${amount}₴. Відсоток зростає за кожен хід після депозиту.`, 'good'),
+    log: appendLog(state, `${player.name} робить банківський депозит ${amount}₴.`, 'good'),
   };
 };
 

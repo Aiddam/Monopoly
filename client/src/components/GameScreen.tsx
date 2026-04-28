@@ -2591,7 +2591,10 @@ const TileCell = ({
       {owner && (
         <>
           <span className="owner-rail" aria-hidden />
-          <span className="owner-chip" title={`Власник: ${owner.name}`}>
+          <span
+            className={`owner-chip ${tile.type === 'bank' || tile.type === 'utility' ? 'service-owner-chip' : ''}`}
+            title={`Власник: ${owner.name}`}
+          >
             {ownerNameMark}
           </span>
         </>
@@ -5693,7 +5696,7 @@ const useTurnTimer = (
   isLocalTurn: boolean,
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
 ) => {
-  const timerPhaseKey = game.phase === 'orderRoll' ? 'orderRoll' : 'turn';
+  const timerPhaseKey = getTurnTimerPhaseKey(game);
   const turnKey = `${game.id}:${game.turn}:${game.currentPlayerId}:${timerPhaseKey}`;
   const [timerState, setTimerState] = useState(() => ({ secondsLeft: TURN_SECONDS, turnKey }));
   const secondsLeft = timerState.turnKey === turnKey ? timerState.secondsLeft : TURN_SECONDS;
@@ -5716,50 +5719,76 @@ const useTurnTimer = (
   useEffect(() => {
     if (timerState.turnKey !== turnKey) return;
     if (secondsLeft > 0 || expiredRef.current === turnKey || !isLocalTurn) return;
-    expiredRef.current = turnKey;
+
+    const dispatchTimerAction = (action: Parameters<typeof dispatch>[0]) => {
+      expiredRef.current = turnKey;
+      dispatch(action);
+    };
 
     if (game.phase === 'orderRoll') {
-      dispatch({ type: 'roll_for_order', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'roll_for_order', playerId: game.currentPlayerId });
       return;
     }
 
     if (game.phase === 'rolling') {
-      dispatch({ type: 'roll', playerId: game.currentPlayerId });
+      if (game.tradeOffers.some((offer) => offer.status === 'pending')) return;
+      dispatchTimerAction({ type: 'roll', playerId: game.currentPlayerId });
       return;
     }
 
     if (game.phase === 'awaitingPurchase') {
-      dispatch({ type: 'decline_buy', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'decline_buy', playerId: game.currentPlayerId });
       return;
     }
 
     if (game.phase === 'awaitingCard') {
-      dispatch({ type: 'draw_card', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'draw_card', playerId: game.currentPlayerId });
       return;
     }
 
     if (game.phase === 'casino') {
       if (game.pendingCasino?.spinEndsAt) return;
-      dispatch({ type: 'skip_casino', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'skip_casino', playerId: game.currentPlayerId });
       return;
     }
 
     if (game.phase === 'bankDeposit' && game.pendingBankDeposit) {
-      dispatch({ type: 'decline_bank_deposit', playerId: game.pendingBankDeposit.playerId });
+      dispatchTimerAction({ type: 'decline_bank_deposit', playerId: game.pendingBankDeposit.playerId });
       return;
     }
 
     if (game.phase === 'awaitingJailDecision') {
-      dispatch({ type: 'go_to_jail', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'go_to_jail', playerId: game.currentPlayerId });
       return;
     }
 
     if ((game.phase === 'turnEnd' || game.phase === 'manage' || game.phase === 'trade') && !game.tradeOffers.some((offer) => offer.status === 'pending')) {
-      dispatch({ type: 'continue_turn', playerId: game.currentPlayerId });
+      dispatchTimerAction({ type: 'continue_turn', playerId: game.currentPlayerId });
     }
   }, [dispatch, game, isLocalTurn, secondsLeft, timerState.turnKey, turnKey]);
 
   return secondsLeft;
+};
+
+const getTurnTimerPhaseKey = (game: GameState): string => {
+  switch (game.phase) {
+    case 'awaitingPurchase':
+      return `${game.phase}:${game.pendingPurchaseTileId ?? 'none'}`;
+    case 'awaitingCard':
+      return `${game.phase}:${game.pendingCardDraw?.deck ?? 'none'}:${game.pendingCardDraw?.tileId ?? 'none'}`;
+    case 'awaitingJailDecision':
+      return `${game.phase}:${game.pendingJail?.playerId ?? 'none'}:${game.pendingJail?.tileId ?? 'none'}`;
+    case 'casino':
+      return `${game.phase}:${game.pendingCasino?.playerId ?? 'none'}:${game.pendingCasino?.tileId ?? 'none'}:${game.pendingCasino?.spinStartedAt ?? 'ready'}`;
+    case 'bankDeposit':
+      return `${game.phase}:${game.pendingBankDeposit?.playerId ?? 'none'}:${game.pendingBankDeposit?.tileId ?? 'none'}`;
+    case 'payment':
+      return `${game.phase}:${game.pendingPayment?.payerId ?? 'none'}:${game.pendingPayment?.amount ?? 0}:${game.pendingPayment?.source ?? 'none'}`;
+    case 'rent':
+      return `${game.phase}:${game.pendingRent?.payerId ?? 'none'}:${game.pendingRent?.ownerId ?? 'none'}:${game.pendingRent?.tileId ?? 'none'}`;
+    default:
+      return game.phase;
+  }
 };
 
 const useAutoContinueTurn = (
