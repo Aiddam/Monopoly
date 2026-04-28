@@ -515,7 +515,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1650));
   });
 
-  it('redistributes 25 percent of player money for the Communism community card', () => {
+  it('redistributes 25 percent of player money for the trickle-down economy community card', () => {
     let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'community-communism');
     game = {
       ...game,
@@ -528,7 +528,7 @@ describe('Ukraine Monopoly engine', () => {
 
     game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
 
-    expect(game.pendingCard?.title).toBe('Комунізм');
+    expect(game.pendingCard?.title).toBe('Економіка просочування');
     expect(game.phase).toBe('payment');
     expect(game.pendingPayment).toMatchObject({
       payerId: 'p1',
@@ -547,6 +547,65 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(750));
     expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1825));
     expect(game.players.find((player) => player.id === 'p3')?.money).toBe(money(1825));
+  });
+
+  it('boosts the trickle-down economy community card for the player with the most cash', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'community-communism-rich');
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'community', tileId: 2 },
+      communityDeck: [0, 12],
+      discardCommunity: [],
+      players: game.players.map((player) =>
+        player.id === 'p1'
+          ? { ...player, money: money(2000) }
+          : player.id === 'p2'
+            ? { ...player, money: money(1000) }
+            : { ...player, money: money(900) },
+      ),
+    };
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    try {
+      game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+    } finally {
+      randomSpy.mockRestore();
+    }
+
+    expect(game.pendingCard?.title).toBe('Економіка просочування');
+    expect(game.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(500), source: 'card' });
+    expect(game.communityDeck).toEqual([0]);
+  });
+
+  it('lowers the trickle-down economy community card chance for the player with the least cash', () => {
+    let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'community-communism-low-cash');
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'community', tileId: 2 },
+      communityDeck: [12, 0],
+      discardCommunity: [],
+      players: game.players.map((player) =>
+        player.id === 'p1'
+          ? { ...player, money: money(500) }
+          : player.id === 'p2'
+            ? { ...player, money: money(1000) }
+            : { ...player, money: money(900) },
+      ),
+    };
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    try {
+      game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+    } finally {
+      randomSpy.mockRestore();
+    }
+
+    expect(game.pendingCard?.title).toBe('Грант громади');
+    expect(game.pendingPayment).toBeUndefined();
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(600));
+    expect(game.communityDeck).toEqual([12]);
   });
 
   it('makes surrendered properties neutral and pays rent creditor from available cash', () => {
@@ -1016,6 +1075,38 @@ describe('Ukraine Monopoly engine', () => {
     expect(commonCards).toHaveLength(4);
   });
 
+  it('draws the rare loan payoff card only while an active loan exists', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-payoff-draw');
+
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 2 },
+      chanceDeck: [14, 2],
+    };
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.pendingCard?.cardId).toBe(2);
+    expect(game.chanceDeck).toEqual([14]);
+
+    game = createInitialGame(['Olena', 'Taras'], 'loan-payoff-draw-active');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(100), totalRepayment: money(120), durationTurns: 2, collateralTileIds: [] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+    game = {
+      ...game,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 2 },
+      chanceDeck: [14],
+    };
+    game = reduceGame(game, { type: 'draw_card', playerId: 'p1' });
+
+    expect(game.pendingCard?.cardId).toBe(14);
+    expect(game.players.find((player) => player.id === 'p1')?.loanPayoffCards).toBe(1);
+  });
+
   it('starts a timed auction and leaves the property unowned when nobody bids', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'auction-empty');
     game = {
@@ -1174,7 +1265,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(50));
   });
 
-  it('reduces district rent and raises gold building rent for Old Town and Residential paths', () => {
+  it('reduces Old Town rent and uses a separate Residential rent divisor', () => {
     const lviv = getTile(37);
     const kyiv = getTile(39);
     const chernivtsi = getTile(34);
@@ -1208,7 +1299,15 @@ describe('Ukraine Monopoly engine', () => {
       },
     };
 
-    expect(calculateRent(residentialGoldGame, kyiv)).toBe(money(58));
+    const residentialBaseRentGame = withDistrict(
+      withOwnership(createInitialGame(['Olena', 'Taras'], 'district-residential-base-rent'), 'p1', [37, 39]),
+      'p1',
+      37,
+      'residential',
+    );
+
+    expect(calculateRent(residentialBaseRentGame, lviv)).toBe(money(32));
+    expect(calculateRent(residentialGoldGame, kyiv)).toBe(money(89));
 
     let greenGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-green-rent');
     greenGame = withOwnership(greenGame, 'p1', [31, 32, 34]);
@@ -1588,9 +1687,37 @@ describe('Ukraine Monopoly engine', () => {
     });
 
     game = reduceGame(game, { type: 'pay_payment', playerId: 'p2' });
+    expect(game.phase).toBe('rolling');
+    expect(game.currentPlayerId).toBe('p2');
     expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1520));
     expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1880));
     expect(game.loans[0]).toMatchObject({ remainingDue: money(240), remainingTurns: 2 });
+  });
+
+  it('lets the borrower request a player loan for the lender to accept', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-request');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: {
+        lenderId: 'p2',
+        borrowerId: 'p1',
+        proposerId: 'p1',
+        principal: money(200),
+        totalRepayment: money(260),
+        durationTurns: 4,
+        collateralTileIds: [],
+      },
+    });
+
+    expect(game.loanOffers[0]).toMatchObject({ lenderId: 'p2', borrowerId: 'p1', proposerId: 'p1', status: 'pending' });
+    expect(game.log[0].text).toContain('просить кредит');
+    expect(() => reduceGame(game, { type: 'accept_loan', playerId: 'p1', offerId: game.loanOffers[0].id })).toThrow();
+
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1900));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1500));
+    expect(game.loans[0]).toMatchObject({ lenderId: 'p2', borrowerId: 'p1', remainingDue: money(260), installmentAmount: money(65) });
   });
 
   it('creates bank loans with soft terms and respects the bank loan cap', () => {
@@ -1604,46 +1731,110 @@ describe('Ukraine Monopoly engine', () => {
       kind: 'bank',
       borrowerId: 'p1',
       principal: money(500),
-      totalRepayment: money(575),
-      installmentAmount: money(96),
-      remainingTurns: 6,
+      totalRepayment: money(650),
+      installmentAmount: money(65),
+      remainingTurns: 10,
     });
     expect(() => reduceGame(game, { type: 'take_bank_loan', playerId: 'p1', amount: money(50) })).toThrow();
   });
 
-  it('aggregates multiple due loan payments', () => {
+  it('shows multiple due loan payments one at a time with bank loans first', () => {
     let game = createInitialGame(['Olena', 'Taras', 'Maria'], 'loan-aggregate');
+    game = {
+      ...game,
+      currentPlayerId: 'p2',
+      phase: 'rolling',
+    };
+    game = reduceGame(game, { type: 'take_bank_loan', playerId: 'p2', amount: money(200) });
+    const bankLoanId = game.loans[0].id;
+    game = {
+      ...game,
+      currentPlayerId: 'p1',
+      phase: 'rolling',
+    };
     game = reduceGame(game, {
       type: 'propose_loan',
       offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(100), totalRepayment: money(120), durationTurns: 2, collateralTileIds: [] },
     });
     game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
-    game = {
-      ...game,
-      currentPlayerId: 'p3',
-      phase: 'rolling',
-    };
-    game = reduceGame(game, {
-      type: 'propose_loan',
-      offer: { lenderId: 'p3', borrowerId: 'p2', principal: money(100), totalRepayment: money(140), durationTurns: 2, collateralTileIds: [] },
-    });
-    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[1].id });
+    const playerLoanId = game.loans.find((loan) => loan.kind === 'player')!.id;
 
     game = reduceGame({ ...game, currentPlayerId: 'p1', phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
 
     expect(game.phase).toBe('payment');
     expect(game.pendingPayment).toMatchObject({
       payerId: 'p2',
-      amount: money(130),
+      amount: money(26),
       source: 'loan',
-      recipients: expect.arrayContaining([
-        { playerId: 'p1', amount: money(60) },
-        { playerId: 'p3', amount: money(70) },
-      ]),
+      loanPayments: [{ loanId: bankLoanId, amount: money(26) }],
+      loanPaymentQueue: [{ loanId: playerLoanId, amount: money(60) }],
     });
+    expect(game.pendingPayment?.reason).toBe('виплата за банківським кредитом');
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p2' });
+
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({
+      payerId: 'p2',
+      amount: money(60),
+      source: 'loan',
+      recipients: [{ playerId: 'p1', amount: money(60) }],
+      loanPayments: [{ loanId: playerLoanId, amount: money(60) }],
+    });
+    expect(game.pendingPayment?.reason).toBe('виплата за кредитом від Olena');
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p2' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingPayment).toBeUndefined();
   });
 
-  it('adds late fees on first missed loan payment and transfers collateral on a second miss', () => {
+  it('uses a loan payoff card to close a borrower loan without spending borrower cash', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-payoff-card');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(300), totalRepayment: money(360), durationTurns: 3, collateralTileIds: [] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+    const loanId = game.loans[0].id;
+    game = {
+      ...game,
+      currentPlayerId: 'p2',
+      phase: 'rolling',
+      players: game.players.map((player) => (player.id === 'p2' ? { ...player, loanPayoffCards: 1 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'use_loan_payoff_card', playerId: 'p2', loanId });
+
+    expect(game.loans).toHaveLength(0);
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(2000));
+    expect(game.players.find((player) => player.id === 'p2')?.loanPayoffCards).toBe(0);
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1760));
+  });
+
+  it('clears a pending loan payment when the borrower pays that loan off with a card', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'loan-payoff-card-pending');
+    game = reduceGame(game, {
+      type: 'propose_loan',
+      offer: { lenderId: 'p1', borrowerId: 'p2', principal: money(300), totalRepayment: money(360), durationTurns: 3, collateralTileIds: [] },
+    });
+    game = reduceGame(game, { type: 'accept_loan', playerId: 'p2', offerId: game.loanOffers[0].id });
+    const loanId = game.loans[0].id;
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+    game = {
+      ...game,
+      players: game.players.map((player) => (player.id === 'p2' ? { ...player, loanPayoffCards: 1 } : player)),
+    };
+
+    game = reduceGame(game, { type: 'use_loan_payoff_card', playerId: 'p2', loanId });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingPayment).toBeUndefined();
+    expect(game.loans).toHaveLength(0);
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1760));
+  });
+
+  it('allows repeated player-loan misses until the final payment without transferring collateral', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'loan-default-collateral');
     game = withOwnership(game, 'p2', [1]);
     game = reduceGame(game, {
@@ -1661,9 +1852,13 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.pendingPayment).toMatchObject({ amount: money(252), source: 'loan' });
     game = reduceGame(game, { type: 'miss_loan_payment', playerId: 'p2' });
 
-    expect(game.properties[1].ownerId).toBe('p1');
-    expect(game.players.find((player) => player.id === 'p1')?.properties).toContain(1);
-    expect(game.loans).toHaveLength(0);
+    expect(game.properties[1].ownerId).toBe('p2');
+    expect(game.players.find((player) => player.id === 'p2')?.properties).toContain(1);
+    expect(game.loans[0]).toMatchObject({ missedPayments: 2, remainingDue: money(398) });
+
+    game = reduceGame({ ...game, phase: 'turnEnd' }, { type: 'end_turn', playerId: 'p1' });
+    expect(game.pendingPayment).toMatchObject({ amount: money(398), source: 'loan' });
+    expect(() => reduceGame(game, { type: 'miss_loan_payment', playerId: 'p2' })).toThrow();
   });
 
   it('forces payment or surrender on a second unsecured or bank loan miss', () => {
@@ -1689,6 +1884,7 @@ describe('Ukraine Monopoly engine', () => {
     borrowerGame = reduceGame(borrowerGame, { type: 'declare_bankruptcy', playerId: 'p2' });
 
     expect(borrowerGame.properties[1].ownerId).toBe('p1');
+    expect(borrowerGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1616));
     expect(borrowerGame.loans).toHaveLength(0);
 
     let lenderGame = createInitialGame(['Olena', 'Taras', 'Maria'], 'loan-bankruptcy-lender');

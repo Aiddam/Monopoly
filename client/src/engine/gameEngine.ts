@@ -44,6 +44,11 @@ const JAIL_TURNS = 3;
 const UNO_REVERSE_CARD_ID = 13;
 const UNO_REVERSE_CARD_DECK_COPIES = 4;
 const UNO_REVERSE_CARD_LIMIT = 1;
+const LOAN_PAYOFF_CARD_ID = 14;
+const LOAN_PAYOFF_CARD_LIMIT = 1;
+const COMMUNISM_COMMUNITY_CARD_ID = 12;
+const COMMUNISM_RICH_CASH_WEIGHT_MULTIPLIER = 3;
+const COMMUNISM_LOW_CASH_WEIGHT_MULTIPLIER = 0.35;
 const STEP_FEE_CITY_EVENT_ID: CityEventId = 'paid-roads';
 const ROAD_REPAIR_CITY_EVENT_ID: CityEventId = 'road-repair';
 const CITY_EVENT_DOUBLE_CHANCE = 0.18;
@@ -51,6 +56,7 @@ const STEP_FEE_SECOND_SINGLE_DIE_CHANCE = 0.65;
 const STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES = 1;
 const RESIDENTIAL_BUILD_LIMIT_PER_ROLL = 2;
 const RESIDENTIAL_HOUSE_COST_MULTIPLIER = 0.45;
+const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 2.25;
 const DISTRICT_RENT_DIVISOR = 2.5;
 const GREEN_DISTRICT_BUILDING_RENT_DIVISOR = 4;
 const GOLD_DISTRICT_BUILDING_RENT_DIVISOR = 3.5;
@@ -70,10 +76,11 @@ const PLAYER_LOAN_MAX_COLLATERAL_MULTIPLIER = 2;
 const BANK_LOAN_MIN_AMOUNT = money(50);
 const BANK_LOAN_MAX_AMOUNT = money(500);
 const BANK_LOAN_WORTH_MULTIPLIER = 0.3;
-const BANK_LOAN_DURATION = 6;
-const BANK_LOAN_REPAYMENT_MULTIPLIER = 1.15;
+const BANK_LOAN_DURATION = 10;
+const BANK_LOAN_REPAYMENT_MULTIPLIER = 1.3;
 const PLAYER_LOAN_LATE_FEE = 0.1;
 const BANK_LOAN_LATE_FEE = 0.2;
+const PLAYER_LOAN_BANKRUPTCY_PAYOUT_RATE = 0.6;
 const OLD_TOWN_PASS_THROUGH_MESSAGES: Record<string, string> = {
   pavlohrad: 'Ви проминули старі промислові квартали Павлограда.',
   ternivka: 'Ви пройшли повз тихі вулички Тернівки.',
@@ -123,6 +130,7 @@ export const createInitialGame = (
     jailTurns: 0,
     jailCards: 0,
     unoReverseCards: 0,
+    loanPayoffCards: 0,
     isBankrupt: false,
   }));
 
@@ -264,6 +272,9 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       break;
     case 'miss_loan_payment':
       next = missLoanPayment(state, action.playerId);
+      break;
+    case 'use_loan_payoff_card':
+      next = useLoanPayoffCard(state, action.playerId, action.loanId);
       break;
     case 'pay_rent':
       next = payRent(state, action.playerId);
@@ -421,6 +432,9 @@ const getBankDepositTurnCount = (deposit: BankDepositState | undefined): number 
 export const getBankDepositPayout = (deposit: BankDepositState | undefined): number =>
   deposit ? compoundBankDepositPayout(deposit.amount, getBankDepositTurnCount(deposit)) : 0;
 
+export const getBankLoanRepaymentAmount = (amount: number): number =>
+  ceilMoney(normalizeMoney(amount) * BANK_LOAN_REPAYMENT_MULTIPLIER);
+
 const compoundBankDepositPayout = (amount: number, turns: number): number => {
   let payout = amount;
   for (let index = 0; index < turns; index += 1) {
@@ -501,7 +515,7 @@ const getDistrictMortgageShare = (
 
 const getDistrictAdjustedCityRent = (state: GameState, tile: CityTile, baseRent: number, houses: number): number => {
   const path = getDistrictPath(state, tile.group)?.path;
-  if (isDistrictRentReduced(path)) return ceilMoney(baseRent / getDistrictRentDivisor(tile, houses));
+  if (isDistrictRentReduced(path)) return ceilMoney(baseRent / getDistrictRentDivisor(path, tile, houses));
   return baseRent;
 };
 
@@ -510,7 +524,8 @@ const getDistrictHouseCostMultiplier = (state: GameState, tile: CityTile): numbe
 
 const isDistrictRentReduced = (path: DistrictPath | undefined): boolean => path === 'oldTown' || path === 'residential';
 
-const getDistrictRentDivisor = (tile: CityTile, houses: number): number => {
+const getDistrictRentDivisor = (path: DistrictPath, tile: CityTile, houses: number): number => {
+  if (path === 'residential') return RESIDENTIAL_DISTRICT_RENT_DIVISOR;
   if (houses <= 0) return DISTRICT_RENT_DIVISOR;
   if (GOLD_DISTRICT_RENT_GROUPS.has(tile.group)) return GOLD_DISTRICT_BUILDING_RENT_DIVISOR;
   if (GREEN_DISTRICT_RENT_GROUPS.has(tile.group)) return GREEN_DISTRICT_BUILDING_RENT_DIVISOR;
@@ -518,7 +533,7 @@ const getDistrictRentDivisor = (tile: CityTile, houses: number): number => {
 };
 
 const getOldTownPassThroughDivisor = (state: GameState, tile: CityTile): number =>
-  state.properties[tile.id].houses > 0 ? getDistrictRentDivisor(tile, state.properties[tile.id].houses) : OLD_TOWN_PASS_THROUGH_DIVISOR;
+  state.properties[tile.id].houses > 0 ? getDistrictRentDivisor('oldTown', tile, state.properties[tile.id].houses) : OLD_TOWN_PASS_THROUGH_DIVISOR;
 
 const districtPathLabel = (path: DistrictPath): string => {
   switch (path) {
@@ -1854,22 +1869,29 @@ const updateTradeStatus = (
 const getTradeResolutionPhase = (state: GameState): GameState['phase'] => (state.phase === 'trade' ? 'manage' : state.phase);
 
 const proposeLoan = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'>): GameState => {
-  if (state.currentPlayerId !== offer.lenderId) throw new Error('Кредит може запропонувати тільки гравець, який зараз ходить.');
+  const proposerId = offer.proposerId ?? state.currentPlayerId;
+  if (state.currentPlayerId !== proposerId || (proposerId !== offer.lenderId && proposerId !== offer.borrowerId)) {
+    throw new Error('Кредит може запропонувати тільки учасник контракту, який зараз ходить.');
+  }
   if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(state.phase)) throw new Error('Зараз не можна створити кредит.');
   const normalized = normalizeLoanOffer(offer);
   validateLoanOffer(state, normalized);
   const lender = getPlayer(state, normalized.lenderId);
   const borrower = getPlayer(state, normalized.borrowerId);
+  const proposer = getPlayer(state, proposerId);
+  const isLoanRequest = proposerId === borrower.id;
 
   return {
     ...state,
     loanOffers: [
       ...(state.loanOffers ?? []),
-      { ...normalized, id: crypto.randomUUID(), status: 'pending', createdAtTurn: state.turn },
+      { ...normalized, proposerId, id: crypto.randomUUID(), status: 'pending', createdAtTurn: state.turn },
     ],
     log: appendLog(
       state,
-      `${lender.name} пропонує кредит ${borrower.name}: ${normalized.principal}₴, повернення ${normalized.totalRepayment}₴ за ${normalized.durationTurns} ходів.`,
+      isLoanRequest
+        ? `${proposer.name} просить кредит у ${lender.name}: ${normalized.principal}₴, повернення ${normalized.totalRepayment}₴ за ${normalized.durationTurns} ходів.`
+        : `${lender.name} пропонує кредит ${borrower.name}: ${normalized.principal}₴, повернення ${normalized.totalRepayment}₴ за ${normalized.durationTurns} ходів.`,
     ),
   };
 };
@@ -1877,7 +1899,7 @@ const proposeLoan = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 
 const acceptLoan = (state: GameState, playerId: string, offerId: string): GameState => {
   const offer = (state.loanOffers ?? []).find((candidate) => candidate.id === offerId);
   if (!offer || offer.status !== 'pending') throw new Error('Кредитна пропозиція не активна.');
-  if (offer.borrowerId !== playerId) throw new Error('Прийняти кредит може тільки позичальник.');
+  if (getLoanOfferResponderId(offer) !== playerId) throw new Error('Прийняти кредит може тільки адресат пропозиції.');
   const normalized = normalizeLoanOffer(offer);
   validateLoanOffer(state, normalized);
 
@@ -1928,7 +1950,7 @@ const takeBankLoan = (state: GameState, playerId: string, amount: number): GameS
   }
   const cap = getBankLoanLimit(state, playerId);
   if (principal > cap) throw new Error(`Банк може видати максимум ${cap}₴ цьому гравцю.`);
-  const totalRepayment = ceilMoney(principal * BANK_LOAN_REPAYMENT_MULTIPLIER);
+  const totalRepayment = getBankLoanRepaymentAmount(principal);
   const loan: ActiveLoan = {
     id: crypto.randomUUID(),
     kind: 'bank',
@@ -1960,11 +1982,15 @@ const normalizeLoanOffer = (
 ): Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> => ({
   lenderId: offer.lenderId,
   borrowerId: offer.borrowerId,
+  proposerId: offer.proposerId,
   principal: normalizeMoney(offer.principal),
   totalRepayment: normalizeMoney(offer.totalRepayment),
   durationTurns: Math.floor(offer.durationTurns),
   collateralTileIds: normalizePropertyIds(offer.collateralTileIds ?? []),
 });
+
+const getLoanOfferResponderId = (offer: Pick<LoanOffer, 'lenderId' | 'borrowerId' | 'proposerId'>): string =>
+  (offer.proposerId ?? offer.lenderId) === offer.borrowerId ? offer.lenderId : offer.borrowerId;
 
 const validateLoanOffer = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 'createdAtTurn'> | LoanOffer) => {
   const lender = getPlayer(state, offer.lenderId);
@@ -2034,33 +2060,63 @@ export const getBankLoanLimit = (state: GameState, playerId: string): number => 
 
 const createLoanPaymentIfDue = (state: GameState, playerId: string): GameState => {
   if (state.phase !== 'rolling') return state;
-  const dueLoans = (state.loans ?? []).filter((loan) => loan.borrowerId === playerId);
+  const dueLoans = sortLoansForPayment((state.loans ?? []).filter((loan) => loan.borrowerId === playerId));
   if (dueLoans.length === 0) return state;
   const loanPayments = dueLoans.map((loan) => ({ loanId: loan.id, amount: getLoanInstallmentDue(loan) })).filter((payment) => payment.amount > 0);
   if (loanPayments.length === 0) return state;
-  const total = loanPayments.reduce((sum, payment) => sum + payment.amount, 0);
-  const recipients = loanPayments.flatMap((payment) => {
-    const loan = dueLoans.find((candidate) => candidate.id === payment.loanId);
-    return loan?.kind === 'player' && loan.lenderId ? [{ playerId: loan.lenderId, amount: payment.amount }] : [];
-  });
+  return createNextLoanPaymentFromQueue(state, playerId, loanPayments);
+};
+
+const createNextLoanPaymentFromQueue = (
+  state: GameState,
+  playerId: string,
+  queue: Array<{ loanId: string; amount: number }>,
+): GameState => {
+  const [nextPayment, ...remainingQueue] = queue.filter((payment) => payment.amount > 0);
+  if (!nextPayment) {
+    return { ...state, phase: 'rolling', pendingPayment: undefined };
+  }
+  const loan = (state.loans ?? []).find((candidate) => candidate.id === nextPayment.loanId);
+  if (!loan || loan.borrowerId !== playerId || loan.remainingDue <= 0) {
+    return createNextLoanPaymentFromQueue(state, playerId, remainingQueue);
+  }
+  const amount = Math.min(nextPayment.amount, loan.remainingDue);
+  const recipients = loan.kind === 'player' && loan.lenderId ? [{ playerId: loan.lenderId, amount }] : [];
 
   return createPendingPayment(state, {
     payerId: playerId,
-    amount: total,
-    reason: 'виплата за кредитом',
+    amount,
+    reason: getLoanPaymentReason(state, loan),
     source: 'loan',
     recipients: mergeRecipients(recipients),
-    loanPayments,
+    loanPayments: [{ loanId: nextPayment.loanId, amount }],
+    loanPaymentQueue: remainingQueue,
   });
+};
+
+const sortLoansForPayment = (loans: ActiveLoan[]): ActiveLoan[] =>
+  [...loans].sort((left, right) => {
+    if (left.kind !== right.kind) return left.kind === 'bank' ? -1 : 1;
+    return left.createdAtTurn - right.createdAtTurn || left.id.localeCompare(right.id);
+  });
+
+const getLoanPaymentReason = (state: GameState, loan: ActiveLoan): string => {
+  if (loan.kind === 'bank') return 'виплата за банківським кредитом';
+  const lender = loan.lenderId ? state.players.find((player) => player.id === loan.lenderId) : undefined;
+  return `виплата за кредитом від ${lender?.name ?? 'гравця'}`;
 };
 
 const getLoanInstallmentDue = (loan: ActiveLoan): number => {
   if (loan.remainingDue <= 0) return 0;
   const deferredDue = loan.deferredDue ?? 0;
   const scheduledDebt = Math.max(0, loan.remainingDue - deferredDue);
-  const scheduledDue = loan.remainingTurns <= 1 ? scheduledDebt : Math.min(scheduledDebt, loan.installmentAmount);
+  const scheduledDue =
+    getLoanEffectiveRemainingTurns(loan) <= 1 ? scheduledDebt : Math.min(scheduledDebt, loan.installmentAmount);
   return Math.min(loan.remainingDue, deferredDue + scheduledDue);
 };
+
+const getLoanEffectiveRemainingTurns = (loan: ActiveLoan): number =>
+  Math.max(1, loan.remainingTurns - (loan.deferredTurns ?? 0));
 
 const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: NonNullable<GameState['pendingPayment']>): GameState => {
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
@@ -2080,9 +2136,9 @@ const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: 
     })
     .filter((loan) => loan.remainingDue > 0);
 
-  return {
+  const paid: GameState = {
     ...state,
-    phase: 'turnEnd',
+    phase: 'rolling',
     pendingPayment: undefined,
     loans: remainingLoans,
     players: state.players.map((player) => {
@@ -2092,6 +2148,8 @@ const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: 
     }),
     log: appendLog(state, `${getPlayer(state, playerId).name} сплачує ${payment.amount}₴ за кредитом.`, 'bad'),
   };
+
+  return createNextLoanPaymentFromQueue(paid, playerId, payment.loanPaymentQueue ?? []);
 };
 
 const missLoanPayment = (state: GameState, playerId: string): GameState => {
@@ -2101,19 +2159,13 @@ const missLoanPayment = (state: GameState, playerId: string): GameState => {
     throw new Error('Зараз немає кредитного платежу до пропуску.');
   }
   const dueById = new Map(payment.loanPayments.map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
-  const blockingLoan = (state.loans ?? []).find((loan) => dueById.has(loan.id) && loan.missedPayments > 0 && !canCollateralDefault(loan));
-  if (blockingLoan) throw new Error('Цей кредит уже прострочено. Треба сплатити або здатися.');
+  const blockingLoan = (state.loans ?? []).find((loan) => dueById.has(loan.id) && !canMissLoanPaymentAgain(loan));
+  if (blockingLoan) throw new Error('Цей кредит треба сплатити або здатися.');
 
   let next: GameState = { ...state, pendingPayment: undefined, phase: 'turnEnd' };
-  const defaultedLoanIds = new Set<string>();
   const updatedLoans = (state.loans ?? []).map((loan) => {
     const missedAmount = dueById.get(loan.id);
     if (!missedAmount) return loan;
-    if (loan.missedPayments > 0 && canCollateralDefault(loan)) {
-      defaultedLoanIds.add(loan.id);
-      next = transferCollateralToLender(next, loan);
-      return loan;
-    }
     const lateFee = ceilMoney(missedAmount * (loan.kind === 'bank' ? BANK_LOAN_LATE_FEE : PLAYER_LOAN_LATE_FEE));
     return {
       ...loan,
@@ -2123,31 +2175,17 @@ const missLoanPayment = (state: GameState, playerId: string): GameState => {
       deferredTurns: (loan.deferredTurns ?? 0) + 1,
     };
   });
-
   next = {
     ...next,
-    loans: updatedLoans.filter((loan) => !defaultedLoanIds.has(loan.id)),
-    log: appendLog(
-      next,
-      defaultedLoanIds.size > 0
-        ? `${getPlayer(state, playerId).name} не сплачує кредит. Застава переходить кредитору.`
-        : `${getPlayer(state, playerId).name} пропускає виплату за кредитом. Наступна виплата стане дорожчою.`,
-      'bad',
-    ),
+    loans: updatedLoans,
+    log: appendLog(next, `${getPlayer(state, playerId).name} пропускає виплату за кредитом. Наступна виплата стане дорожчою.`, 'bad'),
   };
 
   return endTurn(next, playerId);
 };
 
-const canCollateralDefault = (loan: ActiveLoan): boolean =>
-  loan.kind === 'player' && Boolean(loan.lenderId) && loan.collateralTileIds.length > 0;
-
-const transferCollateralToLender = (state: GameState, loan: ActiveLoan): GameState => {
-  if (!loan.lenderId || loan.collateralTileIds.length === 0) return state;
-  const lender = state.players.find((player) => player.id === loan.lenderId && !player.isBankrupt);
-  if (!lender) return state;
-  return moveProperties(state, loan.borrowerId, loan.lenderId, loan.collateralTileIds);
-};
+const canMissLoanPaymentAgain = (loan: ActiveLoan): boolean =>
+  loan.kind === 'player' ? getLoanEffectiveRemainingTurns(loan) > 1 : loan.missedPayments === 0;
 
 const payRent = (state: GameState, playerId: string): GameState => {
   assertCurrent(state, playerId);
@@ -2222,6 +2260,61 @@ const useUnoReverse = (state: GameState, playerId: string): GameState => {
       `${player.name} використовує УНО РЕВЕРС: тепер ${target.name} має сплатити ${pendingRent.amount}₴ гравцю ${player.name}.`,
       'good',
     ),
+  };
+};
+
+const useLoanPayoffCard = (state: GameState, playerId: string, loanId: string): GameState => {
+  assertLoanManagementPhase(state, playerId);
+  const player = getPlayer(state, playerId);
+  if (getLoanPayoffCardCount(player) <= 0) throw new Error('У гравця немає картки погашення кредиту.');
+  const loan = (state.loans ?? []).find((candidate) => candidate.id === loanId);
+  if (!loan || loan.borrowerId !== playerId) throw new Error('Можна погасити лише власний активний кредит.');
+
+  const lender = loan.kind === 'player' && loan.lenderId ? getPlayer(state, loan.lenderId) : undefined;
+  const isCurrentLoanPayment =
+    state.phase === 'payment' &&
+    state.pendingPayment?.source === 'loan' &&
+    state.pendingPayment.payerId === playerId &&
+    Boolean(state.pendingPayment.loanPayments?.some((loanPayment) => loanPayment.loanId === loanId));
+  const filteredPendingPayment = filterLoanOutOfPendingPayment(state.pendingPayment, loanId);
+  const nextLoanQueue = isCurrentLoanPayment ? filteredPendingPayment?.loanPaymentQueue ?? [] : [];
+  const loans = (state.loans ?? []).filter((candidate) => candidate.id !== loanId);
+
+  const next: GameState = {
+    ...state,
+    phase: isCurrentLoanPayment ? 'rolling' : state.phase,
+    pendingPayment: isCurrentLoanPayment ? undefined : filteredPendingPayment,
+    loans,
+    players: state.players.map((candidate) => {
+      if (candidate.id === playerId) {
+        return { ...candidate, loanPayoffCards: Math.max(0, getLoanPayoffCardCount(candidate) - 1) };
+      }
+      if (lender && candidate.id === lender.id) return { ...candidate, money: candidate.money + loan.remainingDue };
+      return candidate;
+    }),
+    log: appendLog(
+      state,
+      lender
+        ? `${player.name} використовує картку погашення кредиту. Банк закриває борг ${loan.remainingDue}₴ перед ${lender.name}.`
+        : `${player.name} використовує картку погашення кредиту і закриває банк-кредит ${loan.remainingDue}₴.`,
+      'good',
+    ),
+  };
+
+  return isCurrentLoanPayment ? createNextLoanPaymentFromQueue(next, playerId, nextLoanQueue) : next;
+};
+
+const filterLoanOutOfPendingPayment = (
+  payment: GameState['pendingPayment'],
+  loanId: string,
+): GameState['pendingPayment'] => {
+  if (payment?.source !== 'loan') return payment;
+  const loanPayments = (payment.loanPayments ?? []).filter((loanPayment) => loanPayment.loanId !== loanId);
+  const loanPaymentQueue = (payment.loanPaymentQueue ?? []).filter((loanPayment) => loanPayment.loanId !== loanId);
+  return {
+    ...payment,
+    loanPayments,
+    loanPaymentQueue,
   };
 };
 
@@ -2655,6 +2748,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const pendingPayment = isPendingPaymentPayer ? state.pendingPayment : undefined;
   const pendingBankDeposit = state.pendingBankDeposit?.playerId === playerId ? state.pendingBankDeposit : undefined;
   const collateralTransfers = getBankruptcyCollateralTransfers(state, playerId);
+  const loanBankPayouts = getBankruptcyLoanBankPayouts(state, playerId);
   const creditorPayments = distributeCreditorPayments(
     debtor.money,
     pendingRent ? [{ playerId: pendingRent.ownerId, amount: pendingRent.amount }] : pendingPayment?.recipients ?? [],
@@ -2665,11 +2759,16 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     players: state.players.map((player) => {
       if (player.id === playerId) return { ...player, isBankrupt: true, properties: [], money: 0 };
       const received = creditorPayments.get(player.id) ?? 0;
+      const loanBankPayout = loanBankPayouts.get(player.id) ?? 0;
       const collateralTileIds = collateralTransfers
         .filter((transfer) => transfer.lenderId === player.id)
         .map((transfer) => transfer.tileId);
-      if (received > 0 || collateralTileIds.length > 0) {
-        return { ...player, money: player.money + received, properties: Array.from(new Set([...player.properties, ...collateralTileIds])) };
+      if (received > 0 || loanBankPayout > 0 || collateralTileIds.length > 0) {
+        return {
+          ...player,
+          money: player.money + received + loanBankPayout,
+          properties: Array.from(new Set([...player.properties, ...collateralTileIds])),
+        };
       }
       return player;
     }),
@@ -2771,12 +2870,18 @@ const drawCard = (state: GameState, playerId: string, deck: CardDeck): GameState
   const discard = deck === 'chance' ? state.discardChance : state.discardCommunity;
   const fullDeck = deck === 'chance' ? chanceCards : communityCards;
   const recyclableDiscard = getRecyclableCardDiscard(deck, discard);
-  const replenished = source.length
+  const baseReplenished = source.length
     ? source
     : recyclableDiscard.length
       ? recyclableDiscard
       : createCardDeck(fullDeck.filter((candidate) => isReusableCard(deck, candidate.id)));
-  const [cardId, ...rest] = replenished;
+  const replenished = baseReplenished.some((cardId) => isCardDrawable(state, deck, cardId))
+    ? baseReplenished
+    : [
+        ...baseReplenished,
+        ...createCardDeck(fullDeck.filter((candidate) => isReusableCard(deck, candidate.id) && isCardDrawable(state, deck, candidate.id))),
+      ];
+  const { cardId, rest } = drawCardIdFromDeck(state, playerId, deck, replenished);
   const card = fullDeck.find((candidate) => candidate.id === cardId) ?? fullDeck[0];
   const nextDiscard = source.length ? discard : [];
   const applied = card.apply(
@@ -3040,6 +3145,17 @@ const getBankruptcyCollateralTransfers = (state: GameState, borrowerId: string):
         .map((tileId) => ({ tileId, lenderId }));
     });
 
+const getBankruptcyLoanBankPayouts = (state: GameState, borrowerId: string): Map<string, number> => {
+  const payouts = new Map<string, number>();
+  (state.loans ?? []).forEach((loan) => {
+    if (loan.kind !== 'player' || loan.borrowerId !== borrowerId || !loan.lenderId || loan.remainingDue <= 0) return;
+    const lender = state.players.find((player) => player.id === loan.lenderId && !player.isBankrupt);
+    if (!lender) return;
+    payouts.set(lender.id, (payouts.get(lender.id) ?? 0) + ceilMoney(loan.remainingDue * PLAYER_LOAN_BANKRUPTCY_PAYOUT_RATE));
+  });
+  return payouts;
+};
+
 const getLoanNetWorth = (loans: ActiveLoan[], playerId: string): number =>
   loans.reduce((sum, loan) => {
     if (loan.borrowerId === playerId) return sum - loan.remainingDue;
@@ -3103,6 +3219,8 @@ const getPlayer = (state: GameState, playerId: string): Player => {
 
 const getUnoReverseCardCount = (player: Player): number => Math.min(UNO_REVERSE_CARD_LIMIT, player.unoReverseCards ?? 0);
 
+const getLoanPayoffCardCount = (player: Player): number => Math.min(LOAN_PAYOFF_CARD_LIMIT, player.loanPayoffCards ?? 0);
+
 const assertCurrent = (state: GameState, playerId: string) => {
   if (state.currentPlayerId !== playerId) throw new Error('Зараз хід іншого гравця.');
 };
@@ -3155,6 +3273,75 @@ const getRecyclableCardDiscard = (deck: CardDeck, discard: number[]): number[] =
 
 const isReusableCard = (deck: CardDeck, cardId: number): boolean =>
   !(deck === 'chance' && cardId === UNO_REVERSE_CARD_ID);
+
+const drawCardIdFromDeck = (
+  state: GameState,
+  playerId: string,
+  deck: CardDeck,
+  cardIds: number[],
+): { cardId: number; rest: number[] } => {
+  const drawableEntries = cardIds
+    .map((cardId, index) => ({ cardId, index }))
+    .filter((entry) => isCardDrawable(state, deck, entry.cardId));
+  const candidates = drawableEntries.length > 0 ? drawableEntries : cardIds.map((cardId, index) => ({ cardId, index }));
+
+  if (
+    deck !== 'community' ||
+    candidates.length <= 1 ||
+    !candidates.some((entry) => entry.cardId === COMMUNISM_COMMUNITY_CARD_ID)
+  ) {
+    const selectedIndex = candidates[0]?.index ?? 0;
+    return {
+      cardId: cardIds[selectedIndex],
+      rest: cardIds.filter((_, index) => index !== selectedIndex),
+    };
+  }
+
+  const communismWeight = getCommunismDrawWeightMultiplier(state, playerId);
+  if (communismWeight === 1) {
+    const selectedIndex = candidates[0]?.index ?? 0;
+    return {
+      cardId: cardIds[selectedIndex],
+      rest: cardIds.filter((_, index) => index !== selectedIndex),
+    };
+  }
+
+  const totalWeight = candidates.reduce(
+    (sum, entry) => sum + (entry.cardId === COMMUNISM_COMMUNITY_CARD_ID ? communismWeight : 1),
+    0,
+  );
+  let target = Math.random() * totalWeight;
+  const selectedCandidateIndex = candidates.findIndex((entry) => {
+    target -= entry.cardId === COMMUNISM_COMMUNITY_CARD_ID ? communismWeight : 1;
+    return target < 0;
+  });
+  const safeIndex = selectedCandidateIndex >= 0 ? candidates[selectedCandidateIndex].index : candidates[candidates.length - 1].index;
+  return {
+    cardId: cardIds[safeIndex],
+    rest: cardIds.filter((_, index) => index !== safeIndex),
+  };
+};
+
+const isCardDrawable = (state: GameState, deck: CardDeck, cardId: number): boolean => {
+  if (deck === 'chance' && cardId === LOAN_PAYOFF_CARD_ID) {
+    return (state.loans ?? []).some((loan) => loan.remainingDue > 0);
+  }
+  return true;
+};
+
+const getCommunismDrawWeightMultiplier = (state: GameState, playerId: string): number => {
+  const activePlayers = state.players.filter((player) => !player.isBankrupt);
+  const player = activePlayers.find((candidate) => candidate.id === playerId);
+  if (!player || activePlayers.length < 2) return 1;
+
+  const cashValues = activePlayers.map((candidate) => candidate.money);
+  const maxCash = Math.max(...cashValues);
+  const minCash = Math.min(...cashValues);
+  if (maxCash === minCash) return 1;
+  if (player.money === maxCash) return COMMUNISM_RICH_CASH_WEIGHT_MULTIPLIER;
+  if (player.money === minCash) return COMMUNISM_LOW_CASH_WEIGHT_MULTIPLIER;
+  return 1;
+};
 
 const createCityEventDeck = (recentDiscard: CityEventId[] = []): CityEventId[] => {
   const recentSet = new Set(recentDiscard.slice(-5));

@@ -117,7 +117,7 @@ Engine:
 - District creation: `createDistrictPath`.
 - Buildings: `buildOnCity`, `sellBuilding`.
 - Mortgage/unmortgage: `mortgageProperty`, `unmortgageProperty`.
-- Credits: `proposeLoan`, `acceptLoan`, `takeBankLoan`, `missLoanPayment`.
+- Credits: `proposeLoan`, `acceptLoan`, `takeBankLoan`, `missLoanPayment`, `useLoanPayoffCard`.
 - Bankruptcy/surrender: `declareBankruptcy`.
 - Bank deposits: `startBankDeposit`, `getBankDepositInfo`, `getBankDepositPayout`.
 
@@ -127,7 +127,7 @@ UI:
 - Auction UI: `AuctionOverlay`, `AuctionWinAnimationLayer`.
 - Property management: `ManagePanel`, `CityAssetCard`, `SimpleAssetCard`, `CityModal`, `ServicePropertyModal`.
 
-Important: on `declare_bankruptcy`, the surrendered player's properties do not transfer to a creditor. They become neutral/bank-owned. A debtor can only transfer available cash to a creditor for pending rent/payment.
+Important: on `declare_bankruptcy`, the surrendered player's normal properties do not transfer to a creditor. They become neutral/bank-owned. The exception is player-loan collateral: pledged collateral transfers to the lender, and the bank pays that lender 60% of the borrower's unpaid active player-loan debt. A debtor can still transfer available cash to a creditor for pending rent/payment.
 
 ## Bank Deposits
 
@@ -161,20 +161,28 @@ Engine:
 
 - State lives in `GameState.loans` and `GameState.loanOffers`.
 - Types: `LoanOffer`, `ActiveLoan`, and `LoanKind` in `client/src/engine/types.ts`.
-- Actions: `propose_loan`, `accept_loan`, `decline_loan`, `take_bank_loan`, and `miss_loan_payment`.
-- Player-to-player loan offers are custom contracts: `50-800₴`, `2-10` borrower turns, total repayment from `100%` to `180%`, optional collateral.
+- Actions: `propose_loan`, `accept_loan`, `decline_loan`, `take_bank_loan`, `miss_loan_payment`, and `use_loan_payoff_card`.
+- Player-to-player loan offers are custom contracts: `50-800₴`, `2-10` borrower turns, total repayment from `100%` to `180%`, optional collateral. `LoanOffer.proposerId` stores who initiated the contract: if the lender proposes, the borrower accepts; if the borrower requests a loan, the lender accepts.
 - A borrower may have up to 3 active player loans.
 - Collateral must be borrower-owned, unmortgaged, without buildings, and unused by another active loan. Collateral cannot be traded, mortgaged, or built on while locked.
-- Bank loans are available during the player turn or financial decisions, at most 1 active bank loan per borrower, up to `500₴` and capped by `30%` of player worth. They last 6 borrower turns and repay `115%`.
+- Bank loans are available during the player turn or financial decisions, at most 1 active bank loan per borrower, up to `500₴` and capped by `30%` of player worth. They last 10 borrower turns and repay `130%`.
 - Loan installments are created as `pendingPayment.source === 'loan'` when the borrower’s own turn starts, before rolling.
-- Missing a first loan payment adds a late fee and carries the missed amount into the next installment. Player loans use a 10% late fee; bank loans use 20%.
-- A second miss on a collateralized player loan transfers the collateral to the lender and closes the loan. A second miss on unsecured or bank loans is mandatory pay-or-surrender.
-- Borrower bankruptcy transfers collateralized player-loan collateral before remaining borrower property returns to the bank. Other borrower debts clear. Lender bankruptcy cancels outgoing player loans.
+- Due loan installments are shown one at a time, not aggregated into one payment. `createLoanPaymentIfDue` sorts bank loans before player loans and stores the rest in `PendingPayment.loanPaymentQueue`; after each `pay_payment`, the next queued loan payment is opened before the borrower can roll.
+- Missing a loan payment adds a late fee and carries the missed amount into the next installment. Player loans use a 10% late fee; bank loans use 20%.
+- Player-to-player loans may be missed repeatedly until the final effective installment. The final installment is mandatory pay-or-surrender, and the whole carried debt must be paid.
+- Bank loans allow one miss; the next bank-loan due payment is mandatory pay-or-surrender.
+- Borrower bankruptcy transfers player-loan collateral to the lender, clears the debt, and pays the lender 60% of the unpaid active player-loan debt from the bank. Lender bankruptcy cancels outgoing player loans.
+- Chance card id `14` (`Кредитна амністія`) is a rare unique card that can only be drawn while at least one active loan exists. It adds `Player.loanPayoffCards` up to 1. `use_loan_payoff_card` closes one active loan where the player is the borrower; for player loans, the bank pays the remaining debt to the lender, and for bank loans the debt is simply removed.
 
 UI:
 
 - Credit management lives in the workspace drawer `Кредити` tab in `GameScreen.tsx`.
+- The credit builder supports both `Дати` and `Попросити` modes, and closes the drawer after a proposal is sent so the log confirmation is visible.
+- Pending player-loan offers also appear in the board center via `BoardActiveLoanOffer` / `LoanOfferCard`, similar to trade offers, so the responder can accept or decline without opening the drawer.
 - Loan due payments reuse `PaymentDecisionPanel`; only loan payments show the `Пропустити` action.
+- Active loan cards show a `Погасити карткою` button when the borrower has `Кредитна амністія`. The drawer "My cards" section also shows the held payoff card.
+- `PlayerRail` shows a credit status chip for players with unpaid active loans.
+- Loan offer resolution animations use `useLoanOfferAnimationEvents`, `LoanOfferAnimationLayer`, and `.loan-offer-*` CSS: accepted offers show a handshake animation, declined offers show a disagreement animation.
 
 ## District Paths
 
@@ -200,7 +208,7 @@ Path behavior:
 
 - `tourist`: existing rent, build, and sale behavior.
 - `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.5`). For building/hotel rent in the green group, use `GREEN_DISTRICT_BUILDING_RENT_DIVISOR` (`4`); for the gold Kyiv/Lviv group, use `GOLD_DISTRICT_BUILDING_RENT_DIVISOR` (`3.5`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the same group-specific building divisor when the crossed green/gold city has buildings.
-- `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent follows the same district rent divisors as Old Town, and the owner may build exactly up to 2 times in that district per dice roll.
+- `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent is tourist rent divided by `RESIDENTIAL_DISTRICT_RENT_DIVISOR` (`2.25`), and the owner may build exactly up to 2 times in that district per dice roll.
 - Any created district increases city mortgage value by that city's share of half the district creation cost. Do not reduce mortgage value by the district rent divisor.
 
 Money helpers:
@@ -285,6 +293,8 @@ Engine:
 
 - Deck creation: `createCardDeck`.
 - Draw flow: `drawPendingCard`, `drawCard`.
+- Community card id `12` (`Економіка просочування`) uses a cash-on-hand draw bias in `drawCardIdFromDeck`: richest active players get a higher card weight, lowest-cash active players get a lower card weight, equal-cash games stay normal.
+- Chance card id `14` (`Кредитна амністія`) is draw-gated by active loans in `isCardDrawable`. If no active loan exists, the draw skips that card and picks another drawable Chance card.
 - Post-card tile resolution: `resolveTileAfterCard`, `deferCurrentPlayerLossFromCard`.
 - `pendingCard` exists for overlays and auto-continue delay.
 

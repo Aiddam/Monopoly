@@ -240,9 +240,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
   dispatch(action, fromPeer = false) {
     const { game, peerMesh, room, roomClient, localPlayerId } = get();
     if (!game) return;
-    const isHost = !room || room.players.find((player) => player.id === localPlayerId)?.isHost;
+    const hasAuthority = hasLocalGameAuthority(room, localPlayerId, game);
 
-    if (!isHost && !fromPeer) {
+    if (!hasAuthority && !fromPeer) {
       clearConnectionErrorState();
       broadcastRoomMessage(room, roomClient, peerMesh, { type: 'game:action', action });
       return;
@@ -274,22 +274,24 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   applyRemoteMessage(message, _fromPeerId) {
     const { game, room, localPlayerId, peerMesh } = get();
-    const isHost = room?.players.find((player) => player.id === localPlayerId)?.isHost;
+    const hasAuthority = hasLocalGameAuthority(room, localPlayerId, game);
     if (message.type === 'emote') {
       pushEmoteEvent(message);
       return;
     }
     if (message.type === 'game:init' || message.type === 'game:state') {
+      if (message.type === 'game:state' && isStaleGameState(game, message.state)) return;
       set({ game: message.state, screen: screenForGame(message.state) });
       persistCurrentSession(get());
     }
-    if (message.type === 'game:action' && isHost) {
+    if (message.type === 'game:action' && hasAuthority) {
       get().dispatch(message.action, true);
     }
-    if (message.type === 'sync:request' && isHost && game) {
+    if (message.type === 'sync:request' && hasAuthority && game) {
       broadcastRoomMessage(room, get().roomClient, peerMesh, { type: 'sync:response', state: game });
     }
     if (message.type === 'sync:response') {
+      if (isStaleGameState(game, message.state)) return;
       set({ game: message.state, screen: screenForGame(message.state) });
       persistCurrentSession(get());
     }
@@ -558,6 +560,26 @@ const broadcastRoomMessage = (
 
 const resolveLocalPlayerId = (room: RoomSnapshot, preferredId: string, fallbackId?: string): string =>
   room.players.some((player) => player.id === preferredId) ? preferredId : fallbackId ?? room.players[0]?.id ?? preferredId;
+
+const hasLocalGameAuthority = (
+  room: RoomSnapshot | undefined,
+  localPlayerId: string | undefined,
+  game: GameState | undefined,
+): boolean => {
+  if (!room) return true;
+  if (!localPlayerId) return false;
+  const localPlayer = room.players.find((player) => player.id === localPlayerId);
+  if (!localPlayer) return false;
+  if (localPlayer.isHost) return true;
+
+  const hasOnlineHost = room.players.some((player) => player.isHost && player.online !== false);
+  if (hasOnlineHost) return false;
+
+  return game?.currentPlayerId === localPlayerId;
+};
+
+const isStaleGameState = (current: GameState | undefined, incoming: GameState): boolean =>
+  Boolean(current && incoming.turn < current.turn);
 
 const createStablePlayerId = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto

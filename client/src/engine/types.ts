@@ -114,6 +114,7 @@ export interface Player {
   jailTurns: number;
   jailCards: number;
   unoReverseCards?: number;
+  loanPayoffCards?: number;
   isBankrupt: boolean;
   ready?: boolean;
 }
@@ -176,6 +177,7 @@ export interface LoanOffer {
   id: string;
   lenderId: string;
   borrowerId: string;
+  proposerId?: string;
   principal: number;
   totalRepayment: number;
   durationTurns: number;
@@ -275,6 +277,10 @@ export interface PendingPayment {
     amount: number;
   }>;
   loanPayments?: Array<{
+    loanId: string;
+    amount: number;
+  }>;
+  loanPaymentQueue?: Array<{
     loanId: string;
     amount: number;
   }>;
@@ -424,6 +430,7 @@ export type GameAction =
   | { type: 'decline_loan'; playerId: string; offerId: string }
   | { type: 'take_bank_loan'; playerId: string; amount: number }
   | { type: 'miss_loan_payment'; playerId: string }
+  | { type: 'use_loan_payoff_card'; playerId: string; loanId: string }
   | { type: 'pay_rent'; playerId: string }
   | { type: 'use_uno_reverse'; playerId: string }
   | { type: 'pay_payment'; playerId: string }

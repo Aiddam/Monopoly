@@ -16,6 +16,7 @@ import {
   Flag,
   Hammer,
   HandCoins,
+  Handshake,
   HeartCrack,
   Home,
   Hotel,
@@ -52,6 +53,7 @@ import {
   AUCTION_BID_INCREMENT,
   calculateRent,
   getBankLoanLimit,
+  getBankLoanRepaymentAmount,
   getBankDepositInfo,
   getBankDepositPayout,
   getDistrictCreationCost,
@@ -118,6 +120,7 @@ const BUILDING_ANIMATION_MS = 2600;
 const DISTRICT_PATH_ANIMATION_MS = 3400;
 const AUCTION_WIN_ANIMATION_MS = 3000;
 const MORTGAGE_ANIMATION_MS = 2800;
+const LOAN_OFFER_ANIMATION_MS = 3100;
 const UNO_REVERSE_ANIMATION_MS = 3200;
 const CITY_EVENT_REVEAL_MS = 5200;
 const SOUND_STORAGE_KEY = 'monopoly-sound-enabled';
@@ -165,7 +168,8 @@ type TradeDraft = {
 };
 type TradeDraftUpdater = Dispatch<SetStateAction<TradeDraft | undefined>>;
 type LoanDraft = {
-  borrowerId: string;
+  mode: 'lend' | 'borrow';
+  partnerId: string;
   principal: number;
   totalRepayment: number;
   durationTurns: number;
@@ -203,6 +207,16 @@ type MortgageAnimationEvent = {
   kind: 'mortgage' | 'redeem' | 'released';
   tileName: string;
   color: string;
+};
+type LoanOfferAnimationEvent = {
+  id: string;
+  kind: 'accepted' | 'declined';
+  lenderName: string;
+  borrowerName: string;
+  lenderColor: string;
+  borrowerColor: string;
+  principal: number;
+  totalRepayment: number;
 };
 type UnoReverseAnimationEvent = {
   id: string;
@@ -261,6 +275,7 @@ const DISTRICT_PATH_OPTIONS: Array<{
 
 const DISTRICT_PATH_VIEW = new Map(DISTRICT_PATH_OPTIONS.map((option) => [option.path, option]));
 const DISTRICT_RENT_DIVISOR = 2.5;
+const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 2.25;
 const GREEN_DISTRICT_BUILDING_RENT_DIVISOR = 4;
 const GOLD_DISTRICT_BUILDING_RENT_DIVISOR = 3.5;
 const GREEN_DISTRICT_RENT_GROUPS = new Set(['Зелена']);
@@ -323,11 +338,16 @@ export const GameScreen = () => {
       offer.status === 'pending' &&
       (!room || offer.fromPlayerId === localPlayer.id || offer.toPlayerId === localPlayer.id),
   );
+  const activeLoanOffer = (game.loanOffers ?? []).find(
+    (offer) =>
+      offer.status === 'pending' &&
+      (!room || offer.lenderId === localPlayer.id || offer.borrowerId === localPlayer.id),
+  );
   const incomingTrade = game.tradeOffers.find(
     (offer) => offer.status === 'pending' && (!room || offer.toPlayerId === localPlayer.id),
   );
   const incomingLoanOffer = (game.loanOffers ?? []).find(
-    (offer) => offer.status === 'pending' && (!room || offer.borrowerId === localPlayer.id),
+    (offer) => offer.status === 'pending' && (!room || isLoanOfferResponder(offer, localPlayer.id)),
   );
   const rollingKey = game.diceRollId || game.turn * 10 + game.dice[0] + game.dice[1];
   const secondsLeft = useTurnTimer(game, isLocalTurn, dispatch);
@@ -338,6 +358,7 @@ export const GameScreen = () => {
   const { displayPositions, isAnimating: isPawnAnimating } = useAnimatedPositions(game);
   const isBoardBusy = isDiceRolling || isPawnAnimating;
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
+  const canAdvanceTurn = isHost || isLocalTurn;
   const canUseAdmin = Boolean(room?.testMode);
   const recentEmoteSentAt = emoteSentAt.filter((sentAt) => emoteCooldownNow - sentAt < EMOTE_COOLDOWN_WINDOW_MS);
   const emoteCooldownRemainingMs =
@@ -349,7 +370,7 @@ export const GameScreen = () => {
   const emoteCooldownProgress = isEmoteCooldownActive
     ? emoteCooldownRemainingMs / EMOTE_COOLDOWN_WINDOW_MS
     : 0;
-  useAutoContinueTurn(game, isHost, dispatch, isBoardBusy);
+  useAutoContinueTurn(game, canAdvanceTurn, dispatch, isBoardBusy);
   useGameSounds(game, soundEnabled, localPlayer.id, Boolean(room));
   useEmoteSounds(emotes, soundEnabled, localPlayer.id);
 
@@ -550,6 +571,7 @@ export const GameScreen = () => {
           isDiceRolling={isDiceRolling}
           rollingKey={rollingKey}
           isLocalTurn={isLocalTurn}
+          canAdvanceTurn={canAdvanceTurn}
           orderRollPlayer={orderRollPlayer}
           canLocalRollForOrder={canLocalRollForOrder}
           isBoardBusy={isBoardBusy}
@@ -565,6 +587,9 @@ export const GameScreen = () => {
           activeTradeOffer={activeTradeOffer}
           activeTradeViewerId={activeTradeOffer && !room ? activeTradeOffer.toPlayerId : localPlayer.id}
           canRespondToActiveTrade={Boolean(activeTradeOffer && (activeTradeOffer.toPlayerId === localPlayer.id || !room))}
+          activeLoanOffer={activeLoanOffer}
+          activeLoanViewerId={activeLoanOffer && !room ? getLoanOfferResponderId(activeLoanOffer) : localPlayer.id}
+          canRespondToActiveLoan={Boolean(activeLoanOffer && (isLoanOfferResponder(activeLoanOffer, localPlayer.id) || !room))}
           canResolveCasino={isHost}
         />
       </div>
@@ -929,6 +954,7 @@ const GameBoard = ({
   isDiceRolling,
   rollingKey,
   isLocalTurn,
+  canAdvanceTurn,
   orderRollPlayer,
   canLocalRollForOrder,
   isBoardBusy,
@@ -944,6 +970,9 @@ const GameBoard = ({
   activeTradeOffer,
   activeTradeViewerId,
   canRespondToActiveTrade,
+  activeLoanOffer,
+  activeLoanViewerId,
+  canRespondToActiveLoan,
   canResolveCasino,
 }: {
   game: GameState;
@@ -951,6 +980,7 @@ const GameBoard = ({
   isDiceRolling: boolean;
   rollingKey: number;
   isLocalTurn: boolean;
+  canAdvanceTurn: boolean;
   orderRollPlayer: Player;
   canLocalRollForOrder: boolean;
   isBoardBusy: boolean;
@@ -966,6 +996,9 @@ const GameBoard = ({
   activeTradeOffer?: TradeOffer;
   activeTradeViewerId: string;
   canRespondToActiveTrade: boolean;
+  activeLoanOffer?: LoanOffer;
+  activeLoanViewerId: string;
+  canRespondToActiveLoan: boolean;
   canResolveCasino: boolean;
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
@@ -974,6 +1007,7 @@ const GameBoard = ({
   const districtPathEvents = useDistrictPathAnimationEvents(game);
   const auctionWinEvents = useAuctionWinAnimationEvents(game);
   const mortgageEvents = useMortgageAnimationEvents(game);
+  const loanOfferEvents = useLoanOfferAnimationEvents(game);
   const unoReverseEvents = useUnoReverseAnimationEvents(game);
   const hasBuildingShock = buildingEvents.length > 0;
   const hasDistrictShock = districtPathEvents.length > 0;
@@ -1052,6 +1086,14 @@ const GameBoard = ({
               canRespond={canRespondToActiveTrade}
               dispatch={dispatch}
             />
+          ) : activeLoanOffer ? (
+            <BoardActiveLoanOffer
+              game={game}
+              offer={activeLoanOffer}
+              viewerId={activeLoanViewerId}
+              canRespond={canRespondToActiveLoan}
+              dispatch={dispatch}
+            />
           ) : (
             <BoardLogFeed game={game} deferUpdates={isBoardBusy} />
           )}
@@ -1059,6 +1101,7 @@ const GameBoard = ({
             game={game}
             isDiceRolling={isDiceRolling}
             isLocalTurn={isLocalTurn}
+            canAdvanceTurn={canAdvanceTurn}
             orderRollPlayer={orderRollPlayer}
             canLocalRollForOrder={canLocalRollForOrder}
             isBoardBusy={isBoardBusy}
@@ -1083,6 +1126,7 @@ const GameBoard = ({
         <BuildingAnimationLayer events={buildingEvents} />
         <AuctionWinAnimationLayer events={auctionWinEvents} />
         <MortgageAnimationLayer events={mortgageEvents} />
+        <LoanOfferAnimationLayer events={loanOfferEvents} />
         <UnoReverseAnimationLayer events={unoReverseEvents} />
         <BoardPawns game={game} displayPositions={displayPositions} />
         <DiceRollOverlay game={game} isRolling={isDiceRolling} rollingKey={rollingKey} />
@@ -1209,6 +1253,36 @@ const BoardActiveTrade = ({
     </motion.div>
   );
 };
+
+const BoardActiveLoanOffer = ({
+  game,
+  offer,
+  viewerId,
+  canRespond,
+  dispatch,
+}: {
+  game: GameState;
+  offer: LoanOffer;
+  viewerId: string;
+  canRespond: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => (
+  <motion.div
+    className="board-active-trade board-active-loan"
+    initial={{ opacity: 0, y: 10, scale: 0.98 }}
+    animate={{ opacity: 1, y: 0, scale: 1 }}
+    exit={{ opacity: 0, y: 10, scale: 0.98 }}
+    transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+  >
+    <LoanOfferCard
+      game={game}
+      offer={offer}
+      viewerId={viewerId}
+      canRespond={canRespond}
+      dispatch={dispatch}
+    />
+  </motion.div>
+);
 
 const BoardTurnOrderPrompt = ({
   game,
@@ -1838,7 +1912,7 @@ const PaymentDecisionPanel = ({
           <button
             className="secondary compact"
             disabled={!isLocalTurn || loanMissBlocked}
-            title={loanMissBlocked ? 'Цей кредит уже прострочено. Треба сплатити або здатися.' : 'Пропустити виплату і завершити хід.'}
+            title={loanMissBlocked ? 'Цей кредит треба сплатити або здатися.' : 'Пропустити виплату і завершити хід.'}
             onClick={() => dispatch({ type: 'miss_loan_payment', playerId: pendingPayment.payerId })}
           >
             <Clock3 size={16} />
@@ -1957,6 +2031,7 @@ const BoardActionDock = ({
   game,
   isDiceRolling,
   isLocalTurn,
+  canAdvanceTurn,
   orderRollPlayer,
   canLocalRollForOrder,
   isBoardBusy,
@@ -1968,6 +2043,7 @@ const BoardActionDock = ({
   game: GameState;
   isDiceRolling: boolean;
   isLocalTurn: boolean;
+  canAdvanceTurn: boolean;
   orderRollPlayer: Player;
   canLocalRollForOrder: boolean;
   isBoardBusy: boolean;
@@ -2094,9 +2170,20 @@ const BoardActionDock = ({
               Кинути ще раз
             </button>
           ) : (
-            <span className="dock-note">
-              {hasPendingTrade ? 'Очікуємо відповідь на угоду' : 'Хід завершується автоматично'}
-            </span>
+            <div className={`dock-note ${!hasPendingTrade ? 'dock-note-action' : ''}`}>
+              <span>{hasPendingTrade ? 'Очікуємо відповідь на угоду' : 'Хід завершується автоматично'}</span>
+              {!hasPendingTrade && canAdvanceTurn && (
+                <button
+                  className="ghost compact"
+                  type="button"
+                  disabled={isBoardBusy}
+                  title={isBoardBusy ? 'Дочекайтесь завершення анімації.' : 'Продовжити хід вручну'}
+                  onClick={() => dispatch({ type: 'continue_turn', playerId: currentPlayer.id })}
+                >
+                  Продовжити
+                </button>
+              )}
+            </div>
           ))}
 
         {(game.phase === 'manage' || game.phase === 'trade') && (
@@ -2125,10 +2212,6 @@ const BoardActionDock = ({
         <button className="dock-tool accent" type="button" onClick={() => onOpenWorkspace('trade')}>
           <ArrowLeftRight size={18} />
           Угода
-        </button>
-        <button className="dock-tool" type="button" onClick={() => onOpenWorkspace('credits')}>
-          <HandCoins size={18} />
-          Кредити
         </button>
         <button
           className="dock-tool icon-only"
@@ -3015,6 +3098,62 @@ const MortgageAnimationLayer = ({ events }: { events: MortgageAnimationEvent[] }
   </div>
 );
 
+const LoanOfferAnimationLayer = ({ events }: { events: LoanOfferAnimationEvent[] }) => (
+  <div className="loan-offer-animation-layer" aria-live="polite">
+    <AnimatePresence>
+      {events.map((event) => {
+        const isAccepted = event.kind === 'accepted';
+        return (
+          <motion.div
+            className={`loan-offer-event ${event.kind}`}
+            key={event.id}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            style={
+              {
+                '--loan-lender-color': event.lenderColor,
+                '--loan-borrower-color': event.borrowerColor,
+              } as CSSProperties
+            }
+          >
+            <motion.div
+              className="loan-offer-burst"
+              initial={{ scale: 0.38, opacity: 0 }}
+              animate={{ scale: [0.38, 1.05, 1.28], opacity: [0, 0.68, 0] }}
+              transition={{ duration: 1.15, delay: 0.18 }}
+              aria-hidden
+            />
+            <motion.div
+              className="loan-offer-card"
+              initial={{ y: 30, scale: 0.74, rotateZ: isAccepted ? -5 : 5 }}
+              animate={{
+                y: [30, -8, 0],
+                scale: [0.74, 1.08, 1],
+                rotateZ: isAccepted ? [-5, 3, 0] : [5, -4, 3, 0],
+              }}
+              exit={{ y: 14, scale: 0.92, opacity: 0 }}
+              transition={{ duration: isAccepted ? 0.62 : 0.7, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <span className="loan-offer-icon">{isAccepted ? <Handshake size={30} /> : <X size={30} />}</span>
+              <div>
+                <strong>{isAccepted ? 'Кредит підтверджено' : 'Кредит відхилено'}</strong>
+                <small>
+                  {event.lenderName} · {event.borrowerName}
+                </small>
+              </div>
+              <em>
+                {formatMoney(event.principal)} → {formatMoney(event.totalRepayment)}
+              </em>
+            </motion.div>
+          </motion.div>
+        );
+      })}
+    </AnimatePresence>
+  </div>
+);
+
 const UnoReverseAnimationLayer = ({ events }: { events: UnoReverseAnimationEvent[] }) => (
   <div className="uno-reverse-animation-layer" aria-live="polite">
     <AnimatePresence>
@@ -3076,6 +3215,12 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
   const { game } = useGameStore();
   if (!game) return null;
   const isCompact = game.players.length > 4;
+  const borrowerLoanSummary = new Map<string, { count: number; due: number }>();
+  (game.loans ?? []).forEach((loan) => {
+    if (loan.remainingDue <= 0) return;
+    const current = borrowerLoanSummary.get(loan.borrowerId) ?? { count: 0, due: 0 };
+    borrowerLoanSummary.set(loan.borrowerId, { count: current.count + 1, due: current.due + loan.remainingDue });
+  });
   return (
     <section className={`panel players-panel ${isCompact ? 'compact-players' : ''}`}>
       <p className="eyebrow">Гравці</p>
@@ -3083,6 +3228,7 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
         const isActive = player.id === game.currentPlayerId;
         const isJailed = player.jailTurns > 0;
         const propertyCount = player.properties.length;
+        const borrowedLoanSummary = borrowerLoanSummary.get(player.id);
         return (
           <article
             className={`player-row ${isActive ? 'active' : ''} ${isJailed ? 'jailed' : ''} ${player.isBankrupt ? 'bankrupt' : ''}`}
@@ -3112,6 +3258,12 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
               <strong>{propertyCount}</strong>
               <span className="player-property-unit">полів</span>
             </span>
+            {!player.isBankrupt && borrowedLoanSummary && (
+              <span className="player-status-chip credit player-loan-badge" title={`Непогашений кредит: ${formatMoney(borrowedLoanSummary.due)}`}>
+                <HandCoins size={12} />
+                <span className="player-loan-label">{borrowedLoanSummary.count > 1 ? `Кредит x${borrowedLoanSummary.count}` : 'Кредит'}</span>
+              </span>
+            )}
           </article>
         );
       })}
@@ -3198,9 +3350,9 @@ const WorkspaceDrawer = ({
             {activeTab === 'cards' ? (
               <ManagePanel />
             ) : activeTab === 'trade' ? (
-              <TradePanel onStartTrade={onStartTrade} />
+              <TradePanel onStartTrade={onStartTrade} onOpenCredits={() => onTabChange('credits')} />
             ) : activeTab === 'credits' ? (
-              <CreditsPanel />
+              <CreditsPanel onClose={onClose} />
             ) : (
               <MoneyChartPanel />
             )}
@@ -3437,6 +3589,16 @@ const ManagePanel = () => {
         </div>
       )}
 
+      {(player.loanPayoffCards ?? 0) > 0 && (
+        <div className="bonus-card loan-payoff">
+          <BadgeDollarSign size={18} />
+          <div>
+            <strong>Кредитна амністія</strong>
+            <span>x1</span>
+          </div>
+        </div>
+      )}
+
       {(game.bankDeposits ?? {})[player.id] && (
         <div className="bonus-card bank-deposit">
           <HandCoins size={18} />
@@ -3654,7 +3816,13 @@ const SimpleAssetCard = ({
   );
 };
 
-const TradePanel = ({ onStartTrade }: { onStartTrade: (player: Player, partners: Player[]) => void }) => {
+const TradePanel = ({
+  onStartTrade,
+  onOpenCredits,
+}: {
+  onStartTrade: (player: Player, partners: Player[]) => void;
+  onOpenCredits: () => void;
+}) => {
   const { game, localPlayerId, room, dispatch } = useGameStore();
   const player = useMemo(() => (game ? panelPlayer(game, localPlayerId, Boolean(room)) : undefined), [game, localPlayerId, room]);
   const partners = useMemo(
@@ -3690,15 +3858,21 @@ const TradePanel = ({ onStartTrade }: { onStartTrade: (player: Player, partners:
           <p className="eyebrow">Угода</p>
           <h3>Обмін майном</h3>
         </div>
-        <button
-          className="primary compact"
-          disabled={!canCreateTrade}
-          title={createDisabledReason}
-          onClick={() => onStartTrade(player, partners)}
-        >
-          <ArrowLeftRight size={16} />
-          Створити
-        </button>
+        <div className="panel-actions">
+          <button className="secondary compact" type="button" onClick={onOpenCredits}>
+            <HandCoins size={16} />
+            Кредити
+          </button>
+          <button
+            className="primary compact"
+            disabled={!canCreateTrade}
+            title={createDisabledReason}
+            onClick={() => onStartTrade(player, partners)}
+          >
+            <ArrowLeftRight size={16} />
+            Створити
+          </button>
+        </div>
       </div>
 
       {pendingOffers.length === 0 && (
@@ -3722,7 +3896,7 @@ const TradePanel = ({ onStartTrade }: { onStartTrade: (player: Player, partners:
   );
 };
 
-const CreditsPanel = () => {
+const CreditsPanel = ({ onClose }: { onClose: () => void }) => {
   const { game, localPlayerId, room, dispatch } = useGameStore();
   const player = useMemo(() => (game ? panelPlayer(game, localPlayerId, Boolean(room)) : undefined), [game, localPlayerId, room]);
   const partners = useMemo(
@@ -3730,7 +3904,8 @@ const CreditsPanel = () => {
     [game, player],
   );
   const [draft, setDraft] = useState<LoanDraft>(() => ({
-    borrowerId: '',
+    mode: 'lend',
+    partnerId: '',
     principal: 200,
     totalRepayment: 240,
     durationTurns: 4,
@@ -3739,12 +3914,14 @@ const CreditsPanel = () => {
 
   useEffect(() => {
     if (!partners.length) return;
-    setDraft((current) => (partners.some((partner) => partner.id === current.borrowerId) ? current : { ...current, borrowerId: partners[0].id, collateralTileIds: [] }));
+    setDraft((current) => (partners.some((partner) => partner.id === current.partnerId) ? current : { ...current, partnerId: partners[0].id, collateralTileIds: [] }));
   }, [partners]);
 
   if (!game || !player) return null;
 
-  const borrower = partners.find((candidate) => candidate.id === draft.borrowerId);
+  const partner = partners.find((candidate) => candidate.id === draft.partnerId);
+  const lender = draft.mode === 'lend' ? player : partner;
+  const borrower = draft.mode === 'lend' ? partner : player;
   const isCurrentPlayer = player.id === game.currentPlayerId;
   const activeLoans = (game.loans ?? []).filter((loan) => loan.borrowerId === player.id || loan.lenderId === player.id);
   const pendingOffers = (game.loanOffers ?? []).filter(
@@ -3758,7 +3935,7 @@ const CreditsPanel = () => {
         .filter(isPropertyTile)
         .filter((tile) => canUseLoanCollateral(game, borrower.id, tile))
     : [];
-  const draftCheck = validateLoanDraft(game, player, borrower, draft);
+  const draftCheck = validateLoanDraft(game, player, lender, borrower, draft);
   const bankLimit = getBankLoanLimit(game, player.id);
   const hasBankLoan = (game.loans ?? []).some((loan) => loan.kind === 'bank' && loan.borrowerId === player.id);
   const canTakeBankLoan = isCurrentPlayer && canTakeBankLoanInPhase(game, player.id) && !hasBankLoan && bankLimit >= 50;
@@ -3770,12 +3947,13 @@ const CreditsPanel = () => {
 
   const submitLoan = (event: FormEvent) => {
     event.preventDefault();
-    if (!borrower || !draftCheck.valid) return;
+    if (!lender || !borrower || !draftCheck.valid) return;
     dispatch({
       type: 'propose_loan',
       offer: {
-        lenderId: player.id,
+        lenderId: lender.id,
         borrowerId: borrower.id,
+        proposerId: player.id,
         principal: draft.principal,
         totalRepayment: draft.totalRepayment,
         durationTurns: draft.durationTurns,
@@ -3783,6 +3961,7 @@ const CreditsPanel = () => {
       },
     });
     setDraft((current) => ({ ...current, collateralTileIds: [] }));
+    onClose();
   };
 
   return (
@@ -3806,7 +3985,7 @@ const CreditsPanel = () => {
         <div className="loan-option-grid">
           {bankAmounts.length === 0 && <p className="muted empty-note">Банк зараз не дає доступну суму.</p>}
           {bankAmounts.map((amount) => {
-            const total = Math.ceil(amount * 1.15);
+            const total = getBankLoanRepaymentAmount(amount);
             return (
               <button
                 className="secondary compact"
@@ -3828,16 +4007,32 @@ const CreditsPanel = () => {
         <div className="rent-services-head">
           <ArrowLeftRight size={16} />
           <div>
-            <strong>Кредит гравцю</strong>
+            <strong>{draft.mode === 'lend' ? 'Дати кредит гравцю' : 'Попросити кредит'}</strong>
             <span>Сума, строк, повернення і застава узгоджуються контрактом.</span>
           </div>
         </div>
+        <div className="loan-mode-toggle" role="group" aria-label="Тип кредитної пропозиції">
+          <button
+            className={draft.mode === 'lend' ? 'active' : ''}
+            type="button"
+            onClick={() => updateDraft({ mode: 'lend', collateralTileIds: [] })}
+          >
+            Дати
+          </button>
+          <button
+            className={draft.mode === 'borrow' ? 'active' : ''}
+            type="button"
+            onClick={() => updateDraft({ mode: 'borrow', collateralTileIds: [] })}
+          >
+            Попросити
+          </button>
+        </div>
         <div className="loan-builder-grid">
           <label>
-            <span>Позичальник</span>
+            <span>{draft.mode === 'lend' ? 'Позичальник' : 'Кредитор'}</span>
             <select
-              value={draft.borrowerId}
-              onChange={(event) => updateDraft({ borrowerId: event.target.value, collateralTileIds: [] })}
+              value={draft.partnerId}
+              onChange={(event) => updateDraft({ partnerId: event.target.value, collateralTileIds: [] })}
               disabled={!isCurrentPlayer || partners.length === 0}
             >
               {partners.map((partner) => (
@@ -3881,7 +4076,7 @@ const CreditsPanel = () => {
         </div>
         <div className={`trade-value-check ${draftCheck.valid ? 'ready' : 'blocked'}`}>
           <span>{draftCheck.message}</span>
-          <strong>{borrower ? `${formatMoney(draft.principal)} → ${formatMoney(draft.totalRepayment)}` : 'Немає адресата'}</strong>
+          <strong>{partner ? `${formatMoney(draft.principal)} → ${formatMoney(draft.totalRepayment)}` : 'Немає адресата'}</strong>
         </div>
         <div className="board-trade-footer">
           <span className={draftCheck.valid ? 'ready' : 'blocked'}>{draftCheck.message}</span>
@@ -3902,7 +4097,7 @@ const CreditsPanel = () => {
         <div className="rent-services-list">
           {activeLoans.length === 0 && <p className="muted empty-note">Активних кредитів немає.</p>}
           {activeLoans.map((loan) => (
-            <LoanStatusCard game={game} loan={loan} viewerId={player.id} key={loan.id} />
+            <LoanStatusCard game={game} loan={loan} viewerId={player.id} dispatch={dispatch} key={loan.id} />
           ))}
         </div>
       </section>
@@ -3922,7 +4117,7 @@ const CreditsPanel = () => {
               game={game}
               offer={offer}
               viewerId={player.id}
-              canRespond={offer.borrowerId === player.id || !room}
+              canRespond={isLoanOfferResponder(offer, player.id) || !room}
               dispatch={dispatch}
               key={offer.id}
             />
@@ -3933,10 +4128,25 @@ const CreditsPanel = () => {
   );
 };
 
-const LoanStatusCard = ({ game, loan, viewerId }: { game: GameState; loan: ActiveLoan; viewerId: string }) => {
+const LoanStatusCard = ({
+  game,
+  loan,
+  viewerId,
+  dispatch,
+}: {
+  game: GameState;
+  loan: ActiveLoan;
+  viewerId: string;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
   const borrower = game.players.find((player) => player.id === loan.borrowerId);
   const lender = loan.lenderId ? game.players.find((player) => player.id === loan.lenderId) : undefined;
   const incoming = loan.borrowerId === viewerId;
+  const canUsePayoffCard =
+    incoming &&
+    (borrower?.loanPayoffCards ?? 0) > 0 &&
+    game.currentPlayerId === viewerId &&
+    canUseLoanPayoffCardInPhase(game, viewerId);
   return (
     <article className={incoming ? 'receiving' : 'giving'}>
       <strong>{incoming ? `Ви винні ${lender?.name ?? 'банку'}` : `${borrower?.name ?? 'Гравець'} винен вам`}</strong>
@@ -3947,6 +4157,18 @@ const LoanStatusCard = ({ game, loan, viewerId }: { game: GameState; loan: Activ
         {loan.remainingTurns} {formatTurnWord(loan.remainingTurns)} · прострочень {loan.missedPayments}
         {loan.collateralTileIds.length > 0 ? ` · застава: ${formatLoanCollateral(loan.collateralTileIds)}` : ''}
       </small>
+      {incoming && (borrower?.loanPayoffCards ?? 0) > 0 && (
+        <button
+          className="secondary compact loan-payoff-button"
+          type="button"
+          disabled={!canUsePayoffCard}
+          title={canUsePayoffCard ? 'Погасити цей кредит карткою.' : 'Картку можна використати лише у свій хід.'}
+          onClick={() => dispatch({ type: 'use_loan_payoff_card', playerId: viewerId, loanId: loan.id })}
+        >
+          <BadgeDollarSign size={14} />
+          Погасити карткою
+        </button>
+      )}
     </article>
   );
 };
@@ -3966,11 +4188,20 @@ const LoanOfferCard = ({
 }) => {
   const lender = game.players.find((player) => player.id === offer.lenderId);
   const borrower = game.players.find((player) => player.id === offer.borrowerId);
-  const incoming = offer.borrowerId === viewerId;
+  const responderId = getLoanOfferResponderId(offer);
+  const responder = game.players.find((player) => player.id === responderId);
+  const incoming = responderId === viewerId;
+  const isRequest = (offer.proposerId ?? offer.lenderId) === offer.borrowerId;
   return (
     <article className="pending-trade">
       <div className="pending-trade-head">
-        <strong>{incoming ? `${lender?.name ?? 'Гравець'} пропонує кредит` : `Очікуємо ${borrower?.name ?? 'позичальника'}`}</strong>
+        <strong>
+          {incoming
+            ? isRequest
+              ? `${borrower?.name ?? 'Гравець'} просить кредит`
+              : `${lender?.name ?? 'Гравець'} пропонує кредит`
+            : `Очікуємо ${responder?.name ?? 'гравця'}`}
+        </strong>
         <span>{offer.status}</span>
       </div>
       <div className="trade-summary-grid">
@@ -3988,11 +4219,11 @@ const LoanOfferCard = ({
       {offer.collateralTileIds.length > 0 && <p className="muted">Застава: {formatLoanCollateral(offer.collateralTileIds)}</p>}
       {canRespond && (
         <div className="split-actions">
-          <button className="primary compact" onClick={() => dispatch({ type: 'accept_loan', playerId: offer.borrowerId, offerId: offer.id })}>
+          <button className="primary compact" onClick={() => dispatch({ type: 'accept_loan', playerId: responderId, offerId: offer.id })}>
             <Check size={16} />
             Прийняти
           </button>
-          <button className="secondary compact" onClick={() => dispatch({ type: 'decline_loan', playerId: offer.borrowerId, offerId: offer.id })}>
+          <button className="secondary compact" onClick={() => dispatch({ type: 'decline_loan', playerId: responderId, offerId: offer.id })}>
             <X size={16} />
             Відхилити
           </button>
@@ -4615,10 +4846,11 @@ const getCityRentRows = (tile: CityTile, districtPath?: DistrictPath) => [
 
 const getDistrictDisplayRent = (tile: CityTile, rent: number, houses: number, districtPath?: DistrictPath) =>
   districtPath === 'oldTown' || districtPath === 'residential'
-    ? Math.ceil(rent / getDistrictDisplayRentDivisor(tile, houses))
+    ? Math.ceil(rent / getDistrictDisplayRentDivisor(tile, houses, districtPath))
     : rent;
 
-const getDistrictDisplayRentDivisor = (tile: CityTile, houses: number) => {
+const getDistrictDisplayRentDivisor = (tile: CityTile, houses: number, districtPath: DistrictPath) => {
+  if (districtPath === 'residential') return RESIDENTIAL_DISTRICT_RENT_DIVISOR;
   if (houses <= 0) return DISTRICT_RENT_DIVISOR;
   if (GOLD_DISTRICT_RENT_GROUPS.has(tile.group)) return GOLD_DISTRICT_BUILDING_RENT_DIVISOR;
   if (GREEN_DISTRICT_RENT_GROUPS.has(tile.group)) return GREEN_DISTRICT_BUILDING_RENT_DIVISOR;
@@ -5207,12 +5439,19 @@ const getTradeValueCheck = (draft: TradeDraft) => {
   return { valid: true, offerValue, requestValue, message: 'Баланс угоди в межах правил' };
 };
 
-const validateLoanDraft = (game: GameState, lender: Player, borrower: Player | undefined, draft: LoanDraft) => {
-  if (game.currentPlayerId !== lender.id) return { valid: false, message: 'Кредит можна запропонувати тільки у свій хід.' };
+const validateLoanDraft = (
+  game: GameState,
+  proposer: Player,
+  lender: Player | undefined,
+  borrower: Player | undefined,
+  draft: LoanDraft,
+) => {
+  if (game.currentPlayerId !== proposer.id) return { valid: false, message: 'Кредит можна запропонувати тільки у свій хід.' };
   if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(game.phase)) {
     return { valid: false, message: 'Кредит гравцю можна запропонувати тільки без активного рішення.' };
   }
-  if (!borrower) return { valid: false, message: 'Оберіть позичальника.' };
+  if (!lender || !borrower) return { valid: false, message: draft.mode === 'lend' ? 'Оберіть позичальника.' : 'Оберіть кредитора.' };
+  if (lender.id === borrower.id) return { valid: false, message: 'Кредит потребує двох різних гравців.' };
   if (lender.money < draft.principal) return { valid: false, message: 'Кредитору не вистачає грошей.' };
   if (draft.principal < 50 || draft.principal > 800) return { valid: false, message: 'Сума має бути 50-800₴.' };
   if (draft.durationTurns < 2 || draft.durationTurns > 10) return { valid: false, message: 'Строк має бути 2-10 ходів.' };
@@ -5226,8 +5465,14 @@ const validateLoanDraft = (game: GameState, lender: Player, borrower: Player | u
     return isPropertyTile(tile) ? sum + getEffectiveMortgageValue(game, tile) : sum;
   }, 0);
   if (collateralValue > Math.floor(draft.totalRepayment * 2)) return { valid: false, message: 'Застава занадто велика.' };
-  return { valid: true, message: 'Кредит готовий до відправки.' };
+  return { valid: true, message: draft.mode === 'lend' ? 'Кредит готовий до відправки.' : 'Запит на кредит готовий.' };
 };
+
+const getLoanOfferResponderId = (offer: Pick<LoanOffer, 'lenderId' | 'borrowerId' | 'proposerId'>): string =>
+  (offer.proposerId ?? offer.lenderId) === offer.borrowerId ? offer.lenderId : offer.borrowerId;
+
+const isLoanOfferResponder = (offer: Pick<LoanOffer, 'lenderId' | 'borrowerId' | 'proposerId'>, playerId: string): boolean =>
+  getLoanOfferResponderId(offer) === playerId;
 
 const canUseLoanCollateral = (game: GameState, borrowerId: string, tile: PropertyTile): boolean => {
   const property = game.properties[tile.id];
@@ -5242,6 +5487,8 @@ const canTakeBankLoanInPhase = (game: GameState, playerId: string): boolean =>
   game.phase === 'awaitingPurchase' ||
   (game.phase === 'bankDeposit' && game.pendingBankDeposit?.playerId === playerId);
 
+const canUseLoanPayoffCardInPhase = canTakeBankLoanInPhase;
+
 const formatLoanCollateral = (tileIds: number[]): string =>
   tileIds
     .map((tileId) => getTile(tileId))
@@ -5253,18 +5500,20 @@ const getLoanDisplayInstallment = (loan: ActiveLoan): number =>
   Math.min(
     loan.remainingDue,
     (loan.deferredDue ?? 0) +
-      (loan.remainingTurns <= 1
+      (getLoanEffectiveRemainingTurns(loan) <= 1
         ? Math.max(0, loan.remainingDue - (loan.deferredDue ?? 0))
         : Math.min(Math.max(0, loan.remainingDue - (loan.deferredDue ?? 0)), loan.installmentAmount)),
   );
+
+const getLoanEffectiveRemainingTurns = (loan: ActiveLoan): number =>
+  Math.max(1, loan.remainingTurns - (loan.deferredTurns ?? 0));
 
 const hasMandatoryLoanPayment = (game: GameState, payment: NonNullable<GameState['pendingPayment']>): boolean => {
   const dueLoanIds = new Set((payment.loanPayments ?? []).map((loanPayment) => loanPayment.loanId));
   return (game.loans ?? []).some(
     (loan) =>
       dueLoanIds.has(loan.id) &&
-      loan.missedPayments > 0 &&
-      !(loan.kind === 'player' && loan.collateralTileIds.length > 0),
+      (loan.kind === 'bank' ? loan.missedPayments > 0 : getLoanEffectiveRemainingTurns(loan) <= 1),
   );
 };
 
@@ -5688,6 +5937,69 @@ const createMortgageSnapshot = (game: GameState): Record<number, { mortgaged: bo
       return [tile.id, { mortgaged: property.mortgaged, ownerId: property.ownerId }];
     }),
   );
+
+const useLoanOfferAnimationEvents = (game: GameState) => {
+  const [events, setEvents] = useState<LoanOfferAnimationEvent[]>([]);
+  const previousSnapshotRef = useRef(createLoanOfferResolutionSnapshot(game));
+  const timersRef = useRef<number[]>([]);
+  const loanOfferKey = (game.loanOffers ?? [])
+    .map((offer) => `${offer.id}:${offer.status}`)
+    .sort()
+    .join('|');
+
+  useEffect(() => {
+    previousSnapshotRef.current = createLoanOfferResolutionSnapshot(game);
+    setEvents([]);
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current = [];
+  }, [game.id]);
+
+  useEffect(() => {
+    const previousSnapshot = previousSnapshotRef.current;
+    const nextSnapshot = createLoanOfferResolutionSnapshot(game);
+    const nextEvents: LoanOfferAnimationEvent[] = [];
+
+    (game.loanOffers ?? []).forEach((offer) => {
+      const previousStatus = previousSnapshot[offer.id]?.status;
+      if (previousStatus !== 'pending' || (offer.status !== 'accepted' && offer.status !== 'declined')) return;
+      const lender = game.players.find((player) => player.id === offer.lenderId);
+      const borrower = game.players.find((player) => player.id === offer.borrowerId);
+      nextEvents.push({
+        id: crypto.randomUUID(),
+        kind: offer.status,
+        lenderName: lender?.name ?? 'Кредитор',
+        borrowerName: borrower?.name ?? 'Позичальник',
+        lenderColor: lender?.color ?? '#38bdf8',
+        borrowerColor: borrower?.color ?? '#f8c24e',
+        principal: offer.principal,
+        totalRepayment: offer.totalRepayment,
+      });
+    });
+
+    previousSnapshotRef.current = nextSnapshot;
+    if (nextEvents.length === 0) return;
+
+    setEvents((current) => [...current, ...nextEvents].slice(-4));
+    nextEvents.forEach((event) => {
+      const timer = window.setTimeout(() => {
+        setEvents((current) => current.filter((candidate) => candidate.id !== event.id));
+      }, LOAN_OFFER_ANIMATION_MS);
+      timersRef.current.push(timer);
+    });
+  }, [loanOfferKey, game]);
+
+  useEffect(
+    () => () => {
+      timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
+  return events;
+};
+
+const createLoanOfferResolutionSnapshot = (game: GameState): Record<string, { status: LoanOffer['status'] }> =>
+  Object.fromEntries((game.loanOffers ?? []).map((offer) => [offer.id, { status: offer.status }]));
 
 const useUnoReverseAnimationEvents = (game: GameState) => {
   const [events, setEvents] = useState<UnoReverseAnimationEvent[]>([]);

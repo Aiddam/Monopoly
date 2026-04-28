@@ -110,6 +110,14 @@ export const chanceCards: CardDefinition[] = [
     text: 'Отримайте унікальну картку: під час оренди іншому гравцю можна перекинути платіж на власника.',
     apply: (state, playerId) => addUnoReverseCard(state, playerId),
   },
+  {
+    id: 14,
+    deck: 'chance',
+    title: 'Кредитна амністія',
+    text: 'Рідкісна картка: погасіть один власний кредит без сплати з власних коштів.',
+    rarity: 'rare',
+    apply: (state, playerId) => addLoanPayoffCard(state, playerId),
+  },
 ];
 
 export const communityCards: CardDefinition[] = [
@@ -208,8 +216,8 @@ export const communityCards: CardDefinition[] = [
   {
     id: 12,
     deck: 'community',
-    title: 'Комунізм',
-    text: 'День Максима Богатого. Розподіліть 25% своїх грошей між іншими гравцями.',
+    title: 'Економіка просочування',
+    text: 'В честь великого економічного Генія Пекельної Акули. Розподіліть 25% своїх грошей між іншими гравцями.',
     apply: (state, playerId) => redistributeMoneyToOpponents(state, playerId, 0.25),
   },
 ];
@@ -228,6 +236,13 @@ const addUnoReverseCard = (state: GameState, playerId: string): GameState => ({
   ...state,
   players: state.players.map((player) =>
     player.id === playerId ? { ...player, unoReverseCards: Math.min(1, (player.unoReverseCards ?? 0) + 1) } : player,
+  ),
+});
+
+const addLoanPayoffCard = (state: GameState, playerId: string): GameState => ({
+  ...state,
+  players: state.players.map((player) =>
+    player.id === playerId ? { ...player, loanPayoffCards: Math.min(1, (player.loanPayoffCards ?? 0) + 1) } : player,
   ),
 });
 

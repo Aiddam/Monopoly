@@ -1879,6 +1879,112 @@ input:focus {
   font-weight: 900;
 }
 
+.loan-offer-animation-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 88;
+  display: grid;
+  place-items: center;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.loan-offer-event {
+  --loan-lender-color: #38bdf8;
+  --loan-borrower-color: #f8c24e;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.loan-offer-burst {
+  position: absolute;
+  width: clamp(160px, 26vmin, 250px);
+  aspect-ratio: 1;
+  border: 2px solid color-mix(in srgb, var(--loan-lender-color) 62%, #ffffff);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--loan-borrower-color) 22%, transparent), transparent 58%),
+    conic-gradient(from 0deg, transparent, color-mix(in srgb, var(--loan-lender-color) 54%, transparent), transparent, color-mix(in srgb, var(--loan-borrower-color) 52%, transparent), transparent);
+}
+
+.loan-offer-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  width: min(340px, 76%);
+  border: 1px solid color-mix(in srgb, var(--loan-lender-color) 38%, rgba(255, 255, 255, 0.34));
+  border-radius: 10px;
+  padding: 13px;
+  color: #f8fafc;
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--loan-lender-color) 24%, transparent), transparent 34%),
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--loan-borrower-color) 24%, transparent), transparent 36%),
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.94));
+  box-shadow:
+    0 0 0 6px rgba(255, 255, 255, 0.055),
+    0 28px 64px rgba(2, 6, 23, 0.58);
+  animation: loan-offer-card 3100ms ease-out both;
+}
+
+.loan-offer-event.declined .loan-offer-card {
+  border-color: rgba(248, 113, 113, 0.52);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(248, 113, 113, 0.24), transparent 34%),
+    linear-gradient(135deg, rgba(76, 29, 29, 0.94), rgba(2, 6, 23, 0.94));
+  animation-name: loan-offer-card-declined;
+}
+
+.loan-offer-icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: 999px;
+  color: #0f172a;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--loan-lender-color) 64%, #ffffff), color-mix(in srgb, var(--loan-borrower-color) 62%, #ffffff));
+  box-shadow: 0 12px 26px rgba(2, 6, 23, 0.32);
+}
+
+.loan-offer-event.declined .loan-offer-icon {
+  color: #fff1f2;
+  background: linear-gradient(135deg, #ef4444, #991b1b);
+}
+
+.loan-offer-card strong,
+.loan-offer-card small,
+.loan-offer-card em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loan-offer-card strong {
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.loan-offer-card small {
+  margin-top: 5px;
+  color: rgba(226, 232, 240, 0.76);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.loan-offer-card em {
+  grid-column: 1 / -1;
+  color: color-mix(in srgb, var(--loan-borrower-color) 48%, #ffffff);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 950;
+}
+
 .uno-reverse-animation-layer {
   position: absolute;
   inset: 0;
@@ -2290,6 +2396,56 @@ input:focus {
   100% {
     opacity: 0;
     transform: translate(-50%, -112%) rotate(-7deg) scale(0.92);
+  }
+}
+
+@keyframes loan-offer-card {
+  0% {
+    opacity: 0;
+    transform: translateY(26px) scale(0.82);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translateY(-8px) scale(1.04);
+  }
+
+  32%,
+  76% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.94);
+  }
+}
+
+@keyframes loan-offer-card-declined {
+  0% {
+    opacity: 0;
+    transform: translateX(0) translateY(24px) rotate(0deg) scale(0.86);
+  }
+
+  14% {
+    opacity: 1;
+    transform: translateX(-8px) translateY(0) rotate(-2deg) scale(1.04);
+  }
+
+  22% {
+    transform: translateX(8px) translateY(0) rotate(2deg) scale(1.02);
+  }
+
+  30%,
+  76% {
+    opacity: 1;
+    transform: translateX(0) translateY(0) rotate(0deg) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(0) translateY(-10px) rotate(0deg) scale(0.94);
   }
 }
 
@@ -3829,6 +3985,13 @@ input:focus {
   font-size: 13px;
 }
 
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .empty-note {
   margin: 0;
   border-radius: 8px;
@@ -3859,6 +4022,13 @@ input:focus {
     radial-gradient(circle at 100% 0%, rgba(191, 219, 254, 0.18), transparent 32%),
     linear-gradient(135deg, rgba(30, 64, 175, 0.5), rgba(14, 116, 144, 0.34));
   box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.24);
+}
+
+.bonus-card.loan-payoff {
+  background:
+    radial-gradient(circle at 100% 0%, rgba(253, 224, 71, 0.22), transparent 34%),
+    linear-gradient(135deg, rgba(14, 165, 233, 0.42), rgba(217, 119, 6, 0.42));
+  box-shadow: inset 0 0 0 1px rgba(253, 224, 71, 0.28);
 }
 
 .bonus-card.uno-reverse img {
@@ -4213,6 +4383,11 @@ input:focus {
   font-weight: 800;
 }
 
+.loan-payoff-button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
 .credits-panel {
   gap: 14px;
 }
@@ -4225,11 +4400,41 @@ input:focus {
 
 .loan-option-grid button {
   justify-content: space-between;
+  gap: 10px;
+  color: #10231f;
+  text-align: left;
 }
 
 .loan-option-grid button span {
-  color: rgba(203, 213, 225, 0.68);
+  color: rgba(16, 35, 31, 0.72);
   font-size: 11px;
+  font-weight: 900;
+  text-align: right;
+}
+
+.loan-mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  border-radius: 8px;
+  padding: 4px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.loan-mode-toggle button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  color: rgba(226, 232, 240, 0.74);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.loan-mode-toggle button.active {
+  color: #fff8e8;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.78), rgba(124, 58, 237, 0.78));
 }
 
 .loan-builder {
@@ -6433,6 +6638,32 @@ input:focus {
     inset 0 0 0 1px rgba(255, 255, 255, 0.045);
 }
 
+.game-screen .player-loan-badge {
+  position: absolute;
+  top: clamp(12px, 1.2vw, 18px);
+  right: clamp(12px, 1.1vw, 18px);
+  z-index: 4;
+  max-width: min(132px, 42%);
+  min-height: 26px;
+  padding-inline: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow:
+    0 12px 26px rgba(2, 6, 23, 0.34),
+    0 0 18px rgba(245, 158, 11, 0.2),
+    inset 0 0 0 1px rgba(253, 224, 71, 0.1);
+}
+
+.game-screen .player-loan-badge svg {
+  flex: 0 0 auto;
+}
+
+.game-screen .player-loan-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .game-screen .player-property-count svg {
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--player-color) 76%, #e0f2fe);
@@ -6449,6 +6680,21 @@ input:focus {
   border-color: rgba(248, 113, 113, 0.34);
   color: #fecaca;
   background: rgba(127, 29, 29, 0.42);
+}
+
+.game-screen .player-status-chip.credit {
+  border-color: rgba(250, 204, 21, 0.42);
+  color: #fef3c7;
+  background:
+    linear-gradient(135deg, rgba(250, 204, 21, 0.18), rgba(15, 23, 42, 0.68)),
+    rgba(15, 23, 42, 0.7);
+  box-shadow:
+    0 0 18px rgba(245, 158, 11, 0.18),
+    inset 0 0 0 1px rgba(253, 224, 71, 0.08);
+}
+
+.game-screen .player-status-chip.credit svg {
+  color: #fde68a;
 }
 
 .game-screen .player-status-chip.bankrupt {
@@ -6542,6 +6788,14 @@ input:focus {
   bottom: 7px;
   min-height: 21px;
   padding-inline: 7px;
+}
+
+.game-screen .players-panel.compact-players .player-loan-badge {
+  top: 8px;
+  right: 8px;
+  min-height: 20px;
+  padding-inline: 6px;
+  font-size: 10px;
 }
 
 .game-screen .players-panel.compact-players .player-money {
@@ -8309,6 +8563,21 @@ input:focus {
   text-align: center;
 }
 
+.dock-note-action {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dock-note-action > span {
+  min-width: 0;
+}
+
+.dock-note-action .compact {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .dock-tools {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
@@ -8922,6 +9191,13 @@ input:focus {
     padding-inline: 7px;
   }
 
+  .game-screen .player-loan-badge {
+    top: calc(clamp(8px, 1vh, 12px) + 28px);
+    right: clamp(8px, 1vw, 12px);
+    min-height: 22px;
+    padding-inline: 7px;
+  }
+
   .game-screen .players-panel.compact-players {
     gap: clamp(6px, 1vh, 10px);
     padding: clamp(7px, 1vh, 12px) clamp(9px, 1.1vw, 18px);
@@ -9056,6 +9332,13 @@ input:focus {
     top: 7px;
     right: 7px;
     bottom: auto;
+    min-height: 20px;
+    padding-inline: 6px;
+  }
+
+  .game-screen .player-loan-badge {
+    top: 32px;
+    right: 7px;
     min-height: 20px;
     padding-inline: 6px;
   }
@@ -9207,6 +9490,17 @@ input:focus {
     bottom: 7px;
     min-height: 19px;
     padding-inline: 6px;
+  }
+
+  .game-screen .player-loan-badge {
+    top: 7px;
+    right: 7px;
+    min-height: 19px;
+    padding-inline: 6px;
+  }
+
+  .game-screen .player-loan-label {
+    display: none;
   }
 
   .game-screen .players-panel.compact-players .player-row {
