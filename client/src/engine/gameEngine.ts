@@ -1374,7 +1374,7 @@ const isDoubleDice = (dice: [number, number] | undefined): boolean =>
   Boolean(dice && dice[1] > 0 && dice[0] === dice[1]);
 
 export const getEffectiveFineAmount = (state: GameState, amount: number): number =>
-  ceilMoney(amount * getCityEventFineMultiplier(state) * getLateGameFineMultiplier(state.turn));
+  ceilMoney(amount * getCityEventFineMultiplier(state) * getLateGameFineMultiplier(state.currentRound ?? state.turn));
 
 export const diceRotationForValue = (value: number): [number, number, number] => {
   const rotations: Record<number, [number, number, number]> = {

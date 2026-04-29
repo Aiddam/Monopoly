@@ -1359,6 +1359,15 @@ describe('Ukraine Monopoly engine', () => {
     expect(commonCards).toHaveLength(4);
   });
 
+  it('keeps the trickle-down economy community card rare', () => {
+    const game = createInitialGame(['Olena', 'Taras'], 'rare-community-card');
+    const trickleDownCards = game.communityDeck.filter((cardId) => cardId === 12);
+    const commonCards = game.communityDeck.filter((cardId) => cardId === 0);
+
+    expect(trickleDownCards).toHaveLength(1);
+    expect(commonCards).toHaveLength(4);
+  });
+
   it('draws the rare loan payoff card only while an active loan exists', () => {
     let game = createInitialGame(['Olena', 'Taras'], 'loan-payoff-draw');
 
@@ -2736,7 +2745,7 @@ describe('Ukraine Monopoly engine', () => {
     expect(() => reduceGame(game, { type: 'build', playerId: 'p1', tileId: 1 })).toThrow('Будівництво заборонене');
   });
 
-  it('raises prices and taxes later in the game without raising rent', () => {
+  it('raises prices by turn and taxes by round later in the game without raising rent', () => {
     const pavlohrad = getTile(1);
     if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
 
@@ -2744,6 +2753,7 @@ describe('Ukraine Monopoly engine', () => {
     midGame = {
       ...midGame,
       turn: 41,
+      currentRound: 1,
       properties: {
         ...midGame.properties,
         1: { ...midGame.properties[1], mortgaged: true, mortgageTurnsLeft: 10 },
@@ -2754,13 +2764,15 @@ describe('Ukraine Monopoly engine', () => {
     expect(getEffectiveHouseCost(midGame, pavlohrad)).toBe(money(63));
     expect(getEffectiveMortgageValue(midGame, pavlohrad)).toBe(money(38));
     expect(getEffectiveUnmortgageCost(midGame, pavlohrad)).toBe(money(40));
-    expect(getEffectiveFineAmount(midGame, money(200))).toBe(money(300));
+    expect(getEffectiveFineAmount(midGame, money(200))).toBe(money(200));
+    expect(getEffectiveFineAmount({ ...midGame, currentRound: 41 }, money(200))).toBe(money(300));
 
     let lateGame = createInitialGame(['Olena', 'Taras'], 'late-prices-end');
     lateGame = withOwnership(
       {
         ...lateGame,
         turn: 71,
+        currentRound: 1,
         properties: {
           ...lateGame.properties,
           1: { ...lateGame.properties[1], mortgaged: true, mortgageTurnsLeft: 10 },
@@ -2774,7 +2786,8 @@ describe('Ukraine Monopoly engine', () => {
     expect(getEffectiveHouseCost(lateGame, pavlohrad)).toBe(money(75));
     expect(getEffectiveMortgageValue(lateGame, pavlohrad)).toBe(money(45));
     expect(getEffectiveUnmortgageCost(lateGame, pavlohrad)).toBe(money(48));
-    expect(getEffectiveFineAmount(lateGame, money(200))).toBe(money(400));
+    expect(getEffectiveFineAmount(lateGame, money(200))).toBe(money(200));
+    expect(getEffectiveFineAmount({ ...lateGame, currentRound: 71 }, money(200))).toBe(money(400));
 
     const lateRentGame = withOwnership(
       {
@@ -2788,6 +2801,36 @@ describe('Ukraine Monopoly engine', () => {
       [1],
     );
     expect(calculateRent(lateRentGame, pavlohrad)).toBe(money(2));
+  });
+
+  it('applies late-game card fines by round instead of turn', () => {
+    let highTurnEarlyRound = createInitialGame(['Olena', 'Taras'], 'card-fine-turn-round');
+    highTurnEarlyRound = {
+      ...highTurnEarlyRound,
+      turn: 41,
+      currentRound: 1,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 7 },
+      chanceDeck: [3],
+      discardChance: [],
+    };
+
+    highTurnEarlyRound = reduceGame(highTurnEarlyRound, { type: 'draw_card', playerId: 'p1' });
+    expect(highTurnEarlyRound.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(50), source: 'card' });
+
+    let highRound = createInitialGame(['Olena', 'Taras'], 'card-fine-round');
+    highRound = {
+      ...highRound,
+      turn: 41,
+      currentRound: 41,
+      phase: 'awaitingCard',
+      pendingCardDraw: { deck: 'chance', tileId: 7 },
+      chanceDeck: [3],
+      discardChance: [],
+    };
+
+    highRound = reduceGame(highRound, { type: 'draw_card', playerId: 'p1' });
+    expect(highRound.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(75), source: 'card' });
   });
 
   it('draws a city event every third completed round', () => {

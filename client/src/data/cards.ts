@@ -218,6 +218,7 @@ export const communityCards: CardDefinition[] = [
     deck: 'community',
     title: 'Економіка просочування',
     text: 'В честь великого економічного Генія Пекельної Акули. Розподіліть 25% своїх грошей між іншими гравцями.',
+    rarity: 'rare',
     apply: (state, playerId) => redistributeMoneyToOpponents(state, playerId, 0.25),
   },
 ];
@@ -329,5 +330,5 @@ const getEffectiveFineAmount = (state: GameState, amount: number): number => {
     (current, event) => current * (getCityEventDefinition(event.id).effects.fineMultiplier ?? 1),
     1,
   );
-  return Math.ceil(amount * multiplier * getLateGameFineMultiplier(state.turn));
+  return Math.ceil(amount * multiplier * getLateGameFineMultiplier(state.currentRound ?? state.turn));
 };

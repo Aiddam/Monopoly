@@ -245,6 +245,7 @@ const EMOTE_OPTIONS: EmoteOption[] = [
   { id: 'ks-ks-chk-pk-a', label: 'Кс-кс-чк-чк-пк-пк-а!', Icon: Flag, color: '#60a5fa', audioSrc: '/assets/emotes/ks-ks-chk-pk-a.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'ay-que-buena-jugada', label: '¡Ay, ay ay! ¡Qué buena jugada', Icon: TrendingUp, color: '#22c55e', audioSrc: '/assets/emotes/ay-que-buena-jugada.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'penis', label: 'Пеніс', Icon: SmilePlus, color: '#e879f9', audioSrc: '/assets/emotes/penis.m4a', gain: EMOTE_AUDIO_GAIN },
 ];
 const EMOTE_OPTION_MAP = new Map(EMOTE_OPTIONS.map((option) => [option.id, option]));
 
