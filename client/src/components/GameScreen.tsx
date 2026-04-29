@@ -278,7 +278,7 @@ const DISTRICT_PATH_OPTIONS: Array<{
 ];
 
 const DISTRICT_PATH_VIEW = new Map(DISTRICT_PATH_OPTIONS.map((option) => [option.path, option]));
-const DISTRICT_RENT_DIVISOR = 2;
+const DISTRICT_RENT_DIVISOR = 2.35;
 const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 1.8;
 
 const CITY_TILE_ART: Record<string, CityArtKind> = {

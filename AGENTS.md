@@ -207,7 +207,7 @@ Engine rules:
 Path behavior:
 
 - `tourist`: existing rent, build, and sale behavior.
-- `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.5`). For building/hotel rent in the green group, use `GREEN_DISTRICT_BUILDING_RENT_DIVISOR` (`4`); for the gold Kyiv/Lviv group, use `GOLD_DISTRICT_BUILDING_RENT_DIVISOR` (`3.5`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the same group-specific building divisor when the crossed green/gold city has buildings.
+- `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.35`). For building/hotel rent in the green group, use `GREEN_DISTRICT_BUILDING_RENT_DIVISOR` (`4`); for the gold Kyiv/Lviv group, use `GOLD_DISTRICT_BUILDING_RENT_DIVISOR` (`3.5`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the same group-specific building divisor when the crossed green/gold city has buildings.
 - `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent is tourist rent divided by `RESIDENTIAL_DISTRICT_RENT_DIVISOR` (`2.25`), and the owner may build exactly up to 2 times in that district per dice roll.
 - Any created district increases city mortgage value by that city's share of half the district creation cost. Do not reduce mortgage value by the district rent divisor.
 

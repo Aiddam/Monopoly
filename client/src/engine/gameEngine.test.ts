@@ -1569,7 +1569,7 @@ describe('Ukraine Monopoly engine', () => {
     game = withOwnership(game, 'p1', [37, 39]);
     game = withDistrict(game, 'p1', 37, 'oldTown');
 
-    expect(calculateRent(game, lviv)).toBe(money(35));
+    expect(calculateRent(game, lviv)).toBe(money(30));
 
     game = {
       ...game,
@@ -1579,7 +1579,7 @@ describe('Ukraine Monopoly engine', () => {
       },
     };
 
-    expect(calculateRent(game, lviv)).toBe(money(88));
+    expect(calculateRent(game, lviv)).toBe(money(75));
 
     let residentialGoldGame = createInitialGame(['Olena', 'Taras'], 'district-residential-gold-rent');
     residentialGoldGame = withOwnership(residentialGoldGame, 'p1', [37, 39]);
@@ -1613,7 +1613,7 @@ describe('Ukraine Monopoly engine', () => {
       },
     };
 
-    expect(calculateRent(greenGame, chernivtsi)).toBe(money(75));
+    expect(calculateRent(greenGame, chernivtsi)).toBe(money(64));
   });
 
   it('charges Old Town pass-through tolls before resolving the landing tile and does not toll the landing city', () => {
@@ -1630,17 +1630,17 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.phase).toBe('payment');
     expect(game.pendingPayment).toMatchObject({
       payerId: 'p1',
-      amount: money(10),
-      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 10₴',
+      amount: money(9),
+      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 9₴',
       source: 'movement',
-      recipients: [{ playerId: 'p2', amount: money(10) }],
+      recipients: [{ playerId: 'p2', amount: money(9) }],
     });
 
     game = reduceGame(game, { type: 'pay_payment', playerId: 'p1' });
 
     expect(game.phase).toBe('payment');
     expect(game.pendingPayment).toMatchObject({ payerId: 'p1', amount: money(100), source: 'tax' });
-    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1710));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1709));
 
     let landingGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-landing');
     landingGame = withOwnership(landingGame, 'p2', [37, 39]);
@@ -1652,7 +1652,7 @@ describe('Ukraine Monopoly engine', () => {
     landingGame = reduceGame(landingGame, { type: 'roll', playerId: 'p1', dice: [1, 0] });
 
     expect(landingGame.phase).toBe('rent');
-    expect(landingGame.pendingRent).toMatchObject({ payerId: 'p1', ownerId: 'p2', tileId: 37, amount: money(35) });
+    expect(landingGame.pendingRent).toMatchObject({ payerId: 'p1', ownerId: 'p2', tileId: 37, amount: money(30) });
 
     let builtTollGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-built-toll');
     builtTollGame = withOwnership(builtTollGame, 'p2', [37, 39]);
@@ -1669,9 +1669,9 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(builtTollGame.pendingPayment).toMatchObject({
       payerId: 'p1',
-      amount: money(26),
-      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 26₴',
-      recipients: [{ playerId: 'p2', amount: money(26) }],
+      amount: money(22),
+      reason: 'Пройдено район "Старе місто". Ви прогулялись бруківкою старого Львова. Плата 22₴',
+      recipients: [{ playerId: 'p2', amount: money(22) }],
     });
 
     let kyivTollGame = createInitialGame(['Olena', 'Taras'], 'district-old-town-kyiv-toll');
@@ -1685,9 +1685,9 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(kyivTollGame.pendingPayment).toMatchObject({
       payerId: 'p1',
-      amount: money(15),
-      reason: 'Пройдено район "Старе місто". Ви насолодились вечірнім Києвом. Плата 15₴',
-      recipients: [{ playerId: 'p2', amount: money(15) }],
+      amount: money(13),
+      reason: 'Пройдено район "Старе місто". Ви насолодились вечірнім Києвом. Плата 13₴',
+      recipients: [{ playerId: 'p2', amount: money(13) }],
     });
   });
 
