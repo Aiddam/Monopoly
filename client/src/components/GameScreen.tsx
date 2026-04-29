@@ -1,6 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Ambulance,
   ArrowLeftRight,
   BadgeDollarSign,
   BadgePercent,
@@ -241,7 +240,7 @@ const EMOTE_OPTIONS: EmoteOption[] = [
   { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'absolute-cinema', label: 'Absolute cinema', Icon: MessageCircleHeart, color: '#fb7185', audioSrc: '/assets/emotes/absolute-cinema.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'sigma-moment', label: 'Sigma moment', Icon: Sigma, color: '#f472b6', audioSrc: '/assets/emotes/sigma-moment.mp3', gain: EMOTE_AUDIO_GAIN },
-  { id: 'call-an-ambulance', label: 'Oh, call an ambulance', Icon: Ambulance, color: '#fbbf24', audioSrc: '/assets/emotes/call-an-ambulance.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'ty-loh', label: 'Ти лох', Icon: ShieldAlert, color: '#f87171', audioSrc: '/assets/emotes/ty-loh.m4a', gain: 0.5 },
   { id: 'ks-ks-chk-pk-a', label: 'Кс-кс-чк-чк-пк-пк-а!', Icon: Flag, color: '#60a5fa', audioSrc: '/assets/emotes/ks-ks-chk-pk-a.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'ay-que-buena-jugada', label: '¡Ay, ay ay! ¡Qué buena jugada', Icon: TrendingUp, color: '#22c55e', audioSrc: '/assets/emotes/ay-que-buena-jugada.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'a-dui-dui-dui', label: '啊对对对，啊对对对', Icon: BadgePercent, color: '#f97316', audioSrc: '/assets/emotes/a-dui-dui-dui.mp3', gain: EMOTE_AUDIO_GAIN },
