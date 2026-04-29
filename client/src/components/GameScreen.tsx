@@ -11,6 +11,7 @@ import {
   ChevronsDown,
   Clock3,
   CircleHelp,
+  Crown,
   Dice5,
   Factory,
   Flag,
@@ -56,6 +57,7 @@ import {
   getBankLoanRepaymentAmount,
   getBankDepositInfo,
   getBankDepositPayout,
+  getBankRentForCount,
   getDistrictCreationCost,
   getEffectiveBuildingRefund,
   getEffectiveFineAmount,
@@ -80,6 +82,7 @@ import type {
 } from '../engine/types';
 import { useGameStore, type EmoteEvent } from '../store/useGameStore';
 import { DiceRoller } from './DiceRoller';
+import { PlayerFigurine } from './PlayerFigurine';
 
 const TURN_SECONDS = 180;
 const AUTO_CONTINUE_MS = 1300;
@@ -233,6 +236,8 @@ const EMOTE_OPTIONS: EmoteOption[] = [
   { id: 'unlucky', label: 'Un-un-un-un-un-unlucky', Icon: ShieldAlert, color: '#fb923c', audioSrc: '/assets/emotes/unlucky.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'i-feel-nothing', label: 'I feel nothing', Icon: HeartCrack, color: '#f472b6', audioSrc: '/assets/emotes/i-feel-nothing.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'ready-catch-you', label: '准备好了吗，要来抓你咯', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/ready-catch-you.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'dai-deneg', label: 'Дай денег', Icon: HandCoins, color: '#facc15', audioSrc: '/assets/emotes/dai-deneg.m4a', gain: 0.45 },
+  { id: 'bagata-simya', label: "Я не з такої сім'ї, я з богатої", Icon: Crown, color: '#f59e0b', audioSrc: '/assets/emotes/ya-ne-z-takoyi-simyi-ya-z-bogatoyi.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'absolute-cinema', label: 'Absolute cinema', Icon: MessageCircleHeart, color: '#fb7185', audioSrc: '/assets/emotes/absolute-cinema.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'sigma-moment', label: 'Sigma moment', Icon: Sigma, color: '#f472b6', audioSrc: '/assets/emotes/sigma-moment.mp3', gain: EMOTE_AUDIO_GAIN },
@@ -274,12 +279,8 @@ const DISTRICT_PATH_OPTIONS: Array<{
 ];
 
 const DISTRICT_PATH_VIEW = new Map(DISTRICT_PATH_OPTIONS.map((option) => [option.path, option]));
-const DISTRICT_RENT_DIVISOR = 2.5;
-const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 2.25;
-const GREEN_DISTRICT_BUILDING_RENT_DIVISOR = 4;
-const GOLD_DISTRICT_BUILDING_RENT_DIVISOR = 3.5;
-const GREEN_DISTRICT_RENT_GROUPS = new Set(['Зелена']);
-const GOLD_DISTRICT_RENT_GROUPS = new Set(['Золота']);
+const DISTRICT_RENT_DIVISOR = 2;
+const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 1.8;
 
 const CITY_TILE_ART: Record<string, CityArtKind> = {
   pavlohrad: 'industrial',
@@ -360,6 +361,13 @@ export const GameScreen = () => {
   const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const canAdvanceTurn = isHost || isLocalTurn;
   const canUseAdmin = Boolean(room?.testMode);
+  const activePlayers = game.players.filter((player) => !player.isBankrupt);
+  const summaryVoteCount = activePlayers.filter((player) => Boolean(game.summaryVotes?.[player.id])).length;
+  const summaryVoter = room ? localPlayer : currentPlayer;
+  const hasRequestedSummary = room
+    ? Boolean(game.summaryVotes?.[summaryVoter.id])
+    : activePlayers.every((player) => Boolean(game.summaryVotes?.[player.id]));
+  const canRequestSummary = activePlayers.length > 1 && !summaryVoter.isBankrupt && game.phase !== 'finished' && !hasRequestedSummary;
   const recentEmoteSentAt = emoteSentAt.filter((sentAt) => emoteCooldownNow - sentAt < EMOTE_COOLDOWN_WINDOW_MS);
   const emoteCooldownRemainingMs =
     recentEmoteSentAt.length >= EMOTE_COOLDOWN_LIMIT
@@ -407,6 +415,16 @@ export const GameScreen = () => {
   const handleBlockedEmote = () => {
     setEmoteCooldownNow(Date.now());
     setEmoteCooldownNudge((nudge) => nudge + 1);
+  };
+
+  const requestSummary = () => {
+    if (room) {
+      dispatch({ type: 'request_summary', playerId: summaryVoter.id });
+      return;
+    }
+    activePlayers.forEach((player) => {
+      if (!game.summaryVotes?.[player.id]) dispatch({ type: 'request_summary', playerId: player.id });
+    });
   };
 
   const handleStartTradeDraft = (_player: Player, partners: Player[]) => {
@@ -524,6 +542,24 @@ export const GameScreen = () => {
               Адмін
             </button>
           )}
+          <button
+            className={`trade-badge summary-badge ${hasRequestedSummary ? 'active' : ''}`}
+            type="button"
+            disabled={!canRequestSummary}
+            title={
+              hasRequestedSummary
+                ? 'Ваш голос за підбиття підсумків уже враховано.'
+                : summaryVoter.isBankrupt
+                  ? 'Вибулі гравці не голосують за підбиття підсумків.'
+                  : room
+                    ? 'Проголосувати за завершення гри й підбиття підсумків.'
+                    : 'Локальна гра: підтвердити підбиття підсумків за всіх активних гравців.'
+            }
+            onClick={requestSummary}
+          >
+            <Crown size={15} />
+            Підсумки {summaryVoteCount}/{activePlayers.length}
+          </button>
           <button
             className={`sound-toggle emote-toggle ${emoteWheelOpen ? 'enabled' : ''} ${
               isEmoteCooldownActive ? 'cooldown' : ''
@@ -1723,6 +1759,10 @@ const BoardRentPrompt = ({
   const owner = game.players.find((player) => player.id === pendingRent.ownerId);
   const tile = getTile(pendingRent.tileId);
   const canPay = Boolean(payer && payer.money >= pendingRent.amount);
+  const depositBalance = payer ? getBankDepositPayout((game.bankDeposits ?? {})[payer.id]) : 0;
+  const depositCoverage = Math.min(depositBalance, pendingRent.amount);
+  const depositCashDue = Math.max(0, pendingRent.amount - depositCoverage);
+  const canPayWithDeposit = Boolean(payer && depositCoverage > 0);
   const hasUnoReverseCard = Boolean(payer && (payer.unoReverseCards ?? 0) > 0);
   const canUseUnoReverse = Boolean(hasUnoReverseCard && payer && owner && owner.id !== payer.id);
   const surrenderArmed = surrenderCharge >= 100;
@@ -1764,6 +1804,13 @@ const BoardRentPrompt = ({
           Послуга оренди: {pendingRent.discountPercent}% знижки, замість {formatMoney(pendingRent.originalAmount)}.
         </p>
       )}
+      {depositCoverage > 0 && (
+        <p className="deposit-payment-note">
+          Депозит покриє {formatMoney(depositCoverage)}.
+          {depositCashDue > 0 ? ` Після цього залишиться сплатити ${formatMoney(depositCashDue)}.` : ' Платіж буде закрито повністю.'}
+          {depositBalance - depositCoverage > 0 ? ` На депозиті залишиться ${formatMoney(depositBalance - depositCoverage)}.` : ''}
+        </p>
+      )}
       <div className="rent-actions">
         <button
           className="primary compact"
@@ -1774,6 +1821,17 @@ const BoardRentPrompt = ({
           <HandCoins size={16} />
           Заплатити
         </button>
+        {depositCoverage > 0 && (
+          <button
+            className="secondary compact"
+            disabled={!isLocalTurn || !canPayWithDeposit}
+            title={canPayWithDeposit ? undefined : 'Немає активного депозиту для списання.'}
+            onClick={() => dispatch({ type: 'pay_rent_with_deposit', playerId: pendingRent.payerId })}
+          >
+            <HandCoins size={16} />
+            Депозит
+          </button>
+        )}
         {hasUnoReverseCard && (
           <button
             className="uno-reverse-button compact"
@@ -1867,6 +1925,10 @@ const PaymentDecisionPanel = ({
         : recipientNames.join(', ')
       : 'банку';
   const canPay = Boolean(payer && payer.money >= pendingPayment.amount);
+  const depositBalance = payer ? getBankDepositPayout((game.bankDeposits ?? {})[payer.id]) : 0;
+  const depositCoverage = Math.min(depositBalance, pendingPayment.amount);
+  const depositCashDue = Math.max(0, pendingPayment.amount - depositCoverage);
+  const canPayWithDeposit = Boolean(payer && depositCoverage > 0);
   const isLoanPayment = pendingPayment.source === 'loan' && Boolean(pendingPayment.loanPayments?.length);
   const loanMissBlocked = isLoanPayment && hasMandatoryLoanPayment(game, pendingPayment);
   const surrenderArmed = surrenderCharge >= 100;
@@ -1898,6 +1960,13 @@ const PaymentDecisionPanel = ({
       <p>
         {payer?.name ?? 'Гравець'} має сплатити {paymentTarget}.
       </p>
+      {depositCoverage > 0 && (
+        <p className="deposit-payment-note">
+          Депозит покриє {formatMoney(depositCoverage)}.
+          {depositCashDue > 0 ? ` Після цього залишиться сплатити ${formatMoney(depositCashDue)}.` : ' Платіж буде закрито повністю.'}
+          {depositBalance - depositCoverage > 0 ? ` На депозиті залишиться ${formatMoney(depositBalance - depositCoverage)}.` : ''}
+        </p>
+      )}
       <div className="rent-actions">
         <button
           className="primary compact"
@@ -1908,11 +1977,22 @@ const PaymentDecisionPanel = ({
           <HandCoins size={16} />
           Сплатити
         </button>
+        {depositCoverage > 0 && (
+          <button
+            className="secondary compact"
+            disabled={!isLocalTurn || !canPayWithDeposit}
+            title={canPayWithDeposit ? undefined : 'Немає активного депозиту для списання.'}
+            onClick={() => dispatch({ type: 'pay_payment_with_deposit', playerId: pendingPayment.payerId })}
+          >
+            <HandCoins size={16} />
+            Депозит
+          </button>
+        )}
         {isLoanPayment && (
           <button
             className="secondary compact"
             disabled={!isLocalTurn || loanMissBlocked}
-            title={loanMissBlocked ? 'Цей кредит треба сплатити або здатися.' : 'Пропустити виплату і завершити хід.'}
+            title={loanMissBlocked ? 'Цей кредит треба сплатити або здатися.' : 'Пропустити виплату і продовжити хід.'}
             onClick={() => dispatch({ type: 'miss_loan_payment', playerId: pendingPayment.payerId })}
           >
             <Clock3 size={16} />
@@ -3558,6 +3638,8 @@ const ManagePanel = () => {
   const banks = ownedTiles.filter((tile) => tile.type === 'bank');
   const utilities = ownedTiles.filter((tile) => tile.type === 'utility');
   const cityGroups = groupCities(cities);
+  const activeBankDeposit = (game.bankDeposits ?? {})[player.id];
+  const activeBankDepositInfo = getBankDepositInfo(game, player.id);
 
   return (
     <div className="cards-panel">
@@ -3599,12 +3681,14 @@ const ManagePanel = () => {
         </div>
       )}
 
-      {(game.bankDeposits ?? {})[player.id] && (
+      {activeBankDeposit && (
         <div className="bonus-card bank-deposit">
           <HandCoins size={18} />
           <div>
             <strong>Банківський депозит</strong>
-            <span>{formatMoney(getBankDepositPayout((game.bankDeposits ?? {})[player.id]))}</span>
+            <span>
+              Накопичено {formatMoney(activeBankDepositInfo.payout)} · ліміт {formatMoney(activeBankDepositInfo.maxPayout)}
+            </span>
           </div>
         </div>
       )}
@@ -4836,24 +4920,21 @@ const CityRentTable = ({
 
 const getCityRentRows = (tile: CityTile, districtPath?: DistrictPath) => [
   { key: 'base', label: 'Без району', amount: tile.rents[0] },
-  { key: 'district', label: 'Район', amount: getDistrictDisplayRent(tile, tile.rents[0] * 2, 0, districtPath) },
-  { key: 'house-1', label: '1 буд.', amount: getDistrictDisplayRent(tile, tile.rents[1], 1, districtPath) },
-  { key: 'house-2', label: '2 буд.', amount: getDistrictDisplayRent(tile, tile.rents[2], 2, districtPath) },
-  { key: 'house-3', label: '3 буд.', amount: getDistrictDisplayRent(tile, tile.rents[3], 3, districtPath) },
-  { key: 'house-4', label: '4 буд.', amount: getDistrictDisplayRent(tile, tile.rents[4], 4, districtPath) },
-  { key: 'hotel', label: 'Готель', amount: getDistrictDisplayRent(tile, tile.rents[5], 5, districtPath) },
+  { key: 'district', label: 'Район', amount: getDistrictDisplayRent(tile.rents[0] * 2, districtPath) },
+  { key: 'house-1', label: '1 буд.', amount: getDistrictDisplayRent(tile.rents[1], districtPath) },
+  { key: 'house-2', label: '2 буд.', amount: getDistrictDisplayRent(tile.rents[2], districtPath) },
+  { key: 'house-3', label: '3 буд.', amount: getDistrictDisplayRent(tile.rents[3], districtPath) },
+  { key: 'house-4', label: '4 буд.', amount: getDistrictDisplayRent(tile.rents[4], districtPath) },
+  { key: 'hotel', label: 'Готель', amount: getDistrictDisplayRent(tile.rents[5], districtPath) },
 ];
 
-const getDistrictDisplayRent = (tile: CityTile, rent: number, houses: number, districtPath?: DistrictPath) =>
+const getDistrictDisplayRent = (rent: number, districtPath?: DistrictPath) =>
   districtPath === 'oldTown' || districtPath === 'residential'
-    ? Math.ceil(rent / getDistrictDisplayRentDivisor(tile, houses, districtPath))
+    ? Math.ceil(rent / getDistrictDisplayRentDivisor(districtPath))
     : rent;
 
-const getDistrictDisplayRentDivisor = (tile: CityTile, houses: number, districtPath: DistrictPath) => {
+const getDistrictDisplayRentDivisor = (districtPath: DistrictPath) => {
   if (districtPath === 'residential') return RESIDENTIAL_DISTRICT_RENT_DIVISOR;
-  if (houses <= 0) return DISTRICT_RENT_DIVISOR;
-  if (GOLD_DISTRICT_RENT_GROUPS.has(tile.group)) return GOLD_DISTRICT_BUILDING_RENT_DIVISOR;
-  if (GREEN_DISTRICT_RENT_GROUPS.has(tile.group)) return GREEN_DISTRICT_BUILDING_RENT_DIVISOR;
   return DISTRICT_RENT_DIVISOR;
 };
 
@@ -5213,9 +5294,9 @@ const ServicePropertyModal = ({
 
           {tile.type === 'bank' ? (
             <div className="bank-rent-table">
-              {[money(25), money(50), money(100), money(200)].map((amount, index) => (
-                <span className={ownedSameTypeCount === index + 1 ? 'active' : ''} key={amount}>
-                  {index + 1} банк: {formatMoney(amount)}
+              {[1, 2, 3, 4].map((bankCount) => (
+                <span className={ownedSameTypeCount === bankCount ? 'active' : ''} key={bankCount}>
+                  {bankCount} банк: {formatMoney(getBankRentForCount(bankCount))}
                 </span>
               ))}
             </div>
@@ -5231,7 +5312,7 @@ const ServicePropertyModal = ({
                 <strong>Банківський депозит</strong>
                 <span>
                   {bankDepositInfo.activeDeposit
-                    ? `${getBankDepositTurnCount(bankDepositInfo.activeDeposit)} ${formatTurnWord(getBankDepositTurnCount(bankDepositInfo.activeDeposit))} · повернення ${formatMoney(bankDepositInfo.payout)}`
+                    ? `${getBankDepositTurnCount(bankDepositInfo.activeDeposit)} ${formatTurnWord(getBankDepositTurnCount(bankDepositInfo.activeDeposit))} · накопичено ${formatMoney(bankDepositInfo.payout)} з ${formatMoney(bankDepositInfo.maxPayout)}`
                     : bankDepositInfo.canStart
                       ? `Доступний внесок ${formatMoney(bankDepositInfo.amount)}`
                       : bankDepositInfo.bankCount >= 2
@@ -5447,7 +5528,7 @@ const validateLoanDraft = (
   draft: LoanDraft,
 ) => {
   if (game.currentPlayerId !== proposer.id) return { valid: false, message: 'Кредит можна запропонувати тільки у свій хід.' };
-  if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(game.phase)) {
+  if (!canTakeBankLoanInPhase(game, proposer.id)) {
     return { valid: false, message: 'Кредит гравцю можна запропонувати тільки без активного рішення.' };
   }
   if (!lender || !borrower) return { valid: false, message: draft.mode === 'lend' ? 'Оберіть позичальника.' : 'Оберіть кредитора.' };
@@ -5485,7 +5566,8 @@ const canTakeBankLoanInPhase = (game: GameState, playerId: string): boolean =>
   (game.phase === 'payment' && game.pendingPayment?.payerId === playerId) ||
   (game.phase === 'rent' && game.pendingRent?.payerId === playerId) ||
   game.phase === 'awaitingPurchase' ||
-  (game.phase === 'bankDeposit' && game.pendingBankDeposit?.playerId === playerId);
+  (game.phase === 'bankDeposit' && game.pendingBankDeposit?.playerId === playerId) ||
+  (game.phase === 'casino' && game.pendingCasino?.playerId === playerId && !game.pendingCasino.spinEndsAt);
 
 const canUseLoanPayoffCardInPhase = canTakeBankLoanInPhase;
 
@@ -6773,14 +6855,6 @@ const pawnOffsets = (total: number, position: ReturnType<typeof boardPosition>) 
     make(0.7, -0.72),
   ];
 };
-
-const PlayerFigurine = ({ player, size = 'normal' }: { player: Player; size?: 'small' | 'normal' | 'large' }) => (
-  <span className={`pawn pawn-${size}`} style={{ '--pawn-color': player.color } as CSSProperties} aria-label={player.name}>
-    <span className="pawn-head" />
-    <span className="pawn-body" />
-    <span className="pawn-base" />
-  </span>
-);
 
 const getEmoteOption = (emoteId: string): EmoteOption => EMOTE_OPTION_MAP.get(emoteId) ?? EMOTE_OPTIONS[0];
 

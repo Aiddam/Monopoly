@@ -12,15 +12,26 @@ import type {
   CityTile,
   DistrictPath,
   GameAction,
+  GameFinishReason,
   GameState,
   LogEntry,
   LoanOffer,
+  MatchStats,
   MoneyHistoryPoint,
   PendingPayment,
   Player,
+  PlayerMatchStats,
+  PostMatchAward,
+  PostMatchAwardId,
+  DistrictMatchStats,
+  PostMatchPropertySummary,
+  PostMatchSummary,
+  PostMatchTransferSummary,
+  PropertyMatchStats,
   PropertyState,
   PropertyTile,
   RentServiceOffer,
+  TransferStatSource,
   TradeOffer,
 } from './types';
 import { money } from './economy';
@@ -56,8 +67,8 @@ const STEP_FEE_SECOND_SINGLE_DIE_CHANCE = 0.65;
 const STEP_FEE_CITY_EVENT_EXTRA_DECK_COPIES = 1;
 const RESIDENTIAL_BUILD_LIMIT_PER_ROLL = 2;
 const RESIDENTIAL_HOUSE_COST_MULTIPLIER = 0.45;
-const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 2.25;
-const DISTRICT_RENT_DIVISOR = 2.5;
+const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 1.8;
+const DISTRICT_RENT_DIVISOR = 2;
 const GREEN_DISTRICT_BUILDING_RENT_DIVISOR = 4;
 const GOLD_DISTRICT_BUILDING_RENT_DIVISOR = 3.5;
 const OLD_TOWN_PASS_THROUGH_DIVISOR = 3.5;
@@ -65,7 +76,8 @@ const GREEN_DISTRICT_RENT_GROUPS = new Set(['Зелена']);
 const GOLD_DISTRICT_RENT_GROUPS = new Set(['Золота']);
 const BANK_DEPOSIT_MIN_BANKS = 2;
 const BANK_DEPOSIT_TURN_RATE = 0.1;
-const BANK_RENT_BY_COUNT = [0, money(25), money(50), money(100), money(200)] as const;
+const BANK_DEPOSIT_MAX_PAYOUT = money(650);
+const BANK_RENT_BY_COUNT = [0, money(38), money(75), money(150), money(300)] as const;
 const PLAYER_LOAN_MIN_PRINCIPAL = money(50);
 const PLAYER_LOAN_MAX_PRINCIPAL = money(800);
 const PLAYER_LOAN_MIN_DURATION = 2;
@@ -169,6 +181,8 @@ export const createInitialGame = (
     rentServices: [],
     rentServiceCooldowns: {},
     bankDeposits: {},
+    summaryVotes: {},
+    matchStats: createInitialMatchStats(players),
     dice: [1, 1],
     diceRollId: 0,
     doublesInRow: 0,
@@ -279,11 +293,17 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
     case 'pay_rent':
       next = payRent(state, action.playerId);
       break;
+    case 'pay_rent_with_deposit':
+      next = payRent(state, action.playerId, { useBankDeposit: true });
+      break;
     case 'use_uno_reverse':
       next = useUnoReverse(state, action.playerId);
       break;
     case 'pay_payment':
       next = payPendingPayment(state, action.playerId);
+      break;
+    case 'pay_payment_with_deposit':
+      next = payPendingPayment(state, action.playerId, { useBankDeposit: true });
       break;
     case 'pay_bail':
       next = payBail(state, action.playerId);
@@ -296,6 +316,9 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       break;
     case 'admin_start_city_event':
       next = adminStartCityEvent(state, action.cityEventId);
+      break;
+    case 'request_summary':
+      next = requestSummary(state, action.playerId);
       break;
     case 'end_turn':
       next = endTurn(state, action.playerId);
@@ -310,7 +333,10 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       next = state;
   }
 
-  return recordMoneyHistory(state, normalizeLoans(normalizeBankDeposits(normalizeDistrictPaths(next))));
+  const normalized = normalizeLoans(normalizeBankDeposits(normalizeDistrictPaths(next)));
+  const withStats = recordMatchStats(state, normalized, action);
+  const completed = maybeFinalizeGame(withStats, action);
+  return recordMoneyHistory(state, completed);
 };
 
 const MONEY_HISTORY_LIMIT = 240;
@@ -355,6 +381,730 @@ const recordMoneyHistory = (previous: GameState, next: GameState): GameState => 
   return next.moneyHistory === moneyHistory ? next : { ...next, moneyHistory };
 };
 
+const createEmptyPlayerStats = (): PlayerMatchStats => ({
+  purchases: 0,
+  auctionWins: 0,
+  purchaseSpend: 0,
+  mortgageReceived: 0,
+  unmortgageSpend: 0,
+  buildingsBuilt: 0,
+  hotelsBuilt: 0,
+  buildingSpend: 0,
+  buildingRefund: 0,
+  districtsCreated: 0,
+  districtSpend: 0,
+  rentPaid: 0,
+  rentReceived: 0,
+  taxesPaid: 0,
+  bankPaid: 0,
+  casinoBets: 0,
+  casinoGrossWon: 0,
+  casinoLost: 0,
+  casinoNet: 0,
+  chanceDraws: 0,
+  communityDraws: 0,
+  cardsDrawn: 0,
+  bankLoansTaken: 0,
+  playerLoansTaken: 0,
+  loanPrincipalTaken: 0,
+  loanPrincipalGiven: 0,
+  loanPaid: 0,
+  loanReceived: 0,
+  tradesAccepted: 0,
+  summaryVotes: 0,
+});
+
+const createInitialPropertyStats = (tileId: number): PropertyMatchStats => ({
+  tileId,
+  purchaseSpendByPlayer: {},
+  rentPaidByPlayer: {},
+  rentReceivedByPlayer: {},
+  buildingSpendByPlayer: {},
+  buildingRefundByPlayer: {},
+  mortgageReceivedByPlayer: {},
+  unmortgageSpendByPlayer: {},
+});
+
+const createInitialDistrictStats = (group: string): DistrictMatchStats => ({
+  group,
+  createdByPlayer: {},
+  spendByPlayer: {},
+  rentReceivedByPlayer: {},
+  rentPaidByPlayer: {},
+});
+
+const createInitialMatchStats = (players: Player[]): MatchStats => ({
+  players: Object.fromEntries(players.map((player) => [player.id, createEmptyPlayerStats()])),
+  properties: Object.fromEntries(propertyTiles.map((tile) => [tile.id, createInitialPropertyStats(tile.id)])),
+  districts: {},
+  transfers: {},
+  transfersBySource: {},
+  chanceDrawCounts: {},
+  communityDrawCounts: {},
+});
+
+const normalizePlayerStats = (stats: Partial<PlayerMatchStats> | undefined): PlayerMatchStats => ({
+  ...createEmptyPlayerStats(),
+  ...(stats ?? {}),
+});
+
+const cloneMatchStats = (state: GameState): MatchStats => {
+  const source = state.matchStats ?? createInitialMatchStats(state.players);
+  const players = Object.fromEntries(
+    Object.entries(source.players ?? {}).map(([playerId, stats]) => [playerId, normalizePlayerStats(stats)]),
+  ) as Record<string, PlayerMatchStats>;
+  state.players.forEach((player) => {
+    players[player.id] = normalizePlayerStats(players[player.id]);
+  });
+
+  return {
+    players,
+    properties: Object.fromEntries(
+      Object.entries(source.properties ?? {}).map(([tileId, stats]) => [
+        Number(tileId),
+        {
+          ...createInitialPropertyStats(Number(tileId)),
+          ...stats,
+          purchaseSpendByPlayer: { ...(stats.purchaseSpendByPlayer ?? {}) },
+          rentPaidByPlayer: { ...(stats.rentPaidByPlayer ?? {}) },
+          rentReceivedByPlayer: { ...(stats.rentReceivedByPlayer ?? {}) },
+          buildingSpendByPlayer: { ...(stats.buildingSpendByPlayer ?? {}) },
+          buildingRefundByPlayer: { ...(stats.buildingRefundByPlayer ?? {}) },
+          mortgageReceivedByPlayer: { ...(stats.mortgageReceivedByPlayer ?? {}) },
+          unmortgageSpendByPlayer: { ...(stats.unmortgageSpendByPlayer ?? {}) },
+        },
+      ]),
+    ),
+    districts: Object.fromEntries(
+      Object.entries(source.districts ?? {}).map(([group, stats]) => [
+        group,
+        {
+          ...createInitialDistrictStats(group),
+          ...stats,
+          createdByPlayer: { ...(stats.createdByPlayer ?? {}) },
+          spendByPlayer: { ...(stats.spendByPlayer ?? {}) },
+          rentReceivedByPlayer: { ...(stats.rentReceivedByPlayer ?? {}) },
+          rentPaidByPlayer: { ...(stats.rentPaidByPlayer ?? {}) },
+        },
+      ]),
+    ),
+    transfers: Object.fromEntries(
+      Object.entries(source.transfers ?? {}).map(([fromId, recipients]) => [fromId, { ...recipients }]),
+    ),
+    transfersBySource: Object.fromEntries(
+      Object.entries(source.transfersBySource ?? {}).map(([fromId, recipients]) => [
+        fromId,
+        Object.fromEntries(
+          Object.entries(recipients).map(([toId, bySource]) => [toId, { ...bySource }]),
+        ),
+      ]),
+    ),
+    chanceDrawCounts: { ...(source.chanceDrawCounts ?? {}) },
+    communityDrawCounts: { ...(source.communityDrawCounts ?? {}) },
+  };
+};
+
+const addAmount = (record: Record<string, number> | Record<number, number>, key: string | number, amount: number) => {
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  (record as Record<string, number>)[String(key)] = ((record as Record<string, number>)[String(key)] ?? 0) + amount;
+};
+
+const addPlayerStat = (stats: MatchStats, playerId: string, key: keyof PlayerMatchStats, amount: number) => {
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  stats.players[playerId] = normalizePlayerStats(stats.players[playerId]);
+  stats.players[playerId][key] += amount;
+};
+
+const propertyStatsFor = (stats: MatchStats, tileId: number): PropertyMatchStats => {
+  stats.properties[tileId] = stats.properties[tileId] ?? createInitialPropertyStats(tileId);
+  return stats.properties[tileId];
+};
+
+const districtStatsFor = (stats: MatchStats, group: string): DistrictMatchStats => {
+  stats.districts[group] = stats.districts[group] ?? createInitialDistrictStats(group);
+  return stats.districts[group];
+};
+
+const recordTransferStat = (
+  stats: MatchStats,
+  fromPlayerId: string,
+  toPlayerId: string,
+  amount: number,
+  source: TransferStatSource,
+) => {
+  if (!Number.isFinite(amount) || amount <= 0 || fromPlayerId === toPlayerId) return;
+  stats.transfers[fromPlayerId] = { ...(stats.transfers[fromPlayerId] ?? {}) };
+  addAmount(stats.transfers[fromPlayerId], toPlayerId, amount);
+  stats.transfersBySource[fromPlayerId] = { ...(stats.transfersBySource[fromPlayerId] ?? {}) };
+  stats.transfersBySource[fromPlayerId][toPlayerId] = { ...(stats.transfersBySource[fromPlayerId][toPlayerId] ?? {}) };
+  const bySource = stats.transfersBySource[fromPlayerId][toPlayerId];
+  bySource[source] = (bySource[source] ?? 0) + amount;
+};
+
+const playerMoneyDelta = (previous: GameState, next: GameState, playerId: string): number => {
+  const before = previous.players.find((player) => player.id === playerId)?.money ?? 0;
+  const after = next.players.find((player) => player.id === playerId)?.money ?? before;
+  return after - before;
+};
+
+const isSamePendingPaymentDecision = (before: PendingPayment, after: PendingPayment | undefined): boolean => {
+  if (!after) return false;
+  if (before.payerId !== after.payerId || before.source !== after.source || before.reason !== after.reason || before.tileId !== after.tileId) {
+    return false;
+  }
+  const beforeLoanIds = (before.loanPayments ?? []).map((loanPayment) => loanPayment.loanId).sort();
+  const afterLoanIds = (after.loanPayments ?? []).map((loanPayment) => loanPayment.loanId).sort();
+  return beforeLoanIds.length === afterLoanIds.length && beforeLoanIds.every((loanId, index) => loanId === afterLoanIds[index]);
+};
+
+const getPaidRecipientAmounts = (
+  before: Array<{ playerId: string; amount: number }> = [],
+  after: Array<{ playerId: string; amount: number }> = [],
+): Array<{ playerId: string; amount: number }> => {
+  const remainingByPlayer = new Map(after.map((recipient) => [recipient.playerId, recipient.amount]));
+  return before
+    .map((recipient) => ({
+      playerId: recipient.playerId,
+      amount: Math.max(0, recipient.amount - (remainingByPlayer.get(recipient.playerId) ?? 0)),
+    }))
+    .filter((recipient) => recipient.amount > 0);
+};
+
+const recordPropertySpend = (
+  stats: MatchStats,
+  tileId: number,
+  playerId: string,
+  key: keyof Pick<
+    PropertyMatchStats,
+    'purchaseSpendByPlayer' | 'buildingSpendByPlayer' | 'buildingRefundByPlayer' | 'mortgageReceivedByPlayer' | 'unmortgageSpendByPlayer'
+  >,
+  amount: number,
+) => {
+  const property = propertyStatsFor(stats, tileId);
+  addAmount(property[key], playerId, amount);
+};
+
+const paymentSourceToTransferSource = (source: PendingPayment['source']): TransferStatSource => {
+  if (source === 'loan') return 'loan';
+  if (source === 'card') return 'card';
+  if (source === 'movement') return 'movement';
+  return 'other';
+};
+
+const recordMatchStats = (previous: GameState, next: GameState, action: GameAction): GameState => {
+  if (previous.phase === 'finished') return next;
+  if (!shouldRecordStatsForAction(action)) return next;
+  const stats = cloneMatchStats(previous);
+
+  if (action.type === 'request_summary' && !previous.summaryVotes?.[action.playerId] && next.summaryVotes?.[action.playerId]) {
+    addPlayerStat(stats, action.playerId, 'summaryVotes', 1);
+  }
+
+  if (action.type === 'draw_card' && previous.pendingCardDraw && next.pendingCard?.deck === previous.pendingCardDraw.deck) {
+    const cardId = next.pendingCard.cardId;
+    addPlayerStat(stats, action.playerId, 'cardsDrawn', 1);
+    if (next.pendingCard.deck === 'chance') {
+      addPlayerStat(stats, action.playerId, 'chanceDraws', 1);
+      addAmount(stats.chanceDrawCounts, cardId, 1);
+    } else {
+      addPlayerStat(stats, action.playerId, 'communityDraws', 1);
+      addAmount(stats.communityDrawCounts, cardId, 1);
+    }
+  }
+
+  if (action.type === 'buy' && previous.pendingPurchaseTileId !== undefined) {
+    const tile = getTile(previous.pendingPurchaseTileId);
+    if (isPropertyTile(tile) && next.properties[tile.id]?.ownerId === action.playerId) {
+      const spend = Math.max(0, -playerMoneyDelta(previous, next, action.playerId));
+      addPlayerStat(stats, action.playerId, 'purchases', 1);
+      addPlayerStat(stats, action.playerId, 'purchaseSpend', spend);
+      recordPropertySpend(stats, tile.id, action.playerId, 'purchaseSpendByPlayer', spend);
+    }
+  }
+
+  if (action.type === 'resolve_auction' && previous.auction?.highestBidderId) {
+    const { tileId, highestBid, highestBidderId } = previous.auction;
+    if (next.properties[tileId]?.ownerId === highestBidderId) {
+      addPlayerStat(stats, highestBidderId, 'auctionWins', 1);
+      addPlayerStat(stats, highestBidderId, 'purchases', 1);
+      addPlayerStat(stats, highestBidderId, 'purchaseSpend', highestBid);
+      recordPropertySpend(stats, tileId, highestBidderId, 'purchaseSpendByPlayer', highestBid);
+    }
+  }
+
+  if (action.type === 'mortgage') {
+    const before = previous.properties[action.tileId];
+    const after = next.properties[action.tileId];
+    if (before && after?.mortgaged && !before.mortgaged) {
+      const amount = Math.max(0, playerMoneyDelta(previous, next, action.playerId));
+      addPlayerStat(stats, action.playerId, 'mortgageReceived', amount);
+      recordPropertySpend(stats, action.tileId, action.playerId, 'mortgageReceivedByPlayer', amount);
+    }
+  }
+
+  if (action.type === 'unmortgage') {
+    const before = previous.properties[action.tileId];
+    const after = next.properties[action.tileId];
+    if (before?.mortgaged && after && !after.mortgaged) {
+      const amount = Math.max(0, -playerMoneyDelta(previous, next, action.playerId));
+      addPlayerStat(stats, action.playerId, 'unmortgageSpend', amount);
+      recordPropertySpend(stats, action.tileId, action.playerId, 'unmortgageSpendByPlayer', amount);
+    }
+  }
+
+  if (action.type === 'build') {
+    const before = previous.properties[action.tileId];
+    const after = next.properties[action.tileId];
+    if (before && after && after.houses > before.houses) {
+      const amount = Math.max(0, -playerMoneyDelta(previous, next, action.playerId));
+      addPlayerStat(stats, action.playerId, 'buildingsBuilt', after.houses - before.houses);
+      if (after.houses >= 5 && before.houses < 5) addPlayerStat(stats, action.playerId, 'hotelsBuilt', 1);
+      addPlayerStat(stats, action.playerId, 'buildingSpend', amount);
+      recordPropertySpend(stats, action.tileId, action.playerId, 'buildingSpendByPlayer', amount);
+    }
+  }
+
+  if (action.type === 'sell_building') {
+    const before = previous.properties[action.tileId];
+    const after = next.properties[action.tileId];
+    if (before && after && after.houses < before.houses) {
+      const amount = Math.max(0, playerMoneyDelta(previous, next, action.playerId));
+      addPlayerStat(stats, action.playerId, 'buildingRefund', amount);
+      recordPropertySpend(stats, action.tileId, action.playerId, 'buildingRefundByPlayer', amount);
+    }
+  }
+
+  if (action.type === 'create_district' && !previous.districtPaths?.[action.group] && next.districtPaths?.[action.group]) {
+    const amount = Math.max(0, -playerMoneyDelta(previous, next, action.playerId));
+    const district = districtStatsFor(stats, action.group);
+    addPlayerStat(stats, action.playerId, 'districtsCreated', 1);
+    addPlayerStat(stats, action.playerId, 'districtSpend', amount);
+    addAmount(district.createdByPlayer, action.playerId, 1);
+    addAmount(district.spendByPlayer, action.playerId, amount);
+  }
+
+  if (
+    (action.type === 'pay_rent' || action.type === 'pay_rent_with_deposit') &&
+    previous.pendingRent?.payerId === action.playerId
+  ) {
+    const rent = previous.pendingRent;
+    const remainingRent =
+      next.pendingRent?.payerId === rent.payerId &&
+      next.pendingRent.ownerId === rent.ownerId &&
+      next.pendingRent.tileId === rent.tileId
+        ? next.pendingRent.amount
+        : 0;
+    const amount = Math.max(0, rent.amount - remainingRent);
+    addPlayerStat(stats, rent.payerId, 'rentPaid', amount);
+    addPlayerStat(stats, rent.ownerId, 'rentReceived', amount);
+    recordTransferStat(stats, rent.payerId, rent.ownerId, amount, 'rent');
+    const tile = getTile(rent.tileId);
+    const property = propertyStatsFor(stats, rent.tileId);
+    addAmount(property.rentPaidByPlayer, rent.payerId, amount);
+    addAmount(property.rentReceivedByPlayer, rent.ownerId, amount);
+    if (tile.type === 'city') {
+      const district = districtStatsFor(stats, tile.group);
+      addAmount(district.rentPaidByPlayer, rent.payerId, amount);
+      addAmount(district.rentReceivedByPlayer, rent.ownerId, amount);
+    }
+  }
+
+  if (
+    (action.type === 'pay_payment' || action.type === 'pay_payment_with_deposit') &&
+    previous.pendingPayment?.payerId === action.playerId
+  ) {
+    const payment = previous.pendingPayment;
+    const residualPayment = isSamePendingPaymentDecision(payment, next.pendingPayment) ? next.pendingPayment : undefined;
+    const amount = Math.max(0, payment.amount - (residualPayment?.amount ?? 0));
+    const paidRecipients = getPaidRecipientAmounts(payment.recipients, residualPayment?.recipients);
+    const paidRecipientTotal = paidRecipients.reduce((sum, recipient) => sum + recipient.amount, 0);
+    if (payment.source === 'tax') {
+      addPlayerStat(stats, action.playerId, 'taxesPaid', amount);
+      addPlayerStat(stats, action.playerId, 'bankPaid', amount);
+    } else if (payment.source === 'loan') {
+      addPlayerStat(stats, action.playerId, 'loanPaid', amount);
+      if (paidRecipientTotal < amount) addPlayerStat(stats, action.playerId, 'bankPaid', amount - paidRecipientTotal);
+    } else if (paidRecipientTotal < amount) {
+      addPlayerStat(stats, action.playerId, 'bankPaid', amount - paidRecipientTotal);
+    }
+
+    paidRecipients.forEach((recipient) => {
+      recordTransferStat(stats, action.playerId, recipient.playerId, recipient.amount, paymentSourceToTransferSource(payment.source));
+      if (payment.source === 'loan') addPlayerStat(stats, recipient.playerId, 'loanReceived', recipient.amount);
+    });
+  }
+
+  if (action.type === 'casino_bet') {
+    const bet = Math.floor(action.amount);
+    const net = bet * Math.floor(action.multiplier) - bet;
+    addPlayerStat(stats, action.playerId, 'casinoBets', bet);
+    if (net > 0) addPlayerStat(stats, action.playerId, 'casinoGrossWon', net);
+    if (net < 0) addPlayerStat(stats, action.playerId, 'casinoLost', Math.abs(net));
+    if (Number.isFinite(net)) stats.players[action.playerId].casinoNet += net;
+  }
+
+  if (action.type === 'accept_trade') {
+    const offer = previous.tradeOffers.find((candidate) => candidate.id === action.offerId && candidate.status === 'pending');
+    if (offer && next.tradeOffers.find((candidate) => candidate.id === action.offerId)?.status === 'accepted') {
+      addPlayerStat(stats, offer.fromPlayerId, 'tradesAccepted', 1);
+      addPlayerStat(stats, offer.toPlayerId, 'tradesAccepted', 1);
+      recordTransferStat(stats, offer.fromPlayerId, offer.toPlayerId, offer.offerMoney, 'trade');
+      recordTransferStat(stats, offer.toPlayerId, offer.fromPlayerId, offer.requestMoney, 'trade');
+    }
+  }
+
+  if (action.type === 'accept_loan') {
+    const offer = (previous.loanOffers ?? []).find((candidate) => candidate.id === action.offerId && candidate.status === 'pending');
+    if (offer && (next.loanOffers ?? []).find((candidate) => candidate.id === action.offerId)?.status === 'accepted') {
+      addPlayerStat(stats, offer.borrowerId, 'playerLoansTaken', 1);
+      addPlayerStat(stats, offer.borrowerId, 'loanPrincipalTaken', offer.principal);
+      addPlayerStat(stats, offer.lenderId, 'loanPrincipalGiven', offer.principal);
+      recordTransferStat(stats, offer.lenderId, offer.borrowerId, offer.principal, 'loan');
+    }
+  }
+
+  if (action.type === 'take_bank_loan') {
+    const amount = Math.max(0, playerMoneyDelta(previous, next, action.playerId));
+    addPlayerStat(stats, action.playerId, 'bankLoansTaken', 1);
+    addPlayerStat(stats, action.playerId, 'loanPrincipalTaken', amount);
+  }
+
+  if (action.type === 'declare_bankruptcy') {
+    next.players.forEach((player) => {
+      const gained = playerMoneyDelta(previous, next, player.id);
+      if (player.id !== action.playerId && gained > 0) {
+        recordTransferStat(stats, action.playerId, player.id, gained, 'bankruptcy');
+      }
+    });
+  }
+
+  return { ...next, matchStats: stats };
+};
+
+const shouldRecordStatsForAction = (action: GameAction): boolean =>
+  [
+    'request_summary',
+    'draw_card',
+    'buy',
+    'resolve_auction',
+    'mortgage',
+    'unmortgage',
+    'build',
+    'sell_building',
+    'create_district',
+    'pay_rent',
+    'pay_rent_with_deposit',
+    'pay_payment',
+    'pay_payment_with_deposit',
+    'casino_bet',
+    'accept_trade',
+    'accept_loan',
+    'take_bank_loan',
+    'declare_bankruptcy',
+  ].includes(action.type);
+
+const activePlayerIds = (state: GameState): string[] =>
+  state.players.filter((player) => !player.isBankrupt).map((player) => player.id);
+
+const requestSummary = (state: GameState, playerId: string): GameState => {
+  if (state.phase === 'finished') return state;
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (!player || player.isBankrupt) return state;
+  if (state.summaryVotes?.[playerId]) return state;
+  return {
+    ...state,
+    summaryVotes: { ...(state.summaryVotes ?? {}), [playerId]: Date.now() },
+    log: appendLog(state, `${player.name} голосує за підбиття підсумків.`),
+  };
+};
+
+export const maybeFinishBySummaryVotes = (state: GameState): GameState => {
+  if (state.phase === 'finished') return state;
+  const activeIds = activePlayerIds(state);
+  if (activeIds.length <= 1) return state;
+  if (!activeIds.every((playerId) => Boolean(state.summaryVotes?.[playerId]))) return state;
+  return finishGame(state, 'summary');
+};
+
+const maybeFinalizeGame = (state: GameState, action: GameAction): GameState => {
+  if (state.phase === 'finished' && !state.postMatch) return finishGame(state, 'survivor');
+  const summaryFinished = maybeFinishBySummaryVotes(state);
+  if (summaryFinished.phase === 'finished') return summaryFinished;
+  if (action.type === 'declare_bankruptcy' || action.type === 'end_turn' || action.type === 'continue_turn') {
+    if (state.phase === 'finished') return finishGame(state, 'survivor');
+  }
+  return state;
+};
+
+export const selectAwardIds = (game: GameState): PostMatchAwardId[] => {
+  const mandatory: PostMatchAwardId[] = ['propertyCount', 'finalCash'];
+  const optional: PostMatchAwardId[] = [
+    'chanceMaster',
+    'taxPayer',
+    'casinoWinner',
+    'builder',
+    'rentCollector',
+    'districtArchitect',
+    'dealMaker',
+    'loanMagnet',
+  ];
+  const shuffled = shuffleAwardIds(optional, hashString(`${game.id}:${game.players.length}:${game.turn}`));
+  return [...mandatory, ...shuffled.slice(0, 3)];
+};
+
+export const finishGame = (state: GameState, reason: GameFinishReason): GameState => {
+  const finishedState = {
+    ...state,
+    phase: 'finished' as const,
+    pendingPurchaseTileId: undefined,
+    pendingRent: undefined,
+    pendingPayment: undefined,
+    pendingCasino: undefined,
+    pendingBankDeposit: undefined,
+    pendingJail: undefined,
+    pendingCard: undefined,
+    pendingCardDraw: undefined,
+    pendingCityEvent: undefined,
+    auction: undefined,
+  };
+  const postMatch = buildMatchSummary(finishedState, reason);
+  return {
+    ...finishedState,
+    postMatch,
+    winnerIds: postMatch.winnerIds,
+    winnerId: postMatch.winnerIds[0] ?? state.winnerId,
+  };
+};
+
+export const buildMatchSummary = (game: GameState, reason: GameFinishReason = game.postMatch?.reason ?? 'summary'): PostMatchSummary => {
+  const selectedAwardIds = selectAwardIds(game);
+  const selectedAwards = selectedAwardIds.map((awardId) => buildAward(game, awardId));
+  const survivor = reason === 'survivor' ? game.players.find((player) => !player.isBankrupt) : undefined;
+  const awards: PostMatchAward[] = survivor
+    ? [
+        ...selectedAwards,
+        {
+          id: 'lastSurvivor',
+          title: 'Останній вижив',
+          description: 'Фінальна нагорода за перемогу через вибування суперників.',
+          winnerIds: [survivor.id],
+          value: 1,
+          crown: true,
+        },
+      ]
+    : selectedAwards;
+  const crownCounts = countCrowns(game.players, awards);
+  const players = buildPlayerSummaries(game, crownCounts);
+  return {
+    finishedAt: game.postMatch?.finishedAt ?? Date.now(),
+    reason,
+    selectedAwardIds,
+    awards,
+    players,
+    properties: buildPropertySummaries(game),
+    transfers: buildTransferSummaries(game),
+    chanceCards: Object.entries(game.matchStats?.chanceDrawCounts ?? {})
+      .map(([cardId, count]) => ({ cardId: Number(cardId), count }))
+      .sort((left, right) => right.count - left.count || left.cardId - right.cardId),
+    communityCards: Object.entries(game.matchStats?.communityDrawCounts ?? {})
+      .map(([cardId, count]) => ({ cardId: Number(cardId), count }))
+      .sort((left, right) => right.count - left.count || left.cardId - right.cardId),
+    winnerIds: players.filter((player) => player.rank === 1).map((player) => player.playerId),
+  };
+};
+
+const AWARD_TEXT: Record<PostMatchAwardId, { title: string; description: string }> = {
+  propertyCount: {
+    title: 'Найбільше майна',
+    description: 'Найбільша кількість фінальних карток майна.',
+  },
+  finalCash: {
+    title: 'Найбільше грошей на рахунку',
+    description: 'Найбільше готівки в кінці гри.',
+  },
+  chanceMaster: {
+    title: 'Найбільше відкрито шансів',
+    description: 'Найбільше відкритих карток “Шанс”.',
+  },
+  taxPayer: {
+    title: 'Найкращий платник податків',
+    description: 'Найбільше сплачено на податкових клітинках.',
+  },
+  casinoWinner: {
+    title: 'Любитель казино',
+    description: 'Найбільший чистий виграш у казино.',
+  },
+  builder: {
+    title: 'Найкращий забудовник',
+    description: 'Найбільше побудованих будинків і готелів.',
+  },
+  rentCollector: {
+    title: 'Рантьє матчу',
+    description: 'Найбільше отримано оренди від інших гравців.',
+  },
+  districtArchitect: {
+    title: 'Архітектор районів',
+    description: 'Найбільше створених районів.',
+  },
+  dealMaker: {
+    title: 'Майстер угод',
+    description: 'Найбільше прийнятих угод за участю гравця.',
+  },
+  loanMagnet: {
+    title: 'Кредитний магнат',
+    description: 'Найбільше залучено кредитних коштів.',
+  },
+  lastSurvivor: {
+    title: 'Останній вижив',
+    description: 'Фінальна нагорода за перемогу через вибування суперників.',
+  },
+};
+
+const buildAward = (game: GameState, id: PostMatchAwardId): PostMatchAward => {
+  const values = game.players.map((player) => ({ playerId: player.id, value: getAwardMetric(game, id, player) }));
+  const max = Math.max(...values.map((entry) => entry.value));
+  const winnerIds = values.filter((entry) => entry.value === max).map((entry) => entry.playerId);
+  return {
+    id,
+    title: AWARD_TEXT[id].title,
+    description: AWARD_TEXT[id].description,
+    winnerIds,
+    value: max,
+    crown: true,
+  };
+};
+
+const getAwardMetric = (game: GameState, id: PostMatchAwardId, player: Player): number => {
+  const stats = normalizePlayerStats(game.matchStats?.players?.[player.id]);
+  switch (id) {
+    case 'propertyCount':
+      return player.properties.length;
+    case 'finalCash':
+      return player.money;
+    case 'chanceMaster':
+      return stats.chanceDraws;
+    case 'taxPayer':
+      return stats.taxesPaid;
+    case 'casinoWinner':
+      return stats.casinoGrossWon;
+    case 'builder':
+      return stats.buildingsBuilt;
+    case 'rentCollector':
+      return stats.rentReceived;
+    case 'districtArchitect':
+      return stats.districtsCreated;
+    case 'dealMaker':
+      return stats.tradesAccepted;
+    case 'loanMagnet':
+      return stats.loanPrincipalTaken;
+    case 'lastSurvivor':
+      return player.isBankrupt ? 0 : 1;
+  }
+};
+
+const countCrowns = (players: Player[], awards: PostMatchAward[]): Record<string, number> => {
+  const counts = Object.fromEntries(players.map((player) => [player.id, 0]));
+  awards.forEach((award) => {
+    if (!award.crown) return;
+    award.winnerIds.forEach((playerId) => {
+      counts[playerId] = (counts[playerId] ?? 0) + 1;
+    });
+  });
+  return counts;
+};
+
+const buildPlayerSummaries = (game: GameState, crownCounts: Record<string, number>): PostMatchSummary['players'] => {
+  const summaries = game.players
+    .map((player) => {
+      const propertyValue = player.properties.reduce((sum, tileId) => {
+        const tile = getTile(tileId);
+        if (!isPropertyTile(tile)) return sum;
+        const property = game.properties[tile.id];
+        return sum + tile.price + (tile.type === 'city' ? property.houses * tile.houseCost : 0);
+      }, 0);
+      return {
+        playerId: player.id,
+        finalMoney: player.money,
+        propertyCount: player.properties.length,
+        propertyValue,
+        totalWorth: calculatePlayerWorth(game, player),
+        crowns: crownCounts[player.id] ?? 0,
+        rank: 1,
+      };
+    })
+    .sort((left, right) => right.crowns - left.crowns || right.totalWorth - left.totalWorth || left.playerId.localeCompare(right.playerId));
+
+  let previousCrowns: number | undefined;
+  let currentRank = 0;
+  return summaries.map((summary, index) => {
+    if (summary.crowns !== previousCrowns) {
+      currentRank = index + 1;
+      previousCrowns = summary.crowns;
+    }
+    return { ...summary, rank: currentRank };
+  });
+};
+
+const buildPropertySummaries = (game: GameState): PostMatchPropertySummary[] => {
+  const stats = game.matchStats;
+  return propertyTiles.map((tile) => {
+    const propertyStats = stats?.properties?.[tile.id] ?? createInitialPropertyStats(tile.id);
+    const income = sumRecord(propertyStats.rentReceivedByPlayer) + sumRecord(propertyStats.mortgageReceivedByPlayer) + sumRecord(propertyStats.buildingRefundByPlayer);
+    const spend =
+      sumRecord(propertyStats.purchaseSpendByPlayer) +
+      sumRecord(propertyStats.buildingSpendByPlayer) +
+      sumRecord(propertyStats.unmortgageSpendByPlayer);
+    return {
+      tileId: tile.id,
+      ownerId: game.properties[tile.id]?.ownerId,
+      group: tile.type === 'city' ? tile.group : undefined,
+      income,
+      spend,
+      net: income - spend,
+    };
+  });
+};
+
+const buildTransferSummaries = (game: GameState): PostMatchTransferSummary[] => {
+  const stats = game.matchStats;
+  if (!stats) return [];
+  return Object.entries(stats.transfers)
+    .flatMap(([fromPlayerId, recipients]) =>
+      Object.entries(recipients).map(([toPlayerId, amount]) => ({
+        fromPlayerId,
+        toPlayerId,
+        amount,
+        bySource: stats.transfersBySource[fromPlayerId]?.[toPlayerId] ?? {},
+      })),
+    )
+    .sort((left, right) => right.amount - left.amount || left.fromPlayerId.localeCompare(right.fromPlayerId));
+};
+
+const sumRecord = (record: Record<string, number> | undefined): number =>
+  Object.values(record ?? {}).reduce((sum, amount) => sum + amount, 0);
+
+const hashString = (value: string): number => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const nextSeed = (seed: number): number => (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+
+const shuffleAwardIds = (ids: PostMatchAwardId[], initialSeed: number): PostMatchAwardId[] => {
+  const shuffled = [...ids];
+  let seed = initialSeed || 1;
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    seed = nextSeed(seed);
+    const swapIndex = seed % (index + 1);
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled;
+};
+
 const calculatePlayerWorth = (
   state: Pick<GameState, 'properties'> & Partial<Pick<GameState, 'bankDeposits' | 'loans'>>,
   player: Player,
@@ -384,7 +1134,7 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
     const houses = state.properties[tile.id].houses;
     const base = tile.rents[houses];
     const cityRent = houses === 0 && ownsFullGroup(state, ownerId, tile.group) ? base * 2 : base;
-    rent = getDistrictAdjustedCityRent(state, tile, cityRent, houses);
+    rent = getDistrictAdjustedCityRent(state, tile, cityRent);
   }
 
   return ceilMoney(rent * getCityEventRentMultiplier(state, tile));
@@ -436,9 +1186,9 @@ export const getBankLoanRepaymentAmount = (amount: number): number =>
   ceilMoney(normalizeMoney(amount) * BANK_LOAN_REPAYMENT_MULTIPLIER);
 
 const compoundBankDepositPayout = (amount: number, turns: number): number => {
-  let payout = amount;
+  let payout = Math.min(BANK_DEPOSIT_MAX_PAYOUT, amount);
   for (let index = 0; index < turns; index += 1) {
-    payout = ceilMoney(payout * (1 + BANK_DEPOSIT_TURN_RATE));
+    payout = Math.min(BANK_DEPOSIT_MAX_PAYOUT, ceilMoney(payout * (1 + BANK_DEPOSIT_TURN_RATE)));
   }
   return payout;
 };
@@ -481,6 +1231,7 @@ export const getBankDepositInfo = (state: GameState, playerId: string) => {
     amount: depositAmount,
     activeDeposit,
     payout,
+    maxPayout: BANK_DEPOSIT_MAX_PAYOUT,
     canStart,
     canCollect: Boolean(activeDeposit && bankCount >= BANK_DEPOSIT_MIN_BANKS),
     disabledReason,
@@ -513,9 +1264,9 @@ const getDistrictMortgageShare = (
   return ceilMoney(creationCost / groupTiles.length / 2);
 };
 
-const getDistrictAdjustedCityRent = (state: GameState, tile: CityTile, baseRent: number, houses: number): number => {
+const getDistrictAdjustedCityRent = (state: GameState, tile: CityTile, baseRent: number): number => {
   const path = getDistrictPath(state, tile.group)?.path;
-  if (isDistrictRentReduced(path)) return ceilMoney(baseRent / getDistrictRentDivisor(path, tile, houses));
+  if (isDistrictRentReduced(path)) return ceilMoney(baseRent / getDistrictRentDivisor(path));
   return baseRent;
 };
 
@@ -524,16 +1275,17 @@ const getDistrictHouseCostMultiplier = (state: GameState, tile: CityTile): numbe
 
 const isDistrictRentReduced = (path: DistrictPath | undefined): boolean => path === 'oldTown' || path === 'residential';
 
-const getDistrictRentDivisor = (path: DistrictPath, tile: CityTile, houses: number): number => {
+const getDistrictRentDivisor = (path: DistrictPath): number => {
   if (path === 'residential') return RESIDENTIAL_DISTRICT_RENT_DIVISOR;
-  if (houses <= 0) return DISTRICT_RENT_DIVISOR;
+  return DISTRICT_RENT_DIVISOR;
+};
+
+const getOldTownPassThroughDivisor = (state: GameState, tile: CityTile): number => {
+  if (state.properties[tile.id].houses <= 0) return OLD_TOWN_PASS_THROUGH_DIVISOR;
   if (GOLD_DISTRICT_RENT_GROUPS.has(tile.group)) return GOLD_DISTRICT_BUILDING_RENT_DIVISOR;
   if (GREEN_DISTRICT_RENT_GROUPS.has(tile.group)) return GREEN_DISTRICT_BUILDING_RENT_DIVISOR;
   return DISTRICT_RENT_DIVISOR;
 };
-
-const getOldTownPassThroughDivisor = (state: GameState, tile: CityTile): number =>
-  state.properties[tile.id].houses > 0 ? getDistrictRentDivisor('oldTown', tile, state.properties[tile.id].houses) : OLD_TOWN_PASS_THROUGH_DIVISOR;
 
 const districtPathLabel = (path: DistrictPath): string => {
   switch (path) {
@@ -1873,7 +2625,7 @@ const proposeLoan = (state: GameState, offer: Omit<LoanOffer, 'id' | 'status' | 
   if (state.currentPlayerId !== proposerId || (proposerId !== offer.lenderId && proposerId !== offer.borrowerId)) {
     throw new Error('Кредит може запропонувати тільки учасник контракту, який зараз ходить.');
   }
-  if (!['rolling', 'turnEnd', 'manage', 'trade'].includes(state.phase)) throw new Error('Зараз не можна створити кредит.');
+  if (!canManageLoansInPhase(state, proposerId)) throw new Error('Зараз не можна створити кредит.');
   const normalized = normalizeLoanOffer(offer);
   validateLoanOffer(state, normalized);
   const lender = getPlayer(state, normalized.lenderId);
@@ -2118,7 +2870,106 @@ const getLoanInstallmentDue = (loan: ActiveLoan): number => {
 const getLoanEffectiveRemainingTurns = (loan: ActiveLoan): number =>
   Math.max(1, loan.remainingTurns - (loan.deferredTurns ?? 0));
 
-const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: NonNullable<GameState['pendingPayment']>): GameState => {
+interface BankDepositPaymentFunding {
+  state: GameState;
+  depositUsed: number;
+  cashAmount: number;
+  depositBefore: number;
+  depositAfter: number;
+}
+
+const prepareBankDepositPayment = (
+  state: GameState,
+  playerId: string,
+  amount: number,
+  useBankDeposit = false,
+): BankDepositPaymentFunding => {
+  const normalizedAmount = Math.max(0, Math.floor(amount));
+  if (!useBankDeposit) {
+    return {
+      state,
+      depositUsed: 0,
+      cashAmount: normalizedAmount,
+      depositBefore: getBankDepositPayout((state.bankDeposits ?? {})[playerId]),
+      depositAfter: getBankDepositPayout((state.bankDeposits ?? {})[playerId]),
+    };
+  }
+
+  const deposit = (state.bankDeposits ?? {})[playerId];
+  const depositBefore = getBankDepositPayout(deposit);
+  if (!deposit || depositBefore <= 0) throw new Error('У гравця немає активного депозиту.');
+
+  const depositUsed = Math.min(normalizedAmount, depositBefore);
+  const depositAfter = Math.max(0, depositBefore - depositUsed);
+  const bankDeposits = { ...(state.bankDeposits ?? {}) };
+  if (depositAfter > 0) {
+    bankDeposits[playerId] = {
+      ...deposit,
+      amount: depositAfter,
+      turns: 0,
+      steps: undefined,
+      createdAtTurn: state.turn,
+      createdAtDiceRollId: state.diceRollId,
+    };
+  } else {
+    delete bankDeposits[playerId];
+  }
+
+  return {
+    state: { ...state, bankDeposits },
+    depositUsed,
+    cashAmount: normalizedAmount - depositUsed,
+    depositBefore,
+    depositAfter,
+  };
+};
+
+const formatBankDepositPaymentSuffix = (funding: Pick<BankDepositPaymentFunding, 'depositUsed' | 'cashAmount'>): string => {
+  if (funding.depositUsed <= 0) return '';
+  return funding.cashAmount > 0
+    ? ` (${funding.depositUsed}₴ з депозиту, ${funding.cashAmount}₴ з балансу)`
+    : ` (${funding.depositUsed}₴ з депозиту)`;
+};
+
+const splitPartialAmounts = <T extends { amount: number }>(
+  entries: T[] | undefined,
+  paidAmount: number,
+): { paid: T[]; remaining: T[] } => {
+  let remainingPaid = Math.max(0, paidAmount);
+  const paid: T[] = [];
+  const remaining: T[] = [];
+
+  (entries ?? []).forEach((entry) => {
+    if (entry.amount <= 0) return;
+    const entryPaid = Math.min(entry.amount, remainingPaid);
+    remainingPaid -= entryPaid;
+    if (entryPaid > 0) paid.push({ ...entry, amount: entryPaid });
+    const entryRemaining = entry.amount - entryPaid;
+    if (entryRemaining > 0) remaining.push({ ...entry, amount: entryRemaining });
+  });
+
+  return { paid, remaining };
+};
+
+const applyPartialLoanPayment = (
+  loans: ActiveLoan[],
+  paidLoanPayments: Array<{ loanId: string; amount: number }>,
+): ActiveLoan[] => {
+  const paidByLoanId = new Map(paidLoanPayments.map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
+  return loans
+    .map((loan) => {
+      const paid = paidByLoanId.get(loan.id) ?? 0;
+      return paid > 0 ? { ...loan, remainingDue: Math.max(0, loan.remainingDue - paid) } : loan;
+    })
+    .filter((loan) => loan.remainingDue > 0);
+};
+
+const payLoanInstallmentPayment = (
+  state: GameState,
+  playerId: string,
+  payment: NonNullable<GameState['pendingPayment']>,
+  funding: Pick<BankDepositPaymentFunding, 'depositUsed' | 'cashAmount'> = { depositUsed: 0, cashAmount: payment.amount },
+): GameState => {
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
   const paidLoans = new Map((payment.loanPayments ?? []).map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
   const remainingLoans = (state.loans ?? [])
@@ -2142,11 +2993,15 @@ const payLoanInstallmentPayment = (state: GameState, playerId: string, payment: 
     pendingPayment: undefined,
     loans: remainingLoans,
     players: state.players.map((player) => {
-      if (player.id === playerId) return { ...player, money: player.money - payment.amount };
+      if (player.id === playerId) return { ...player, money: player.money - funding.cashAmount };
       const received = recipientAmounts.get(player.id) ?? 0;
       return received > 0 ? { ...player, money: player.money + received } : player;
     }),
-    log: appendLog(state, `${getPlayer(state, playerId).name} сплачує ${payment.amount}₴ за кредитом.`, 'bad'),
+    log: appendLog(
+      state,
+      `${getPlayer(state, playerId).name} сплачує ${payment.amount}₴ за кредитом${formatBankDepositPaymentSuffix(funding)}.`,
+      'bad',
+    ),
   };
 
   return createNextLoanPaymentFromQueue(paid, playerId, payment.loanPaymentQueue ?? []);
@@ -2162,7 +3017,7 @@ const missLoanPayment = (state: GameState, playerId: string): GameState => {
   const blockingLoan = (state.loans ?? []).find((loan) => dueById.has(loan.id) && !canMissLoanPaymentAgain(loan));
   if (blockingLoan) throw new Error('Цей кредит треба сплатити або здатися.');
 
-  let next: GameState = { ...state, pendingPayment: undefined, phase: 'turnEnd' };
+  let next: GameState = { ...state, pendingPayment: undefined, phase: 'rolling' };
   const updatedLoans = (state.loans ?? []).map((loan) => {
     const missedAmount = dueById.get(loan.id);
     if (!missedAmount) return loan;
@@ -2181,13 +3036,13 @@ const missLoanPayment = (state: GameState, playerId: string): GameState => {
     log: appendLog(next, `${getPlayer(state, playerId).name} пропускає виплату за кредитом. Наступна виплата стане дорожчою.`, 'bad'),
   };
 
-  return endTurn(next, playerId);
+  return createNextLoanPaymentFromQueue(next, playerId, payment.loanPaymentQueue ?? []);
 };
 
 const canMissLoanPaymentAgain = (loan: ActiveLoan): boolean =>
   loan.kind === 'player' ? getLoanEffectiveRemainingTurns(loan) > 1 : loan.missedPayments === 0;
 
-const payRent = (state: GameState, playerId: string): GameState => {
+const payRent = (state: GameState, playerId: string, options: { useBankDeposit?: boolean } = {}): GameState => {
   assertCurrent(state, playerId);
   const pendingRent = state.pendingRent;
   if (state.phase !== 'rent' || !pendingRent || pendingRent.payerId !== playerId) {
@@ -2197,20 +3052,44 @@ const payRent = (state: GameState, playerId: string): GameState => {
   const payer = getPlayer(state, playerId);
   const owner = getPlayer(state, pendingRent.ownerId);
   const tile = getTile(pendingRent.tileId);
-  if (payer.money < pendingRent.amount) throw new Error('Недостатньо грошей для сплати оренди.');
+  const funding = prepareBankDepositPayment(state, playerId, pendingRent.amount, options.useBankDeposit);
+  if (options.useBankDeposit && funding.cashAmount > 0) {
+    return {
+      ...funding.state,
+      phase: 'rent',
+      pendingRent: {
+        ...pendingRent,
+        amount: funding.cashAmount,
+      },
+      players: funding.state.players.map((player) =>
+        player.id === pendingRent.ownerId ? { ...player, money: player.money + funding.depositUsed } : player,
+      ),
+      log: appendLog(
+        state,
+        `${payer.name} покриває ${funding.depositUsed}₴ оренди з депозиту за ${tile.name}. Залишилось сплатити ${funding.cashAmount}₴ гравцю ${owner.name}.`,
+        'bad',
+      ),
+    };
+  }
+  if (payer.money < funding.cashAmount) throw new Error('Недостатньо грошей для сплати оренди.');
 
   return {
-    ...transfer(state, playerId, pendingRent.ownerId, pendingRent.amount),
+    ...funding.state,
+    players: funding.state.players.map((player) => {
+      if (player.id === playerId) return { ...player, money: player.money - funding.cashAmount };
+      if (player.id === pendingRent.ownerId) return { ...player, money: player.money + pendingRent.amount };
+      return player;
+    }),
     currentPlayerId: pendingRent.unoReverse?.originalTurnPlayerId ?? state.currentPlayerId,
     phase: 'turnEnd',
     pendingRent: undefined,
     log: appendLog(
       state,
       pendingRent.unoReverse
-        ? `${payer.name} сплачує ${pendingRent.amount}₴ після УНО РЕВЕРС гравцю ${owner.name} за ${tile.name}.`
+        ? `${payer.name} сплачує ${pendingRent.amount}₴ після УНО РЕВЕРС гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`
         : pendingRent.originalAmount
-          ? `${payer.name} сплачує ${pendingRent.amount}₴ замість ${pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}.`
-          : `${payer.name} сплачує ${pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}.`,
+          ? `${payer.name} сплачує ${pendingRent.amount}₴ замість ${pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`
+          : `${payer.name} сплачує ${pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`,
       'bad',
     ),
   };
@@ -2318,7 +3197,7 @@ const filterLoanOutOfPendingPayment = (
   };
 };
 
-const payPendingPayment = (state: GameState, playerId: string): GameState => {
+const payPendingPayment = (state: GameState, playerId: string, options: { useBankDeposit?: boolean } = {}): GameState => {
   assertCurrent(state, playerId);
   if (state.phase !== 'payment' || !state.pendingPayment || state.pendingPayment.payerId !== playerId) {
     throw new Error('Зараз немає платежу до сплати.');
@@ -2326,23 +3205,53 @@ const payPendingPayment = (state: GameState, playerId: string): GameState => {
 
   const payment = state.pendingPayment;
   const payer = getPlayer(state, playerId);
-  if (payer.money < payment.amount) throw new Error('Недостатньо грошей для сплати.');
+  const funding = prepareBankDepositPayment(state, playerId, payment.amount, options.useBankDeposit);
+  if (options.useBankDeposit && funding.cashAmount > 0) {
+    const splitRecipients = splitPartialAmounts(payment.recipients, funding.depositUsed);
+    const splitLoanPayments = splitPartialAmounts(payment.loanPayments, funding.depositUsed);
+    const recipientAmounts = new Map(splitRecipients.paid.map((recipient) => [recipient.playerId, recipient.amount]));
+
+    return {
+      ...funding.state,
+      phase: 'payment',
+      pendingPayment: {
+        ...payment,
+        amount: funding.cashAmount,
+        recipients: splitRecipients.remaining,
+        loanPayments: splitLoanPayments.remaining,
+      },
+      loans:
+        payment.source === 'loan'
+          ? applyPartialLoanPayment(funding.state.loans ?? [], splitLoanPayments.paid)
+          : funding.state.loans,
+      players: funding.state.players.map((player) => {
+        const received = recipientAmounts.get(player.id) ?? 0;
+        return received > 0 ? { ...player, money: player.money + received } : player;
+      }),
+      log: appendLog(
+        state,
+        `${payer.name} покриває ${funding.depositUsed}₴ з депозиту: ${payment.reason}. Залишилось сплатити ${funding.cashAmount}₴.`,
+        'bad',
+      ),
+    };
+  }
+  if (payer.money < funding.cashAmount) throw new Error('Недостатньо грошей для сплати.');
 
   if (payment.source === 'loan' && payment.loanPayments?.length) {
-    return payLoanInstallmentPayment(state, playerId, payment);
+    return payLoanInstallmentPayment(funding.state, playerId, payment, funding);
   }
 
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
   const paid: GameState = {
-    ...state,
+    ...funding.state,
     phase: 'turnEnd',
     pendingPayment: undefined,
-    players: state.players.map((player) => {
-      if (player.id === playerId) return { ...player, money: player.money - payment.amount };
+    players: funding.state.players.map((player) => {
+      if (player.id === playerId) return { ...player, money: player.money - funding.cashAmount };
       const received = recipientAmounts.get(player.id) ?? 0;
       return received > 0 ? { ...player, money: player.money + received } : player;
     }),
-    log: appendLog(state, `${payer.name} сплачує ${payment.amount}₴: ${payment.reason}.`, 'bad'),
+    log: appendLog(state, `${payer.name} сплачує ${payment.amount}₴${formatBankDepositPaymentSuffix(funding)}: ${payment.reason}.`, 'bad'),
   };
 
   if (payment.afterPayment?.type === 'resolveTile') {
@@ -3242,15 +4151,18 @@ const assertEmergencyMoneyManagementPhase = (state: GameState, playerId: string,
 
 const assertLoanManagementPhase = (state: GameState, playerId: string) => {
   assertCurrent(state, playerId);
-  const isEmergencyDecision =
-    (state.phase === 'payment' && state.pendingPayment?.payerId === playerId) ||
-    (state.phase === 'rent' && state.pendingRent?.payerId === playerId) ||
-    state.phase === 'awaitingPurchase' ||
-    (state.phase === 'bankDeposit' && state.pendingBankDeposit?.playerId === playerId);
-  if (!['rolling', 'manage', 'trade', 'turnEnd'].includes(state.phase) && !isEmergencyDecision) {
+  if (!canManageLoansInPhase(state, playerId)) {
     throw new Error('Кредит можна взяти лише під час свого ходу або фінансового рішення.');
   }
 };
+
+const canManageLoansInPhase = (state: GameState, playerId: string): boolean =>
+  ['rolling', 'manage', 'trade', 'turnEnd'].includes(state.phase) ||
+  (state.phase === 'payment' && state.pendingPayment?.payerId === playerId) ||
+  (state.phase === 'rent' && state.pendingRent?.payerId === playerId) ||
+  state.phase === 'awaitingPurchase' ||
+  (state.phase === 'bankDeposit' && state.pendingBankDeposit?.playerId === playerId) ||
+  (state.phase === 'casino' && state.pendingCasino?.playerId === playerId && !state.pendingCasino.spinEndsAt);
 
 const randomDice = (diceCount: 1 | 2 = 2): [number, number] => {
   const first = Math.floor(Math.random() * 6) + 1;

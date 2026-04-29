@@ -315,6 +315,141 @@ export interface MoneyHistoryPoint {
   worth?: Record<string, number>;
 }
 
+export type TransferStatSource =
+  | 'rent'
+  | 'movement'
+  | 'card'
+  | 'loan'
+  | 'trade'
+  | 'bankruptcy'
+  | 'loanPayoff'
+  | 'other';
+
+export interface PlayerMatchStats {
+  purchases: number;
+  auctionWins: number;
+  purchaseSpend: number;
+  mortgageReceived: number;
+  unmortgageSpend: number;
+  buildingsBuilt: number;
+  hotelsBuilt: number;
+  buildingSpend: number;
+  buildingRefund: number;
+  districtsCreated: number;
+  districtSpend: number;
+  rentPaid: number;
+  rentReceived: number;
+  taxesPaid: number;
+  bankPaid: number;
+  casinoBets: number;
+  casinoGrossWon: number;
+  casinoLost: number;
+  casinoNet: number;
+  chanceDraws: number;
+  communityDraws: number;
+  cardsDrawn: number;
+  bankLoansTaken: number;
+  playerLoansTaken: number;
+  loanPrincipalTaken: number;
+  loanPrincipalGiven: number;
+  loanPaid: number;
+  loanReceived: number;
+  tradesAccepted: number;
+  summaryVotes: number;
+}
+
+export interface PropertyMatchStats {
+  tileId: number;
+  purchaseSpendByPlayer: Record<string, number>;
+  rentPaidByPlayer: Record<string, number>;
+  rentReceivedByPlayer: Record<string, number>;
+  buildingSpendByPlayer: Record<string, number>;
+  buildingRefundByPlayer: Record<string, number>;
+  mortgageReceivedByPlayer: Record<string, number>;
+  unmortgageSpendByPlayer: Record<string, number>;
+}
+
+export interface DistrictMatchStats {
+  group: string;
+  createdByPlayer: Record<string, number>;
+  spendByPlayer: Record<string, number>;
+  rentReceivedByPlayer: Record<string, number>;
+  rentPaidByPlayer: Record<string, number>;
+}
+
+export interface MatchStats {
+  players: Record<string, PlayerMatchStats>;
+  properties: Record<number, PropertyMatchStats>;
+  districts: Record<string, DistrictMatchStats>;
+  transfers: Record<string, Record<string, number>>;
+  transfersBySource: Record<string, Record<string, Partial<Record<TransferStatSource, number>>>>;
+  chanceDrawCounts: Record<number, number>;
+  communityDrawCounts: Record<number, number>;
+}
+
+export type GameFinishReason = 'survivor' | 'summary';
+
+export type PostMatchAwardId =
+  | 'propertyCount'
+  | 'finalCash'
+  | 'chanceMaster'
+  | 'taxPayer'
+  | 'casinoWinner'
+  | 'builder'
+  | 'rentCollector'
+  | 'districtArchitect'
+  | 'dealMaker'
+  | 'loanMagnet'
+  | 'lastSurvivor';
+
+export interface PostMatchAward {
+  id: PostMatchAwardId;
+  title: string;
+  description: string;
+  winnerIds: string[];
+  value: number;
+  crown: boolean;
+}
+
+export interface PostMatchPlayerSummary {
+  playerId: string;
+  finalMoney: number;
+  propertyCount: number;
+  propertyValue: number;
+  totalWorth: number;
+  crowns: number;
+  rank: number;
+}
+
+export interface PostMatchPropertySummary {
+  tileId: number;
+  ownerId?: string;
+  group?: string;
+  income: number;
+  spend: number;
+  net: number;
+}
+
+export interface PostMatchTransferSummary {
+  fromPlayerId: string;
+  toPlayerId: string;
+  amount: number;
+  bySource: Partial<Record<TransferStatSource, number>>;
+}
+
+export interface PostMatchSummary {
+  finishedAt: number;
+  reason: GameFinishReason;
+  selectedAwardIds: PostMatchAwardId[];
+  awards: PostMatchAward[];
+  players: PostMatchPlayerSummary[];
+  properties: PostMatchPropertySummary[];
+  transfers: PostMatchTransferSummary[];
+  chanceCards: Array<{ cardId: number; count: number }>;
+  communityCards: Array<{ cardId: number; count: number }>;
+  winnerIds: string[];
+}
+
 export interface GameState {
   id: string;
   players: Player[];
@@ -396,7 +531,11 @@ export interface GameState {
     group: string;
     count: number;
   };
+  summaryVotes?: Record<string, number>;
+  matchStats?: MatchStats;
+  postMatch?: PostMatchSummary;
   winnerId?: string;
+  winnerIds?: string[];
   log: LogEntry[];
   moneyHistory?: MoneyHistoryPoint[];
 }
@@ -432,12 +571,15 @@ export type GameAction =
   | { type: 'miss_loan_payment'; playerId: string }
   | { type: 'use_loan_payoff_card'; playerId: string; loanId: string }
   | { type: 'pay_rent'; playerId: string }
+  | { type: 'pay_rent_with_deposit'; playerId: string }
   | { type: 'use_uno_reverse'; playerId: string }
   | { type: 'pay_payment'; playerId: string }
+  | { type: 'pay_payment_with_deposit'; playerId: string }
   | { type: 'pay_bail'; playerId: string }
   | { type: 'admin_move_current_player'; tileId: number }
   | { type: 'admin_grant_uno_reverse'; playerId: string }
   | { type: 'admin_start_city_event'; cityEventId: CityEventId }
+  | { type: 'request_summary'; playerId: string }
   | { type: 'end_turn'; playerId: string }
   | { type: 'continue_turn'; playerId: string }
   | { type: 'declare_bankruptcy'; playerId: string };

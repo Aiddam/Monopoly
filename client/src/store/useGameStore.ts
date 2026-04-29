@@ -222,6 +222,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
       ...game,
       players: remappedPlayers,
       currentPlayerId: room.players[0].id,
+      summaryVotes: {},
+      matchStats: undefined,
+      postMatch: undefined,
+      winnerIds: undefined,
       moneyHistory: [
         {
           turn: game.turn,
