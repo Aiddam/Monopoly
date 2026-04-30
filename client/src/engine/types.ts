@@ -27,10 +27,12 @@ export type CityEventId =
   | 'mass-protest'
   | 'regional-festival'
   | 'transport-strike'
-  | 'utility-modernization';
+  | 'utility-modernization'
+  | 'casino-festival';
 export type GamePhase =
   | 'orderRoll'
   | 'rolling'
+  | 'cityEventChoice'
   | 'awaitingPurchase'
   | 'awaitingCard'
   | 'awaitingJailDecision'
@@ -108,6 +110,7 @@ export interface Player {
   name: string;
   token: string;
   color: string;
+  roleId?: RoleId;
   money: number;
   position: number;
   properties: number[];
@@ -117,6 +120,30 @@ export interface Player {
   loanPayoffCards?: number;
   isBankrupt: boolean;
   ready?: boolean;
+}
+
+export type RoleId = 'gambler' | 'builder' | 'realtor' | 'banker' | 'lawyer' | 'collector' | 'mayor';
+
+export interface PlayerRoleState {
+  realtorProfit: number;
+  lawyerSaved: number;
+  lawyerProtectionsLeft: number;
+  collectorBonusReceived: number;
+  gamblerOpeningSpinDone: boolean;
+  gamblerOpeningSingleDieRollPending: boolean;
+  builderRemotePurchaseUsed: boolean;
+  builderAuctionUsed: boolean;
+  builderSpecialActionRound: number;
+  mayorCityEventsSeen: number;
+  mayorEventIncome: number;
+}
+
+export interface RoleWinState {
+  playerId: string;
+  roleId: RoleId;
+  achievedAtTurn: number;
+  achievedAtRound: number;
+  reason: string;
 }
 
 export interface PropertyState {
@@ -129,7 +156,8 @@ export interface PropertyState {
 
 export interface AuctionState {
   tileId: number;
-  source?: 'purchase' | 'cityEvent';
+  source?: 'purchase' | 'cityEvent' | 'builder';
+  sourceMayorId?: string;
   startedAt: number;
   endsAt: number;
   minimumBid: number;
@@ -227,6 +255,7 @@ export interface CityEventEffect {
   stepFeePerMove?: number;
   singleDieRolls?: boolean;
   buildingBlocked?: boolean;
+  sendAllToCasino?: boolean;
 }
 
 export interface CityEventDefinition {
@@ -242,6 +271,7 @@ export interface ActiveCityEvent {
   remainingRounds: number;
   durationRounds: number;
   startedRound: number;
+  mayorId?: string;
 }
 
 export interface PendingCityEvent {
@@ -255,6 +285,14 @@ export interface PendingCityEvent {
     text: string;
   };
   isDouble?: boolean;
+  mayorId?: string;
+}
+
+export interface PendingMayorCityEventChoice {
+  playerId: string;
+  options: CityEventId[];
+  round: number;
+  eventNumber: number;
 }
 
 export type DistrictPath = 'tourist' | 'oldTown' | 'residential';
@@ -269,6 +307,8 @@ export interface DistrictPathState {
 export interface PendingPayment {
   payerId: string;
   amount: number;
+  originalAmount?: number;
+  lawyerDiscountSaved?: number;
   reason: string;
   tileId?: number;
   source: 'tax' | 'card' | 'casino' | 'bank' | 'cityEvent' | 'movement' | 'loan';
@@ -276,6 +316,10 @@ export interface PendingPayment {
     playerId: string;
     amount: number;
   }>;
+  mayorEventIncome?: {
+    playerId: string;
+    amount: number;
+  };
   loanPayments?: Array<{
     loanId: string;
     amount: number;
@@ -285,9 +329,9 @@ export interface PendingPayment {
     amount: number;
   }>;
   afterPayment?: {
-    type: 'resolveTile';
+    type: 'resolveTile' | 'resumeRolling';
     playerId: string;
-    diceTotal: number;
+    diceTotal?: number;
   };
 }
 
@@ -387,7 +431,7 @@ export interface MatchStats {
   communityDrawCounts: Record<number, number>;
 }
 
-export type GameFinishReason = 'survivor' | 'summary';
+export type GameFinishReason = 'survivor' | 'summary' | 'role';
 
 export type PostMatchAwardId =
   | 'propertyCount'
@@ -400,6 +444,7 @@ export type PostMatchAwardId =
   | 'districtArchitect'
   | 'dealMaker'
   | 'loanMagnet'
+  | 'roleVictory'
   | 'lastSurvivor';
 
 export interface PostMatchAward {
@@ -409,6 +454,7 @@ export interface PostMatchAward {
   winnerIds: string[];
   value: number;
   crown: boolean;
+  crownValue?: number;
 }
 
 export interface PostMatchPlayerSummary {
@@ -467,22 +513,32 @@ export interface GameState {
   activeCityEvents: ActiveCityEvent[];
   districtPaths: Record<string, DistrictPathState>;
   pendingCityEvent?: PendingCityEvent;
+  pendingCityEventCasinoPlayerIds?: string[];
+  pendingMayorCityEventChoice?: PendingMayorCityEventChoice;
   turnOrderRolls?: Record<string, [number, number]>;
+  pendingRoleOrder?: RoleId[];
   pendingPurchaseTileId?: number;
   pendingRent?: {
     payerId: string;
     ownerId: string;
     tileId: number;
     amount: number;
+    ownerAmount?: number;
+    mayorEventIncome?: {
+      playerId: string;
+      amount: number;
+    };
     originalAmount?: number;
     rentServiceId?: string;
     discountPercent?: 50 | 100;
+    lawyerProtected?: boolean;
     unoReverse?: UnoReverseRentContext;
   };
   pendingPayment?: PendingPayment;
   pendingCasino?: {
     playerId: string;
     tileId: number;
+    forced?: 'gamblerOpening' | 'cityEvent';
     amount?: number;
     multiplier?: number;
     spinSeed?: number;
@@ -515,6 +571,9 @@ export interface GameState {
   rentServices: ActiveRentService[];
   rentServiceCooldowns: Record<string, number>;
   bankDeposits: Record<string, BankDepositState>;
+  rolesEnabled?: boolean;
+  roleState?: Record<string, PlayerRoleState>;
+  roleWin?: RoleWinState;
   dice: [number, number];
   diceRollId: number;
   lastDice?: [number, number];
@@ -549,6 +608,9 @@ export type GameAction =
   | { type: 'auction_bid'; playerId: string; amount: number }
   | { type: 'auction_pass'; playerId: string }
   | { type: 'resolve_auction' }
+  | { type: 'builder_buy_property'; playerId: string; tileId: number }
+  | { type: 'builder_start_auction'; playerId: string; tileId: number }
+  | { type: 'choose_city_event'; playerId: string; cityEventId: CityEventId }
   | { type: 'skip_casino'; playerId: string }
   | { type: 'start_casino_spin'; playerId: string; amount: number; multiplier: number; spinSeed: number }
   | { type: 'casino_bet'; playerId: string; amount: number; multiplier: number }
@@ -575,6 +637,8 @@ export type GameAction =
   | { type: 'use_uno_reverse'; playerId: string }
   | { type: 'pay_payment'; playerId: string }
   | { type: 'pay_payment_with_deposit'; playerId: string }
+  | { type: 'use_lawyer_payment_protection'; playerId: string }
+  | { type: 'use_lawyer_rent_protection'; playerId: string }
   | { type: 'pay_bail'; playerId: string }
   | { type: 'admin_move_current_player'; tileId: number }
   | { type: 'admin_grant_uno_reverse'; playerId: string }

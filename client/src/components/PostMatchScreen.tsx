@@ -27,6 +27,7 @@ import type {
   PostMatchTransferSummary,
   TransferStatSource,
 } from '../engine/types';
+import { ROLE_DEFINITIONS } from '../engine/roles';
 import { PlayerFigurine } from './PlayerFigurine';
 
 type PostMatchTab = 'ceremony' | 'overview' | 'players' | 'properties' | 'cards' | 'transfers';
@@ -84,6 +85,12 @@ export const PostMatchScreen = ({ game, onLeave }: { game: GameState; onLeave: (
     [game],
   );
   const winnerNames = summary.winnerIds.map((playerId) => playerById(game, playerId)?.name).filter(Boolean).join(', ');
+  const reasonText =
+    summary.reason === 'role' && game.roleWin
+      ? `Рольова перемога: ${ROLE_DEFINITIONS[game.roleWin.roleId].title}`
+      : summary.reason === 'survivor'
+        ? 'Перемога через вибування суперників'
+        : 'Гравці завершили гру через підбиття підсумків';
   const handleCeremonyComplete = useCallback(() => setCeremonyComplete(true), []);
   const openStats = useCallback(() => {
     setCeremonyComplete(true);
@@ -103,7 +110,7 @@ export const PostMatchScreen = ({ game, onLeave }: { game: GameState; onLeave: (
         <div>
           <p className="eyebrow">Партія завершена</p>
           <h1>{winnerNames || 'Фінальний подіум'}</h1>
-          <span>{summary.reason === 'survivor' ? 'Перемога через вибування суперників' : 'Гравці завершили гру через підбиття підсумків'}</span>
+          <span>{reasonText}</span>
         </div>
         <button className="ghost icon-text" type="button" onClick={onLeave}>
           На головний екран
@@ -414,7 +421,7 @@ const CeremonyPanel = ({
             <p className="eyebrow">Номінація {awardIndex + 1}/{summary.awards.length}</p>
             <h2>{award.title}</h2>
             <p>{award.description}</p>
-            {showAwardReveal && <strong>{formatAwardWinners(game, award)} · {formatAwardValue(award)}</strong>}
+            {showAwardReveal && <strong>{formatAwardWinners(game, award)} · {formatAwardResult(award)}</strong>}
           </>
         ) : null}
         <div className="ceremony-progress" aria-hidden>
@@ -486,7 +493,7 @@ const OverviewPanel = ({ game, summary }: { game: GameState; summary: PostMatchS
   const totalRent = sumPlayers(game, (player) => game.matchStats?.players[player.id]?.rentReceived ?? 0);
   const totalCasino = sumPlayers(game, (player) => game.matchStats?.players[player.id]?.casinoNet ?? 0);
   const totalBuilds = sumPlayers(game, (player) => game.matchStats?.players[player.id]?.buildingsBuilt ?? 0);
-  const totalCrowns = summary.awards.reduce((sum, award) => sum + award.winnerIds.length, 0);
+  const totalCrowns = getTotalAwardCrowns(summary.awards);
   const championEntry = summary.players[0];
   const champion = championEntry ? playerById(game, championEntry.playerId) : undefined;
   const winnerTitle = summary.winnerIds.map((id) => playerById(game, id)?.name).filter(Boolean).join(', ') || champion?.name || 'Фінальний подіум';
@@ -540,7 +547,7 @@ const OverviewPanel = ({ game, summary }: { game: GameState; summary: PostMatchS
               <Crown size={18} />
               <div>
                 <strong>{award.title}</strong>
-                <span>{formatAwardWinners(game, award)} · {formatAwardValue(award)}</span>
+                <span>{formatAwardWinners(game, award)} · {formatAwardResult(award)}</span>
               </div>
             </article>
           ))}
@@ -826,7 +833,7 @@ const buildMatchHighlights = (
       Icon: Trophy,
       label: 'Головна номінація',
       value: topAward?.title ?? 'Немає номінацій',
-      detail: topAward ? `${formatAwardWinners(game, topAward)} · ${formatAwardValue(topAward)}` : 'Партія завершилась без додаткових нагород.',
+      detail: topAward ? `${formatAwardWinners(game, topAward)} · ${formatAwardResult(topAward)}` : 'Партія завершилась без додаткових нагород.',
     },
     {
       Icon: Landmark,
@@ -923,6 +930,17 @@ const formatAwardWinners = (game: GameState, award: PostMatchAward): string =>
 
 const formatAwardValue = (award: PostMatchAward): string =>
   MONEY_AWARDS.has(award.id) ? formatMoney(award.value) : String(award.value);
+
+const getAwardCrownValue = (award: PostMatchAward): number => (award.crown ? award.crownValue ?? 1 : 0);
+
+const getTotalAwardCrowns = (awards: PostMatchAward[]): number =>
+  awards.reduce((sum, award) => sum + getAwardCrownValue(award) * award.winnerIds.length, 0);
+
+const formatAwardResult = (award: PostMatchAward): string => {
+  const crownValue = getAwardCrownValue(award);
+  const crownBonus = crownValue > 1 ? ` · +${crownValue} ${formatCrownWord(crownValue)}` : '';
+  return `${formatAwardValue(award)}${crownBonus}`;
+};
 
 const TRANSFER_SOURCE_LABELS: Record<TransferStatSource, string> = {
   rent: 'оренда',

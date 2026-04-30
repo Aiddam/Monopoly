@@ -4,6 +4,7 @@ import { getStartReward } from '../engine/startRewards';
 import { getLateGameFineMultiplier } from '../engine/difficulty';
 import { money, moneyText } from '../engine/economy';
 import { boardTiles } from './board';
+import { LAWYER_FINE_DISCOUNT, LAWYER_TOTAL_PROTECTIONS } from '../engine/roles';
 
 const JAIL_TURNS = 3;
 
@@ -224,12 +225,46 @@ export const communityCards: CardDefinition[] = [
 ];
 
 const addMoney = (state: GameState, playerId: string, amount: number): GameState => {
-  const normalizedAmount = amount < 0 ? -getEffectiveFineAmount(state, Math.abs(amount)) : amount;
+  const discount = amount < 0 ? applyCardFineDiscount(state, playerId, Math.abs(amount)) : undefined;
+  const normalizedAmount = discount ? -discount.amount : amount;
+  const nextState = discount?.state ?? state;
   return {
-    ...state,
-    players: state.players.map((player) =>
+    ...nextState,
+    players: nextState.players.map((player) =>
       player.id === playerId ? { ...player, money: player.money + normalizedAmount } : player,
     ),
+  };
+};
+
+const applyCardFineDiscount = (state: GameState, playerId: string, amount: number): { state: GameState; amount: number } => {
+  const baseAmount = getEffectiveFineAmount(state, amount);
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (player?.roleId !== 'lawyer') return { state, amount: baseAmount };
+
+  const discountedAmount = Math.ceil(baseAmount * LAWYER_FINE_DISCOUNT);
+  const saved = Math.max(0, baseAmount - discountedAmount);
+  const currentRoleState = state.roleState?.[playerId];
+  return {
+    state: {
+      ...state,
+      roleState: {
+        ...(state.roleState ?? {}),
+        [playerId]: {
+          realtorProfit: currentRoleState?.realtorProfit ?? 0,
+          lawyerSaved: (currentRoleState?.lawyerSaved ?? 0) + saved,
+          lawyerProtectionsLeft: currentRoleState?.lawyerProtectionsLeft ?? LAWYER_TOTAL_PROTECTIONS,
+          collectorBonusReceived: currentRoleState?.collectorBonusReceived ?? 0,
+          gamblerOpeningSpinDone: currentRoleState?.gamblerOpeningSpinDone ?? true,
+          gamblerOpeningSingleDieRollPending: currentRoleState?.gamblerOpeningSingleDieRollPending ?? false,
+          builderRemotePurchaseUsed: currentRoleState?.builderRemotePurchaseUsed ?? false,
+          builderAuctionUsed: currentRoleState?.builderAuctionUsed ?? false,
+          builderSpecialActionRound: currentRoleState?.builderSpecialActionRound ?? 0,
+          mayorCityEventsSeen: currentRoleState?.mayorCityEventsSeen ?? 0,
+          mayorEventIncome: currentRoleState?.mayorEventIncome ?? 0,
+        },
+      },
+    },
+    amount: discountedAmount,
   };
 };
 
@@ -290,7 +325,11 @@ const moveTo = (state: GameState, playerId: string, tileId: number, collectGo: b
   ...state,
   players: state.players.map((player) => {
     if (player.id !== playerId) return player;
-    return { ...player, position: tileId, money: player.money + getStartReward(player.position, tileId, collectGo, state.turn) };
+    return {
+      ...player,
+      position: tileId,
+      money: player.money + getStartReward(player.position, tileId, collectGo, state.turn, { roleId: player.roleId }),
+    };
   }),
 });
 

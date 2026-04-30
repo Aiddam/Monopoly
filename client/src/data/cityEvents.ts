@@ -17,7 +17,7 @@ export const cityEventDefinitions: CityEventDefinition[] = [
   {
     id: 'tax-crisis',
     title: 'Податкова криза',
-    text: 'Міста та будівлі 2 раунди коштують на 30% дорожче. Оренда не змінюється.',
+    text: 'Майно та будівлі 2 раунди коштують на 30% дорожче. Оренда не змінюється.',
     durationRounds: 2,
     effects: {
       propertyPriceTypes: ['city', 'bank', 'utility'],
@@ -152,6 +152,15 @@ export const cityEventDefinitions: CityEventDefinition[] = [
       propertyPriceMultiplier: 1.2,
       rentPropertyTypes: ['utility'],
       rentMultiplier: 1.5,
+    },
+  },
+  {
+    id: 'casino-festival',
+    title: 'Казино-фестиваль',
+    text: 'Усі гравці одразу переміщуються в казино. На своєму ході кожен обовʼязково крутить рулетку, а після цього кидає кубики.',
+    durationRounds: 0,
+    effects: {
+      sendAllToCasino: true,
     },
   },
 ];

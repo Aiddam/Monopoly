@@ -582,8 +582,19 @@ const hasLocalGameAuthority = (
   return game?.currentPlayerId === localPlayerId;
 };
 
-const isStaleGameState = (current: GameState | undefined, incoming: GameState): boolean =>
-  Boolean(current && incoming.turn < current.turn);
+export const isStaleGameState = (current: GameState | undefined, incoming: GameState): boolean => {
+  if (!current) return false;
+  if (incoming.turn !== current.turn) return incoming.turn < current.turn;
+  if (incoming.diceRollId !== current.diceRollId) return incoming.diceRollId < current.diceRollId;
+
+  const incomingLogLength = incoming.log?.length ?? 0;
+  const currentLogLength = current.log?.length ?? 0;
+  if (incomingLogLength !== currentLogLength) return incomingLogLength < currentLogLength;
+
+  const incomingCreatedAt = incoming.log?.[0]?.createdAt ?? 0;
+  const currentCreatedAt = current.log?.[0]?.createdAt ?? 0;
+  return incomingCreatedAt < currentCreatedAt;
+};
 
 const createStablePlayerId = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto

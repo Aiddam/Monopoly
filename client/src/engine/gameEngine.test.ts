@@ -2,24 +2,60 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   calculateRent,
   buildMatchSummary,
-  createInitialGame,
+  createInitialGame as createInitialGameBase,
   diceRotationForValue,
   getBankDepositInfo,
   getBankDepositPayout,
   getBankLoanLimit,
+  getCasinoMaxBet,
+  getCasinoSegmentWeight,
   getDistrictCreationCost,
+  getBuilderRemotePurchaseCost,
   getEffectiveBuildingRefund,
   getEffectiveFineAmount,
   getEffectiveHouseCost,
   getEffectiveMortgageValue,
   getEffectivePropertyPrice,
   getEffectiveUnmortgageCost,
+  getRoleProgressItems,
+  getTradePropertySaleLimit,
+  getTradeValueMultiplier,
   reduceGame,
   selectAwardIds,
 } from './gameEngine';
 import { money } from './economy';
-import type { DistrictPath } from './types';
-import { getTile } from '../data/board';
+import type { DistrictPath, RoleId } from './types';
+import { cityTiles, getTile, isPropertyTile, propertyTiles } from '../data/board';
+import {
+  BANKER_STARTING_BANK_TILE_ID,
+  BANKER_WIN_DEPOSIT_PAYOUT,
+  BUILDER_WIN_DISTRICTS,
+  BUILDER_REMOTE_PURCHASE_MULTIPLIER,
+  COLLECTOR_GROUP_BONUS,
+  COLLECTOR_WIN_NET_WORTH,
+  COLLECTOR_WIN_PROPERTIES,
+  GAMBLER_OPENING_CASINO_MULTIPLIERS,
+  GAMBLER_STARTING_CASH,
+  GAMBLER_STARTING_CASINO_TILE_ID,
+  GAMBLER_WIN_CASH,
+  LAWYER_TOTAL_PROTECTIONS,
+  LAWYER_WIN_SAVED,
+  MAYOR_CHOOSE_EVENT_INTERVAL,
+  MAYOR_LAND_ON_START_BONUS,
+  MAYOR_PASS_START_BONUS,
+  MAYOR_WIN_EVENT_INCOME,
+  REALTOR_STARTING_CITY_COUNT,
+  REALTOR_WIN_PROFIT,
+} from './roles';
+
+const createInitialGame = (
+  playerNames: string[],
+  id?: string,
+  options: Parameters<typeof createInitialGameBase>[2] = {},
+) => createInitialGameBase(playerNames, id, { rolesEnabled: false, ...options });
+
+const createRoleGame = (playerNames: string[], roleOrder: RoleId[], id = 'role-test') =>
+  createInitialGameBase(playerNames, id, { rolesEnabled: true, roleOrder });
 
 describe('Ukraine Monopoly engine', () => {
   it('supports games with up to six players', () => {
@@ -67,6 +103,895 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.phase).toBe('rolling');
     expect(game.currentPlayerId).toBe('p3');
     expect(game.players.map((player) => player.id)).toEqual(['p3', 'p2', 'p1']);
+  });
+
+  it('assigns unique roles after the starting turn order is determined', () => {
+    let game = createInitialGameBase(['One', 'Two', 'Three'], 'turn-order-roles', {
+      determineTurnOrder: true,
+      rolesEnabled: true,
+      roleOrder: ['gambler', 'builder', 'collector'],
+    });
+
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p1', dice: [1, 1] });
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p2', dice: [6, 5] });
+    game = reduceGame(game, { type: 'roll_for_order', playerId: 'p3', dice: [3, 3] });
+
+    expect(game.phase).toBe('casino');
+    expect(game.players.map((player) => player.id)).toEqual(['p2', 'p3', 'p1']);
+    expect(game.players.every((player) => player.roleId)).toBe(true);
+    expect(game.players.map((player) => player.roleId)).toEqual(['gambler', 'builder', 'collector']);
+    expect(game.pendingCasino).toMatchObject({ playerId: 'p2', forced: 'gamblerOpening' });
+    expect(new Set(game.players.map((player) => player.roleId)).size).toBe(game.players.length);
+    expect(Object.keys(game.roleState ?? {}).sort()).toEqual(['p1', 'p2', 'p3']);
+  });
+
+  it('applies deterministic starting role bonuses for banker and realtor', () => {
+    const game = createRoleGame(['Banker', 'Realtor', 'Collector'], ['banker', 'realtor', 'collector']);
+    const banker = game.players[0];
+    const realtor = game.players[1];
+    const realtorCityIds = realtor.properties.filter((tileId) => getTile(tileId).type === 'city');
+    const realtorGroups = new Set(
+      realtorCityIds.map((tileId) => {
+        const tile = getTile(tileId);
+        if (tile.type !== 'city') throw new Error('Expected realtor starting property to be a city.');
+        return tile.group;
+      }),
+    );
+
+    expect(banker.roleId).toBe('banker');
+    expect(game.properties[BANKER_STARTING_BANK_TILE_ID].ownerId).toBe('p1');
+    expect(banker.properties).toContain(BANKER_STARTING_BANK_TILE_ID);
+    expect(realtor.roleId).toBe('realtor');
+    expect(realtorCityIds).toHaveLength(REALTOR_STARTING_CITY_COUNT);
+    expect(realtorGroups.size).toBe(REALTOR_STARTING_CITY_COUNT);
+  });
+
+  it('starts the gambler on casino with a mandatory all-in opening spin', () => {
+    let game = createRoleGame(['Gambler', 'Other'], ['gambler', 'builder'], 'gambler-opening');
+
+    expect(game.players[0]).toMatchObject({
+      roleId: 'gambler',
+      money: money(GAMBLER_STARTING_CASH),
+      position: GAMBLER_STARTING_CASINO_TILE_ID,
+    });
+    expect(game.phase).toBe('casino');
+    expect(game.pendingCasino).toMatchObject({
+      playerId: 'p1',
+      tileId: GAMBLER_STARTING_CASINO_TILE_ID,
+      forced: 'gamblerOpening',
+    });
+    expect(game.roleState?.p1.gamblerOpeningSpinDone).toBe(false);
+
+    expect(() => reduceGame(game, { type: 'skip_casino', playerId: 'p1' })).toThrow('не можна пропустити');
+    expect(() => reduceGame(game, { type: 'take_bank_loan', playerId: 'p1', amount: money(50) })).toThrow(
+      'Кредит можна взяти',
+    );
+    expect(() =>
+      reduceGame(game, { type: 'start_casino_spin', playerId: 'p1', amount: money(100), multiplier: 2, spinSeed: 7 }),
+    ).toThrow('весь баланс');
+    expect(() =>
+      reduceGame(game, {
+        type: 'start_casino_spin',
+        playerId: 'p1',
+        amount: money(GAMBLER_STARTING_CASH),
+        multiplier: 6,
+        spinSeed: 7,
+      }),
+    ).toThrow('x2, x3 або x4');
+
+    const openingMultiplier = GAMBLER_OPENING_CASINO_MULTIPLIERS[1];
+    game = reduceGame(game, {
+      type: 'start_casino_spin',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: openingMultiplier,
+      spinSeed: 7,
+    });
+    expect(game.pendingCasino).toMatchObject({
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: openingMultiplier,
+    });
+
+    game = { ...game, pendingCasino: { ...game.pendingCasino!, spinEndsAt: Date.now() - 1 } };
+    game = reduceGame(game, {
+      type: 'casino_bet',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: openingMultiplier,
+    });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingCasino).toBeUndefined();
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(
+      money(GAMBLER_STARTING_CASH * openingMultiplier),
+    );
+    expect(game.roleState?.p1.gamblerOpeningSpinDone).toBe(true);
+    expect(game.roleState?.p1.gamblerOpeningSingleDieRollPending).toBe(false);
+  });
+
+  it('lets the gambler roll after the opening spin and uses one die only after x4', () => {
+    let normalGame = createRoleGame(['Gambler', 'Other'], ['gambler', 'builder'], 'gambler-opening-x3-roll');
+    normalGame = reduceGame(normalGame, {
+      type: 'start_casino_spin',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: 3,
+      spinSeed: 3,
+    });
+    normalGame = { ...normalGame, pendingCasino: { ...normalGame.pendingCasino!, spinEndsAt: Date.now() - 1 } };
+    normalGame = reduceGame(normalGame, {
+      type: 'casino_bet',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: 3,
+    });
+    normalGame = reduceGame(normalGame, { type: 'roll', playerId: 'p1', dice: [2, 5] });
+
+    expect(normalGame.lastDice).toEqual([2, 5]);
+    expect(normalGame.players.find((player) => player.id === 'p1')?.position).toBe(27);
+
+    let x4Game = createRoleGame(['Gambler', 'Other'], ['gambler', 'builder'], 'gambler-opening-x4-roll');
+    x4Game = reduceGame(x4Game, {
+      type: 'start_casino_spin',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: 4,
+      spinSeed: 4,
+    });
+    x4Game = { ...x4Game, pendingCasino: { ...x4Game.pendingCasino!, spinEndsAt: Date.now() - 1 } };
+    x4Game = reduceGame(x4Game, {
+      type: 'casino_bet',
+      playerId: 'p1',
+      amount: money(GAMBLER_STARTING_CASH),
+      multiplier: 4,
+    });
+
+    expect(x4Game.phase).toBe('rolling');
+    expect(x4Game.roleState?.p1.gamblerOpeningSingleDieRollPending).toBe(true);
+
+    x4Game = reduceGame(x4Game, { type: 'roll', playerId: 'p1', dice: [2, 5] });
+    expect(x4Game.lastDice).toEqual([2, 0]);
+    expect(x4Game.players.find((player) => player.id === 'p1')?.position).toBe(22);
+    expect(x4Game.roleState?.p1.gamblerOpeningSingleDieRollPending).toBe(false);
+  });
+
+  it('opens the gambler opening spin when their first turn starts', () => {
+    let game = createRoleGame(['Builder', 'Gambler'], ['builder', 'gambler'], 'gambler-second-opening');
+
+    expect(game.phase).toBe('rolling');
+    expect(game.players[1]).toMatchObject({
+      roleId: 'gambler',
+      money: money(GAMBLER_STARTING_CASH),
+      position: GAMBLER_STARTING_CASINO_TILE_ID,
+    });
+
+    game = { ...game, phase: 'turnEnd' };
+    game = reduceGame(game, { type: 'end_turn', playerId: 'p1' });
+
+    expect(game.currentPlayerId).toBe('p2');
+    expect(game.phase).toBe('casino');
+    expect(game.pendingCasino).toMatchObject({
+      playerId: 'p2',
+      tileId: GAMBLER_STARTING_CASINO_TILE_ID,
+      forced: 'gamblerOpening',
+    });
+  });
+
+  it('keeps classic games free of role bonuses', () => {
+    let game = createInitialGame(['One', 'Two'], 'roles-disabled');
+    game = withOwnership(game, 'p1', [1]);
+    const pavlohrad = getTile(1);
+    if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
+
+    expect(game.players.some((player) => player.roleId)).toBe(false);
+    expect(game.roleState ?? {}).toEqual({});
+    expect(getTradeValueMultiplier(game, 'p1')).toBe(3);
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(50));
+  });
+
+  it('charges realtor 40% more for district creation and buildings', () => {
+    const pavlohrad = getTile(1);
+    if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
+    let game = createRoleGame(['Realtor', 'Other'], ['realtor', 'gambler'], 'realtor-build-debuff');
+    game = withOwnership(game, 'p1', [1, 3]);
+
+    const districtCost = getDistrictCreationCost(game, pavlohrad.group);
+    expect(districtCost).toBe(money(140));
+
+    const startingMoney = game.players.find((player) => player.id === 'p1')?.money ?? 0;
+    game = reduceGame(game, { type: 'create_district', playerId: 'p1', group: pavlohrad.group, path: 'tourist' });
+    expect(game.districtPaths[pavlohrad.group]).toMatchObject({ ownerId: 'p1', creationCost: districtCost });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(startingMoney - districtCost);
+
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(70));
+
+    game = reduceGame(game, { type: 'build', playerId: 'p1', tileId: pavlohrad.id });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(startingMoney - districtCost - money(70));
+  });
+
+  it('finishes the game when the gambler reaches the cash target', () => {
+    let game = createRoleGame(['Gambler', 'Other'], ['gambler', 'builder'], 'gambler-role-win');
+    const gambler = game.players[0];
+
+    expect(getCasinoMaxBet({ ...gambler, money: money(1200) })).toBe(money(1200));
+    expect(getCasinoSegmentWeight(gambler, 0, 2)).toBe(2.5);
+    expect(getCasinoSegmentWeight(game.players[1], 0, 2)).toBe(2);
+
+    game = {
+      ...game,
+      players: game.players.map((player) =>
+        player.id === 'p1' ? { ...player, money: money(GAMBLER_WIN_CASH) } : player,
+      ),
+    };
+    const finished = advanceRoleCheck(game, 'p1');
+
+    expect(finished.phase).toBe('finished');
+    expect(finished.winnerId).toBe('p1');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'gambler' });
+    expect(finished.postMatch?.reason).toBe('role');
+    expect(finished.postMatch?.awards.some((award) => award.id === 'roleVictory')).toBe(true);
+    expect(finished.postMatch?.awards[5]).toMatchObject({ id: 'roleVictory', winnerIds: ['p1'], crownValue: 5 });
+  });
+
+  it('finishes the game when the builder completes three hotel districts', () => {
+    let game = createRoleGame(['Builder', 'Other'], ['builder', 'gambler'], 'builder-role-win');
+    const hotelDistrictTiles = [1, 3, 6, 8, 9, 11, 13, 14];
+    game = withOwnership(game, 'p1', hotelDistrictTiles);
+    game = withDistrict(game, 'p1', 1);
+    game = withDistrict(game, 'p1', 6);
+    game = withDistrict(game, 'p1', 11);
+    game = {
+      ...game,
+      properties: {
+        ...game.properties,
+        ...Object.fromEntries(hotelDistrictTiles.map((tileId) => [tileId, { ...game.properties[tileId], houses: 5 }])),
+      },
+    };
+    const pavlohrad = getTile(1);
+    if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
+
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(25));
+
+    const finished = advanceRoleCheck(game, 'p1');
+    expect(finished.phase).toBe('finished');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'builder' });
+    expect(getRoleProgressItems(finished, 'p1')[0]?.current).toBe(BUILDER_WIN_DISTRICTS);
+  });
+
+  it('lets the builder resell buildings near the effective build cost', () => {
+    const pavlohrad = getTile(1);
+    if (pavlohrad.type !== 'city') throw new Error('Expected Pavlohrad to be a city.');
+    let game = createRoleGame(['Builder', 'Other'], ['builder', 'gambler'], 'builder-refund');
+    game = withOwnership(game, 'p1', [1, 3]);
+    game = withDistrict(game, 'p1', 1);
+    game = {
+      ...game,
+      activeCityEvents: [{ id: 'tax-crisis', remainingRounds: 2, durationRounds: 2, startedRound: 4 }],
+    };
+
+    expect(getEffectiveHouseCost(game, pavlohrad)).toBe(money(33));
+
+    const startingMoney = game.players.find((player) => player.id === 'p1')?.money ?? 0;
+    game = reduceGame(game, { type: 'build', playerId: 'p1', tileId: pavlohrad.id });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(startingMoney - money(33));
+    expect(getEffectiveBuildingRefund(game, pavlohrad)).toBe(money(29));
+
+    game = reduceGame(game, { type: 'sell_building', playerId: 'p1', tileId: pavlohrad.id });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(startingMoney - money(4));
+  });
+
+  it('lets the builder remotely buy one unowned property and start one free auction', () => {
+    const pavlohrad = getTile(1);
+    const dnipro = getTile(3);
+    if (!isPropertyTile(pavlohrad) || !isPropertyTile(dnipro)) throw new Error('Expected property tiles.');
+    let buyGame = createRoleGame(['Builder', 'Other'], ['builder', 'gambler'], 'builder-remote-buy');
+    const buyCost = getBuilderRemotePurchaseCost(buyGame, pavlohrad);
+    const startingMoney = buyGame.players.find((player) => player.id === 'p1')?.money ?? 0;
+
+    expect(buyCost).toBe(Math.ceil(getEffectivePropertyPrice(buyGame, pavlohrad) * BUILDER_REMOTE_PURCHASE_MULTIPLIER));
+    buyGame = reduceGame(buyGame, { type: 'builder_buy_property', playerId: 'p1', tileId: pavlohrad.id });
+
+    expect(buyGame.properties[pavlohrad.id].ownerId).toBe('p1');
+    expect(buyGame.players.find((player) => player.id === 'p1')?.money).toBe(startingMoney - buyCost);
+    expect(buyGame.roleState?.p1.builderRemotePurchaseUsed).toBe(true);
+    expect(buyGame.roleState?.p1.builderSpecialActionRound).toBe(1);
+    expect(() => reduceGame(buyGame, { type: 'builder_buy_property', playerId: 'p1', tileId: dnipro.id })).toThrow(
+      'уже купував',
+    );
+
+    let auctionGame = createRoleGame(['Builder', 'Other'], ['builder', 'gambler'], 'builder-free-auction');
+    auctionGame = reduceGame(auctionGame, { type: 'builder_start_auction', playerId: 'p1', tileId: dnipro.id });
+
+    expect(auctionGame.phase).toBe('auction');
+    expect(auctionGame.auction).toMatchObject({
+      tileId: dnipro.id,
+      source: 'builder',
+      minimumBid: getEffectivePropertyPrice(auctionGame, dnipro),
+    });
+    expect(auctionGame.roleState?.p1.builderAuctionUsed).toBe(true);
+  });
+
+  it('allows only one builder special action per round', () => {
+    const pavlohrad = getTile(1);
+    const dnipro = getTile(3);
+    if (!isPropertyTile(pavlohrad) || !isPropertyTile(dnipro)) throw new Error('Expected property tiles.');
+    let game = createRoleGame(['Builder', 'Other'], ['builder', 'gambler'], 'builder-one-special-per-round');
+
+    game = reduceGame(game, { type: 'builder_buy_property', playerId: 'p1', tileId: pavlohrad.id });
+    expect(() => reduceGame(game, { type: 'builder_start_auction', playerId: 'p1', tileId: dnipro.id })).toThrow(
+      'в цьому раунді',
+    );
+
+    game = { ...game, currentRound: 2 };
+    game = reduceGame(game, { type: 'builder_start_auction', playerId: 'p1', tileId: dnipro.id });
+
+    expect(game.phase).toBe('auction');
+    expect(game.roleState?.p1.builderAuctionUsed).toBe(true);
+    expect(game.roleState?.p1.builderSpecialActionRound).toBe(2);
+  });
+
+  it('tracks realtor trade profit and finishes at the profit target', () => {
+    let game = createRoleGame(['Realtor', 'Other'], ['realtor', 'gambler'], 'realtor-role-win');
+    const requestedProperties = [31, 32, 34, 37, 39];
+    game = withOwnership(game, 'p2', requestedProperties);
+
+    expect(getTradeValueMultiplier(game, 'p1')).toBe(4);
+
+    game = reduceGame(game, {
+      type: 'propose_trade',
+      offer: {
+        fromPlayerId: 'p1',
+        toPlayerId: 'p2',
+        offerMoney: money(10),
+        requestMoney: 0,
+        offerProperties: [],
+        requestProperties: requestedProperties,
+      },
+    });
+    game = reduceGame(game, { type: 'accept_trade', playerId: 'p2', offerId: game.tradeOffers[0].id });
+
+    expect(game.phase).toBe('finished');
+    expect(game.roleWin).toMatchObject({ playerId: 'p1', roleId: 'realtor' });
+    expect(game.roleState?.p1.realtorProfit).toBeGreaterThanOrEqual(money(REALTOR_WIN_PROFIT));
+  });
+
+  it('caps realtor property resale at x4 rounded down to the trade money step', () => {
+    let game = createRoleGame(['Realtor', 'Buyer'], ['realtor', 'builder'], 'realtor-resale-cap');
+    game = withOwnership(game, 'p1', [14]);
+
+    expect(getTile(14).name).toBe('Чернігів');
+    expect(getTradePropertySaleLimit(game, 'p1', money(160))).toBe(money(600));
+
+    game = reduceGame(game, {
+      type: 'propose_trade',
+      offer: {
+        fromPlayerId: 'p1',
+        toPlayerId: 'p2',
+        offerMoney: 0,
+        requestMoney: money(600),
+        offerProperties: [14],
+        requestProperties: [],
+      },
+    });
+
+    expect(game.tradeOffers[0]).toMatchObject({ offerProperties: [14], requestMoney: money(600) });
+
+    const blockedGame = {
+      ...createRoleGame(['Realtor', 'Buyer'], ['realtor', 'builder'], 'realtor-resale-blocked'),
+    };
+    const blockedWithChernihiv = withOwnership(blockedGame, 'p1', [14]);
+
+    expect(() =>
+      reduceGame(blockedWithChernihiv, {
+        type: 'propose_trade',
+        offer: {
+          fromPlayerId: 'p1',
+          toPlayerId: 'p2',
+          offerMoney: 0,
+          requestMoney: money(650),
+          offerProperties: [14],
+          requestProperties: [],
+        },
+      }),
+    ).toThrow('максимум 600');
+  });
+
+  it('applies banker rent and finishes with four banks plus a large active deposit', () => {
+    let game = createRoleGame(['Banker', 'Other'], ['banker', 'gambler'], 'banker-role-win');
+    game = withOwnership(game, 'p1', [5, 15, 25, 35]);
+    const mono = getTile(5);
+    if (mono.type !== 'bank') throw new Error('Expected MonoBank to be a bank.');
+
+    expect(calculateRent(game, mono)).toBe(money(450));
+
+    game = {
+      ...game,
+      bankDeposits: {
+        p1: {
+          playerId: 'p1',
+          amount: money(BANKER_WIN_DEPOSIT_PAYOUT),
+          turns: 0,
+          createdAtTurn: game.turn,
+          createdAtDiceRollId: game.diceRollId,
+        },
+      },
+    };
+
+    const finished = advanceRoleCheck(game, 'p1');
+    expect(finished.phase).toBe('finished');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'banker' });
+    expect(getBankDepositPayout(finished.bankDeposits?.p1)).toBeGreaterThanOrEqual(money(BANKER_WIN_DEPOSIT_PAYOUT));
+  });
+
+  it('discounts lawyer fines, spends manual protections, and finishes at the saved target', () => {
+    let rentGame = createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-rent-protection');
+    rentGame = {
+      ...rentGame,
+      phase: 'rent',
+      pendingRent: { payerId: 'p1', ownerId: 'p2', tileId: 1, amount: money(100) },
+    };
+
+    rentGame = reduceGame(rentGame, { type: 'use_lawyer_rent_protection', playerId: 'p1' });
+    expect(rentGame.pendingRent).toMatchObject({ amount: money(40), originalAmount: money(100), lawyerProtected: true });
+    expect(rentGame.roleState?.p1).toMatchObject({
+      lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS - 1,
+      lawyerSaved: money(60),
+    });
+
+    let paymentGame = createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-payment-protection');
+    expect(getEffectiveFineAmount(paymentGame, money(400), 'p1')).toBe(money(200));
+    let taxGame = createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-tax-payment-progress');
+    taxGame = {
+      ...taxGame,
+      players: taxGame.players.map((player) => (player.id === 'p1' ? { ...player, position: 2 } : player)),
+    };
+    taxGame = reduceGame(taxGame, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+    expect(taxGame.pendingPayment).toMatchObject({
+      payerId: 'p1',
+      amount: money(100),
+      originalAmount: money(200),
+      lawyerDiscountSaved: money(100),
+      source: 'tax',
+    });
+    expect(taxGame.roleState?.p1.lawyerSaved).toBe(0);
+    taxGame = reduceGame(taxGame, { type: 'pay_payment', playerId: 'p1' });
+    expect(taxGame.roleState?.p1.lawyerSaved).toBe(money(100));
+
+    paymentGame = {
+      ...paymentGame,
+      phase: 'payment',
+      pendingPayment: { payerId: 'p1', amount: money(300), reason: 'test payment', source: 'tax' },
+    };
+    paymentGame = reduceGame(paymentGame, { type: 'use_lawyer_payment_protection', playerId: 'p1' });
+
+    expect(paymentGame.pendingPayment).toBeUndefined();
+    expect(paymentGame.roleState?.p1).toMatchObject({
+      lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS - 1,
+      lawyerSaved: money(300),
+    });
+
+    let bankLoanGame = createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-bank-loan-protection');
+    const bankLoanBorrowerMoney = bankLoanGame.players.find((player) => player.id === 'p1')?.money ?? 0;
+    bankLoanGame = {
+      ...bankLoanGame,
+      phase: 'payment',
+      loans: [
+        {
+          id: 'bank-loan-1',
+          kind: 'bank',
+          borrowerId: 'p1',
+          principal: money(500),
+          totalRepayment: money(650),
+          remainingDue: money(650),
+          installmentAmount: money(65),
+          remainingTurns: 10,
+          missedPayments: 0,
+          collateralTileIds: [],
+          createdAtTurn: bankLoanGame.turn,
+        },
+      ],
+      pendingPayment: {
+        payerId: 'p1',
+        amount: money(65),
+        reason: 'bank loan payment',
+        source: 'loan',
+        loanPayments: [{ loanId: 'bank-loan-1', amount: money(65) }],
+      },
+    };
+    bankLoanGame = reduceGame(bankLoanGame, { type: 'use_lawyer_payment_protection', playerId: 'p1' });
+    expect(bankLoanGame.pendingPayment).toBeUndefined();
+    expect(bankLoanGame.loans).toHaveLength(1);
+    expect(bankLoanGame.loans[0]).toMatchObject({ remainingDue: money(585), remainingTurns: 9 });
+    expect(bankLoanGame.players.find((player) => player.id === 'p1')?.money).toBe(bankLoanBorrowerMoney);
+    expect(bankLoanGame.roleState?.p1).toMatchObject({
+      lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS - 1,
+      lawyerSaved: money(65),
+    });
+
+    const playerLoanGame = createRoleGame(['Lawyer', 'Lender'], ['lawyer', 'gambler'], 'lawyer-player-loan-blocked');
+    const playerLoanPaymentGame: ReturnType<typeof createInitialGameBase> = {
+      ...playerLoanGame,
+      phase: 'payment',
+      loans: [
+        {
+          id: 'loan-1',
+          kind: 'player',
+          lenderId: 'p2',
+          borrowerId: 'p1',
+          principal: money(100),
+          totalRepayment: money(150),
+          remainingDue: money(150),
+          installmentAmount: money(50),
+          remainingTurns: 3,
+          missedPayments: 0,
+          collateralTileIds: [],
+          createdAtTurn: playerLoanGame.turn,
+        },
+      ],
+      pendingPayment: {
+        payerId: 'p1',
+        amount: money(50),
+        reason: 'loan payment',
+        source: 'loan',
+        recipients: [{ playerId: 'p2', amount: money(50) }],
+        loanPayments: [{ loanId: 'loan-1', amount: money(50) }],
+      },
+    };
+    expect(() =>
+      reduceGame(playerLoanPaymentGame, { type: 'use_lawyer_payment_protection', playerId: 'p1' }),
+    ).toThrow('тільки для банківського кредиту');
+    expect(playerLoanPaymentGame.pendingPayment).toBeDefined();
+    expect(playerLoanPaymentGame.loans).toHaveLength(1);
+    expect(playerLoanPaymentGame.roleState?.p1).toMatchObject({
+      lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS,
+      lawyerSaved: 0,
+    });
+
+    let otherPlayerTaxGame = createRoleGame(['Lawyer', 'Taxpayer'], ['lawyer', 'gambler'], 'lawyer-other-tax');
+    otherPlayerTaxGame = {
+      ...otherPlayerTaxGame,
+      currentPlayerId: 'p2',
+      players: otherPlayerTaxGame.players.map((player) => (player.id === 'p2' ? { ...player, position: 2 } : player)),
+    };
+    otherPlayerTaxGame = reduceGame(otherPlayerTaxGame, { type: 'roll', playerId: 'p2', dice: [1, 1] });
+    expect(otherPlayerTaxGame.pendingPayment).toMatchObject({ payerId: 'p2', source: 'tax', amount: money(200) });
+    otherPlayerTaxGame = reduceGame(otherPlayerTaxGame, { type: 'pay_payment', playerId: 'p2' });
+    expect(otherPlayerTaxGame.roleState?.p1.lawyerSaved).toBe(0);
+    expect(otherPlayerTaxGame.roleState?.p2.lawyerSaved).toBe(0);
+
+    let purchaseGame = createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-purchase-no-savings');
+    purchaseGame = {
+      ...purchaseGame,
+      phase: 'awaitingPurchase',
+      pendingPurchaseTileId: 1,
+    };
+    purchaseGame = reduceGame(purchaseGame, { type: 'buy', playerId: 'p1' });
+    expect(purchaseGame.properties[1].ownerId).toBe('p1');
+    expect(purchaseGame.roleState?.p1.lawyerSaved).toBe(0);
+
+    const winningGame = {
+      ...createRoleGame(['Lawyer', 'Other'], ['lawyer', 'gambler'], 'lawyer-role-win'),
+      roleState: {
+        p1: {
+          realtorProfit: 0,
+          lawyerSaved: money(LAWYER_WIN_SAVED),
+          lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS,
+          collectorBonusReceived: 0,
+          gamblerOpeningSpinDone: true,
+          gamblerOpeningSingleDieRollPending: false,
+          builderRemotePurchaseUsed: false,
+          builderAuctionUsed: false,
+          builderSpecialActionRound: 0,
+          mayorCityEventsSeen: 0,
+          mayorEventIncome: 0,
+        },
+        p2: {
+          realtorProfit: 0,
+          lawyerSaved: 0,
+          lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS,
+          collectorBonusReceived: 0,
+          gamblerOpeningSpinDone: true,
+          gamblerOpeningSingleDieRollPending: false,
+          builderRemotePurchaseUsed: false,
+          builderAuctionUsed: false,
+          builderSpecialActionRound: 0,
+          mayorCityEventsSeen: 0,
+          mayorEventIncome: 0,
+        },
+      },
+    };
+    const finished = advanceRoleCheck(winningGame, 'p1');
+    expect(finished.phase).toBe('finished');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'lawyer' });
+  });
+
+  it('pays collector round bonuses and requires six unique city regions plus 3500 net worth', () => {
+    const cityIdsByGroup = Array.from(new Map(cityTiles.map((tile) => [tile.group, tile.id])).values());
+    let bonusGame = createRoleGame(['Collector', 'Other'], ['collector', 'gambler'], 'collector-round-bonus');
+    bonusGame = withOwnership(bonusGame, 'p1', cityIdsByGroup.slice(0, 2));
+    const collectorMoney = bonusGame.players.find((player) => player.id === 'p1')?.money ?? 0;
+    bonusGame = {
+      ...bonusGame,
+      currentPlayerId: 'p2',
+      currentRound: 1,
+      turn: 2,
+      phase: 'turnEnd',
+    };
+
+    bonusGame = reduceGame(bonusGame, { type: 'end_turn', playerId: 'p2' });
+    expect(bonusGame.currentRound).toBe(2);
+    expect(bonusGame.players.find((player) => player.id === 'p1')?.money).toBe(
+      collectorMoney + money(2 * COLLECTOR_GROUP_BONUS),
+    );
+    expect(bonusGame.roleState?.p1.collectorBonusReceived).toBe(money(2 * COLLECTOR_GROUP_BONUS));
+
+    const collectorWinTiles = cityIdsByGroup.slice(0, COLLECTOR_WIN_PROPERTIES);
+    const collectorWinPropertyValue = collectorWinTiles.reduce((sum, tileId) => {
+      const tile = getTile(tileId);
+      return sum + ('price' in tile ? tile.price : 0);
+    }, 0);
+    const collectorWinCash = money(COLLECTOR_WIN_NET_WORTH - collectorWinPropertyValue);
+    let blockedByDebtGame = createRoleGame(['Collector', 'Other'], ['collector', 'gambler'], 'collector-role-debt-blocked');
+    blockedByDebtGame = withOwnership(blockedByDebtGame, 'p1', collectorWinTiles);
+    blockedByDebtGame = {
+      ...blockedByDebtGame,
+      players: blockedByDebtGame.players.map((player) =>
+        player.id === 'p1' ? { ...player, money: collectorWinCash } : player,
+      ),
+      loans: [
+        {
+          id: 'collector-debt',
+          kind: 'bank',
+          borrowerId: 'p1',
+          principal: money(500),
+          totalRepayment: money(650),
+          remainingDue: money(650),
+          installmentAmount: money(65),
+          remainingTurns: 10,
+          missedPayments: 0,
+          collateralTileIds: [],
+          createdAtTurn: blockedByDebtGame.turn,
+        },
+      ],
+    };
+    expect(advanceRoleCheck(blockedByDebtGame, 'p1').phase).not.toBe('finished');
+
+    const firstWinTile = getTile(collectorWinTiles[0]);
+    if (firstWinTile.type !== 'city') throw new Error('Expected collector tile to be a city.');
+    const duplicateRegionTile = cityTiles.find((tile) => tile.group === firstWinTile.group && tile.id !== firstWinTile.id);
+    if (!duplicateRegionTile) throw new Error('Expected duplicate city region tile.');
+    const duplicateRegionTiles = [...cityIdsByGroup.slice(0, COLLECTOR_WIN_PROPERTIES - 1), duplicateRegionTile.id];
+    const duplicateRegionPropertyValue = duplicateRegionTiles.reduce((sum, tileId) => {
+      const tile = getTile(tileId);
+      return sum + ('price' in tile ? tile.price : 0);
+    }, 0);
+    let blockedByDuplicateRegionGame = createRoleGame(
+      ['Collector', 'Other'],
+      ['collector', 'gambler'],
+      'collector-role-duplicate-region-blocked',
+    );
+    blockedByDuplicateRegionGame = withOwnership(blockedByDuplicateRegionGame, 'p1', duplicateRegionTiles);
+    blockedByDuplicateRegionGame = {
+      ...blockedByDuplicateRegionGame,
+      players: blockedByDuplicateRegionGame.players.map((player) =>
+        player.id === 'p1'
+          ? { ...player, money: money(COLLECTOR_WIN_NET_WORTH - duplicateRegionPropertyValue) }
+          : player,
+      ),
+    };
+    expect(advanceRoleCheck(blockedByDuplicateRegionGame, 'p1').phase).not.toBe('finished');
+
+    let winningGame = createRoleGame(['Collector', 'Other'], ['collector', 'gambler'], 'collector-role-win');
+    winningGame = withOwnership(winningGame, 'p1', collectorWinTiles);
+    winningGame = {
+      ...winningGame,
+      players: winningGame.players.map((player) =>
+        player.id === 'p1' ? { ...player, money: collectorWinCash } : player,
+      ),
+    };
+    const finished = advanceRoleCheck(winningGame, 'p1');
+    expect(finished.phase).toBe('finished');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'collector' });
+    expect(getRoleProgressItems(finished, 'p1')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Клітинки в унікальних районах', target: COLLECTOR_WIN_PROPERTIES, done: true }),
+        expect.objectContaining({ label: 'Чиста вартість', target: COLLECTOR_WIN_NET_WORTH, done: true }),
+      ]),
+    );
+  });
+
+  it('lets the mayor choose every third city event and collect event income', () => {
+    let game = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-city-event-choice');
+    game = {
+      ...game,
+      currentPlayerId: 'p2',
+      currentRound: 3,
+      turn: 6,
+      phase: 'turnEnd',
+      cityEventDeck: ['bank-inspection', 'paid-roads', 'city-tender'],
+      cityEventDiscard: [],
+      roleState: {
+        ...game.roleState,
+        p1: {
+          ...game.roleState!.p1,
+          mayorCityEventsSeen: MAYOR_CHOOSE_EVENT_INTERVAL - 1,
+        },
+      },
+    };
+
+    expect(getRoleProgressItems(game, 'p1')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: 'До вибору події',
+          current: MAYOR_CHOOSE_EVENT_INTERVAL - 1,
+          target: MAYOR_CHOOSE_EVENT_INTERVAL,
+          detail: '1 до вибору',
+        }),
+      ]),
+    );
+
+    game = reduceGame(game, { type: 'end_turn', playerId: 'p2' });
+
+    expect(game.phase).toBe('cityEventChoice');
+    expect(game.pendingMayorCityEventChoice).toMatchObject({
+      playerId: 'p1',
+      options: ['bank-inspection', 'paid-roads', 'city-tender'],
+      eventNumber: MAYOR_CHOOSE_EVENT_INTERVAL,
+    });
+    expect(game.roleState?.p1.mayorCityEventsSeen).toBe(MAYOR_CHOOSE_EVENT_INTERVAL);
+    expect(getRoleProgressItems(game, 'p1')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: 'До вибору події',
+          current: MAYOR_CHOOSE_EVENT_INTERVAL,
+          target: MAYOR_CHOOSE_EVENT_INTERVAL,
+          done: true,
+          detail: 'Вибір зараз',
+        }),
+      ]),
+    );
+    expect(() => reduceGame(game, { type: 'choose_city_event', playerId: 'p2', cityEventId: 'bank-inspection' })).toThrow(
+      'тільки Мер',
+    );
+
+    game = reduceGame(game, { type: 'choose_city_event', playerId: 'p1', cityEventId: 'bank-inspection' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingCityEvent).toMatchObject({ id: 'bank-inspection', mayorId: 'p1' });
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1870));
+    expect(game.players.find((player) => player.id === 'p2')?.money).toBe(money(1530));
+    expect(game.roleState?.p1.mayorEventIncome).toBe(money(340));
+  });
+
+  it('routes paid roads and city event auction money to the mayor', () => {
+    let roadGame = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-paid-roads');
+    roadGame = {
+      ...roadGame,
+      currentPlayerId: 'p2',
+      activeCityEvents: [
+        { id: 'paid-roads', remainingRounds: 2, durationRounds: 2, startedRound: 4, mayorId: 'p1' },
+      ],
+    };
+
+    roadGame = reduceGame(roadGame, { type: 'roll', playerId: 'p2', dice: [1, 2] });
+    expect(roadGame.pendingPayment).toMatchObject({
+      payerId: 'p2',
+      amount: money(15),
+      recipients: [{ playerId: 'p1', amount: money(15) }],
+      mayorEventIncome: { playerId: 'p1', amount: money(15) },
+    });
+
+    roadGame = reduceGame(roadGame, { type: 'pay_payment', playerId: 'p2' });
+    expect(roadGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1715));
+    expect(roadGame.players.find((player) => player.id === 'p2')?.money).toBe(money(1685));
+    expect(roadGame.roleState?.p1.mayorEventIncome).toBe(money(15));
+
+    let auctionGame = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-auction-income');
+    auctionGame = {
+      ...auctionGame,
+      currentPlayerId: 'p2',
+      phase: 'auction',
+      auction: {
+        tileId: 1,
+        source: 'cityEvent',
+        sourceMayorId: 'p1',
+        startedAt: Date.now() - 10_000,
+        endsAt: Date.now() - 1,
+        minimumBid: money(60),
+        highestBid: money(100),
+        highestBidderId: 'p2',
+        bids: [{ playerId: 'p2', amount: money(100), placedAt: Date.now() - 5_000 }],
+      },
+    };
+
+    auctionGame = reduceGame(auctionGame, { type: 'resolve_auction' });
+    expect(auctionGame.properties[1].ownerId).toBe('p2');
+    expect(auctionGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1800));
+    expect(auctionGame.players.find((player) => player.id === 'p2')?.money).toBe(money(1600));
+    expect(auctionGame.roleState?.p1.mayorEventIncome).toBe(money(100));
+  });
+
+  it('routes only mayor event price and rent uplifts to the mayor', () => {
+    let buyGame = createRoleGame(['Mayor', 'Buyer'], ['mayor', 'builder'], 'mayor-purchase-uplift');
+    buyGame = {
+      ...buyGame,
+      currentPlayerId: 'p2',
+      phase: 'awaitingPurchase',
+      pendingPurchaseTileId: 1,
+      activeCityEvents: [{ id: 'tax-crisis', remainingRounds: 2, durationRounds: 2, startedRound: 4, mayorId: 'p1' }],
+    };
+
+    buyGame = reduceGame(buyGame, { type: 'buy', playerId: 'p2' });
+
+    expect(buyGame.properties[1].ownerId).toBe('p2');
+    expect(buyGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1718));
+    expect(buyGame.players.find((player) => player.id === 'p2')?.money).toBe(money(1622));
+    expect(buyGame.roleState?.p1.mayorEventIncome).toBe(money(18));
+
+    let rentGame = createRoleGame(['Mayor', 'Owner', 'Payer'], ['mayor', 'builder', 'realtor'], 'mayor-rent-uplift');
+    rentGame = withOwnership(rentGame, 'p2', [21]);
+    rentGame = {
+      ...rentGame,
+      currentPlayerId: 'p3',
+      phase: 'rolling',
+      activeCityEvents: [{ id: 'tourist-season', remainingRounds: 3, durationRounds: 3, startedRound: 4, mayorId: 'p1' }],
+      players: rentGame.players.map((player) => (player.id === 'p3' ? { ...player, position: 19 } : player)),
+    };
+
+    rentGame = reduceGame(rentGame, { type: 'roll', playerId: 'p3', dice: [1, 1] });
+
+    expect(rentGame.pendingRent).toMatchObject({
+      payerId: 'p3',
+      ownerId: 'p2',
+      tileId: 21,
+      amount: money(27),
+      ownerAmount: money(18),
+      mayorEventIncome: { playerId: 'p1', amount: money(9) },
+    });
+
+    rentGame = reduceGame(rentGame, { type: 'pay_rent', playerId: 'p3' });
+
+    expect(rentGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1709));
+    expect(rentGame.players.find((player) => player.id === 'p2')?.money).toBe(money(1718));
+    expect(rentGame.players.find((player) => player.id === 'p3')?.money).toBe(money(1673));
+    expect(rentGame.roleState?.p1.mayorEventIncome).toBe(money(9));
+  });
+
+  it('finishes the game when the mayor earns enough from city events', () => {
+    let game = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-role-win');
+    game = {
+      ...game,
+      roleState: {
+        ...game.roleState,
+        p1: {
+          ...game.roleState!.p1,
+          mayorEventIncome: money(MAYOR_WIN_EVENT_INCOME),
+        },
+      },
+    };
+
+    const finished = advanceRoleCheck(game, 'p1');
+    expect(finished.phase).toBe('finished');
+    expect(finished.roleWin).toMatchObject({ playerId: 'p1', roleId: 'mayor' });
+    expect(getRoleProgressItems(finished, 'p1')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Дохід з подій', target: MAYOR_WIN_EVENT_INCOME, done: true }),
+      ]),
+    );
+  });
+
+  it('keeps role descriptions out of player state and exposes progress only by requested player', () => {
+    const game = createRoleGame(['Gambler', 'Lawyer'], ['gambler', 'lawyer'], 'role-safe-state');
+    const gamblerProgress = getRoleProgressItems(game, 'p1');
+    const lawyerProgress = getRoleProgressItems(game, 'p2');
+
+    expect(game.players[0]).toMatchObject({ roleId: 'gambler' });
+    expect('description' in game.players[0]).toBe(false);
+    expect(gamblerProgress).toHaveLength(1);
+    expect(gamblerProgress[0]).toMatchObject({ target: GAMBLER_WIN_CASH });
+    expect(lawyerProgress).toHaveLength(2);
+    expect(lawyerProgress[0]).toMatchObject({ target: LAWYER_WIN_SAVED });
+    expect(lawyerProgress[1]).toMatchObject({ target: LAWYER_TOTAL_PROTECTIONS });
   });
 
   it('moves a player, lets them buy Pavlohrad, and deducts money', () => {
@@ -119,6 +1044,28 @@ describe('Ukraine Monopoly engine', () => {
 
     expect(landGame.players.find((player) => player.id === 'p1')?.position).toBe(0);
     expect(landGame.players.find((player) => player.id === 'p1')?.money).toBe(money(2000));
+  });
+
+  it('adds the mayor start bonus on top of pass and landing rewards', () => {
+    let passGame = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-start-pass');
+    passGame = {
+      ...passGame,
+      players: passGame.players.map((player) => (player.id === 'p1' ? { ...player, position: 39 } : player)),
+    };
+    passGame = reduceGame(passGame, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+
+    expect(passGame.players.find((player) => player.id === 'p1')?.position).toBe(1);
+    expect(passGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1700 + 200 + MAYOR_PASS_START_BONUS));
+
+    let landGame = createRoleGame(['Mayor', 'Builder'], ['mayor', 'builder'], 'mayor-start-land');
+    landGame = {
+      ...landGame,
+      players: landGame.players.map((player) => (player.id === 'p1' ? { ...player, position: 38 } : player)),
+    };
+    landGame = reduceGame(landGame, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+
+    expect(landGame.players.find((player) => player.id === 'p1')?.position).toBe(0);
+    expect(landGame.players.find((player) => player.id === 'p1')?.money).toBe(money(1700 + 300 + MAYOR_LAND_ON_START_BONUS));
   });
 
   it('reduces start rewards as the game gets longer', () => {
@@ -839,6 +1786,26 @@ describe('Ukraine Monopoly engine', () => {
     expect(first).toEqual(second);
     expect(first).toHaveLength(5);
     expect(first.slice(0, 2)).toEqual(['propertyCount', 'finalCash']);
+  });
+
+  it('gives five crowns to the sixth nomination winner', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'sixth-award-bonus');
+
+    game = reduceGame(game, { type: 'declare_bankruptcy', playerId: 'p1' });
+
+    const summary = game.postMatch;
+    if (!summary) throw new Error('Expected post-match summary.');
+
+    const sixthAward = summary.awards[5];
+    expect(sixthAward).toMatchObject({ id: 'lastSurvivor', winnerIds: ['p2'], crownValue: 5 });
+
+    const earlierP2Crowns = summary.awards
+      .slice(0, 5)
+      .filter((award) => award.winnerIds.includes('p2'))
+      .reduce((sum, award) => sum + (award.crownValue ?? 1), 0);
+    const p2Summary = summary.players.find((player) => player.playerId === 'p2');
+
+    expect(p2Summary?.crowns).toBe(earlierP2Crowns + 5);
   });
 
   it('allows players to share first place when crown counts are tied', () => {
@@ -2906,6 +3873,103 @@ describe('Ukraine Monopoly engine', () => {
     expect(game.currentPlayerId).toBe('p1');
   });
 
+  it('sends every player to casino and opens a mandatory spin on each turn', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-casino');
+    game = {
+      ...game,
+      players: game.players.map((player) =>
+        player.id === 'p1'
+          ? { ...player, position: 5 }
+          : { ...player, position: 10, jailTurns: 2 },
+      ),
+    };
+
+    game = reduceGame(game, { type: 'admin_start_city_event', cityEventId: 'casino-festival' });
+
+    expect(game.phase).toBe('casino');
+    expect(game.pendingCasino).toMatchObject({ playerId: 'p1', tileId: 20, forced: 'cityEvent' });
+    expect(game.pendingCityEventCasinoPlayerIds).toEqual(['p1', 'p2']);
+    expect(game.players.map((player) => player.position)).toEqual([20, 20]);
+    expect(game.players.find((player) => player.id === 'p2')?.jailTurns).toBe(0);
+    expect(() => reduceGame(game, { type: 'skip_casino', playerId: 'p1' })).toThrow('не можна пропустити');
+
+    game = reduceGame(game, { type: 'start_casino_spin', playerId: 'p1', amount: money(100), multiplier: 2, spinSeed: 42 });
+    game = { ...game, pendingCasino: { ...game.pendingCasino!, spinEndsAt: Date.now() - 1 } };
+    game = reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: money(100), multiplier: 2 });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingCasino).toBeUndefined();
+    expect(game.pendingCityEventCasinoPlayerIds).toEqual(['p2']);
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(1800));
+
+    game = reduceGame(game, { type: 'roll', playerId: 'p1', dice: [1, 1] });
+    expect(game.lastDice).toEqual([1, 1]);
+    expect(game.players.find((player) => player.id === 'p1')?.position).toBe(22);
+
+    game = {
+      ...game,
+      phase: 'turnEnd',
+      pendingCardDraw: undefined,
+      pendingCard: undefined,
+    };
+    game = reduceGame(game, { type: 'end_turn', playerId: 'p1' });
+
+    expect(game.currentPlayerId).toBe('p2');
+    expect(game.phase).toBe('casino');
+    expect(game.pendingCasino).toMatchObject({ playerId: 'p2', tileId: 20, forced: 'cityEvent' });
+  });
+
+  it('returns to rolling after paying a mandatory city-event casino loss', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-event-casino-loss');
+    game = {
+      ...game,
+      players: game.players.map((player) => (player.id === 'p1' ? { ...player, money: money(100) } : player)),
+    };
+
+    game = reduceGame(game, { type: 'admin_start_city_event', cityEventId: 'casino-festival' });
+    game = reduceGame(game, { type: 'start_casino_spin', playerId: 'p1', amount: money(50), multiplier: 0, spinSeed: 7 });
+    game = { ...game, pendingCasino: { ...game.pendingCasino!, spinEndsAt: Date.now() - 1 } };
+    game = reduceGame(game, { type: 'casino_bet', playerId: 'p1', amount: money(50), multiplier: 0 });
+
+    expect(game.phase).toBe('payment');
+    expect(game.pendingPayment).toMatchObject({
+      payerId: 'p1',
+      amount: money(50),
+      source: 'casino',
+      afterPayment: { type: 'resumeRolling', playerId: 'p1' },
+    });
+    expect(game.pendingCityEventCasinoPlayerIds).toEqual(['p2']);
+
+    game = reduceGame(game, { type: 'pay_payment', playerId: 'p1' });
+
+    expect(game.phase).toBe('rolling');
+    expect(game.pendingPayment).toBeUndefined();
+    expect(game.players.find((player) => player.id === 'p1')?.money).toBe(money(50));
+  });
+
+  it('allows a city tender auction bid at exactly 80% of the property price', () => {
+    let game = createInitialGame(['Olena', 'Taras'], 'city-tender-minimum-bid');
+    game = withOwnership(
+      game,
+      'p1',
+      propertyTiles.map((tile) => tile.id).filter((tileId) => tileId !== 1),
+    );
+
+    game = reduceGame(game, { type: 'admin_start_city_event', cityEventId: 'city-tender' });
+
+    expect(game.phase).toBe('auction');
+    expect(game.auction).toMatchObject({
+      tileId: 1,
+      source: 'cityEvent',
+      minimumBid: money(48),
+    });
+
+    game = reduceGame(game, { type: 'auction_bid', playerId: 'p2', amount: money(48) });
+
+    expect(game.auction?.highestBidderId).toBe('p2');
+    expect(game.auction?.highestBid).toBe(money(48));
+  });
+
   it('keeps dice value mapping deterministic for Three.js animation', () => {
     expect(diceRotationForValue(1)).toEqual([0, 0, 0]);
     expect(diceRotationForValue(6)[0]).toBeLessThan(0);
@@ -2955,3 +4019,18 @@ const nextBuildRoll = (game: ReturnType<typeof createInitialGame>): ReturnType<t
   builtThisRoll: undefined,
   buildsThisRoll: undefined,
 });
+
+const advanceRoleCheck = (
+  game: ReturnType<typeof createInitialGameBase>,
+  playerId: string,
+): ReturnType<typeof createInitialGameBase> =>
+  reduceGame(
+    {
+      ...game,
+      currentPlayerId: playerId,
+      phase: 'turnEnd',
+      lastDice: [1, 2],
+      doublesInRow: 0,
+    },
+    { type: 'continue_turn', playerId },
+  );

@@ -140,9 +140,9 @@ Engine:
 - Action `start_bank_deposit` confirms that prompt, subtracts the deposit principal from the player, and creates one active deposit.
 - Action `decline_bank_deposit` skips the prompt and ends the turn.
 - A player needs at least 2 owned banks to start a deposit.
-- Deposit principal is the base bank rent for the owner's current bank count: 2 banks = `50`, 3 banks = `100`, 4 banks = `200`.
+- Deposit principal is the base bank rent for the owner's current bank count: 2 banks = `75`, 3 banks = `150`, 4 banks = `300`.
 - Each later `movePlayer` call adds 1 turn to the active deposit, regardless of how many board steps were moved.
-- Payout compounds by 10% per turn after the deposit, rounded up after each turn (for example, `100 -> 110 -> 121`).
+- Payout compounds by 10% per turn after the deposit, rounded up after each turn (for example, `150 -> 165 -> 182`).
 - Landing on any owned bank automatically returns the deposit only while the player owns at least 2 banks.
 - If ownership drops to 1 bank, the deposit remains frozen and cannot be returned until the owner again has at least 2 banks.
 - During `phase: 'bankDeposit'`, the player may mortgage properties and sell buildings to raise money before confirming the deposit.
@@ -208,7 +208,7 @@ Path behavior:
 
 - `tourist`: existing rent, build, and sale behavior.
 - `oldTown`: city rent is reduced by `DISTRICT_RENT_DIVISOR` (`2.35`). For building/hotel rent in the green group, use `GREEN_DISTRICT_BUILDING_RENT_DIVISOR` (`4`); for the gold Kyiv/Lviv group, use `GOLD_DISTRICT_BUILDING_RENT_DIVISOR` (`3.5`). Passing through crossed Old Town cities owned by another player creates a pre-resolution movement `pendingPayment`; the toll is current crossed-city rent divided by `OLD_TOWN_PASS_THROUGH_DIVISOR` (`3.5`), or by the same group-specific building divisor when the crossed green/gold city has buildings.
-- `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent is tourist rent divided by `RESIDENTIAL_DISTRICT_RENT_DIVISOR` (`2.25`), and the owner may build exactly up to 2 times in that district per dice roll.
+- `residential`: house cost uses `RESIDENTIAL_HOUSE_COST_MULTIPLIER` (`0.45`) before city-event and late-game multipliers, city rent is tourist rent divided by `RESIDENTIAL_DISTRICT_RENT_DIVISOR` (`1.8`), and the owner may build exactly up to 2 times in that district per dice roll.
 - Any created district increases city mortgage value by that city's share of half the district creation cost. Do not reduce mortgage value by the district rent divisor.
 
 Money helpers:

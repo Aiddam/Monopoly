@@ -56,6 +56,9 @@ import {
   getBankDepositInfo,
   getBankDepositPayout,
   getBankRentForCount,
+  getBuilderRemotePurchaseCost,
+  getCasinoMaxBet,
+  getCasinoSegmentWeight,
   getDistrictCreationCost,
   getEffectiveBuildingRefund,
   getEffectiveFineAmount,
@@ -63,7 +66,11 @@ import {
   getEffectiveMortgageValue,
   getEffectivePropertyPrice,
   getEffectiveUnmortgageCost,
+  getRoleProgressItems,
+  getTradePropertySaleLimit,
+  getTradeValueMultiplier,
 } from '../engine/gameEngine';
+import { GAMBLER_OPENING_CASINO_MULTIPLIERS, LAWYER_TOTAL_PROTECTIONS, ROLE_DEFINITIONS } from '../engine/roles';
 import type {
   CityTile,
   ActiveLoan,
@@ -75,6 +82,7 @@ import type {
   Player,
   PropertyTile,
   LoanOffer,
+  RoleId,
   RentServiceOffer,
   TradeOffer,
 } from '../engine/types';
@@ -89,7 +97,6 @@ const DICE_ROLL_ANIMATION_MS = 4200;
 const PAWN_STEP_ANIMATION_MS = 220;
 const MORTGAGE_GRACE_TURNS = 10;
 const LOG_TIME_FORMATTER = new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit' });
-const CASINO_MAX_BET = money(600);
 const CASINO_DEFAULT_BET = money(100);
 const CASINO_SEGMENTS = [
   { multiplier: 0, weight: 2, color: '#991b1b' },
@@ -100,20 +107,10 @@ const CASINO_SEGMENTS = [
   { multiplier: 5, weight: 1, color: '#be123c' },
   { multiplier: 3, weight: 1, color: '#ca8a04' },
 ] as const;
-const CASINO_TOTAL_WEIGHT = CASINO_SEGMENTS.reduce((sum, segment) => sum + segment.weight, 0);
-const CASINO_WHEEL_SEGMENTS = CASINO_SEGMENTS.reduce<
-  Array<(typeof CASINO_SEGMENTS)[number] & { startAngle: number; endAngle: number; centerAngle: number }>
->((segments, segment) => {
-  const startAngle = segments.at(-1)?.endAngle ?? 0;
-  const endAngle = startAngle + (segment.weight / CASINO_TOTAL_WEIGHT) * 360;
-  return [...segments, { ...segment, startAngle, endAngle, centerAngle: startAngle + (endAngle - startAngle) / 2 }];
-}, []);
+const CASINO_OPENING_SEGMENTS = CASINO_SEGMENTS.filter((segment) =>
+  GAMBLER_OPENING_CASINO_MULTIPLIERS.includes(segment.multiplier as (typeof GAMBLER_OPENING_CASINO_MULTIPLIERS)[number]),
+);
 const CASINO_MULTIPLIERS = [0, 1, 2, 3, 4, 5, 6] as const;
-const CASINO_WHEEL_BACKGROUND = `radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.16), transparent 0 7%, transparent 8%),
-  radial-gradient(circle at center, rgba(2, 6, 23, 0.98) 0 20%, transparent 21%),
-  conic-gradient(from 0deg, ${CASINO_WHEEL_SEGMENTS.map(
-    (segment) => `${segment.color} ${segment.startAngle.toFixed(2)}deg ${segment.endAngle.toFixed(2)}deg`,
-  ).join(', ')})`;
 const CASINO_SPIN_MS = 5400;
 const CASINO_RESULT_HOLD_MS = 850;
 const JAIL_FINE = money(100);
@@ -265,21 +262,29 @@ const DISTRICT_PATH_OPTIONS: Array<{
     path: 'oldTown',
     label: 'Старе місто',
     shortLabel: 'Старе',
-    effect: 'Нижча оренда, а перехожі сплачують за прохід старим районом.',
+    effect: 'Оренда /2.35, а перехожі сплачують за прохід старим районом.',
     Icon: Landmark,
   },
   {
     path: 'residential',
     label: 'Спальний район',
     shortLabel: 'Спальний',
-    effect: 'Дешевше будувати, нижча оренда і швидший розвиток району.',
+    effect: 'Будівництво -55%, оренда /1.8 і до 2 будівництв за кидок.',
     Icon: Home,
   },
 ];
 
 const DISTRICT_PATH_VIEW = new Map(DISTRICT_PATH_OPTIONS.map((option) => [option.path, option]));
-const DISTRICT_RENT_DIVISOR = 2.35;
-const RESIDENTIAL_DISTRICT_RENT_DIVISOR = 1.8;
+
+const ROLE_PRESENTATION: Record<RoleId, { accent: string; Icon: LucideIcon }> = {
+  gambler: { accent: '#f59e0b', Icon: Dice5 },
+  builder: { accent: '#22c55e', Icon: Hammer },
+  realtor: { accent: '#38bdf8', Icon: Handshake },
+  banker: { accent: '#60a5fa', Icon: Landmark },
+  lawyer: { accent: '#a78bfa', Icon: ShieldAlert },
+  collector: { accent: '#f472b6', Icon: MapPinned },
+  mayor: { accent: '#facc15', Icon: Flag },
+};
 
 const CITY_TILE_ART: Record<string, CityArtKind> = {
   pavlohrad: 'industrial',
@@ -312,6 +317,7 @@ export const GameScreen = () => {
   const [selectedPropertyId, setSelectedPropertyId] = useState<number | undefined>();
   const [tradeDraft, setTradeDraft] = useState<TradeDraft | undefined>();
   const [adminOpen, setAdminOpen] = useState(false);
+  const [rolePanelOpen, setRolePanelOpen] = useState(false);
   const [emoteWheelOpen, setEmoteWheelOpen] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(() =>
     typeof window === 'undefined' ? true : window.localStorage.getItem(SOUND_STORAGE_KEY) !== 'off',
@@ -350,19 +356,24 @@ export const GameScreen = () => {
     (offer) => offer.status === 'pending' && (!room || isLoanOfferResponder(offer, localPlayer.id)),
   );
   const rollingKey = game.diceRollId || game.turn * 10 + game.dice[0] + game.dice[1];
-  const secondsLeft = useTurnTimer(game, isLocalTurn, dispatch);
+  const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
+  const canResolveMayorChoice = Boolean(
+    game.pendingMayorCityEventChoice &&
+      (!room || isHost || game.pendingMayorCityEventChoice.playerId === localPlayer.id),
+  );
+  const secondsLeft = useTurnTimer(game, isLocalTurn, canResolveMayorChoice, dispatch);
   const hasDoubleRoll = Boolean(game.lastDice && isDoubleDiceRoll(game.lastDice) && game.doublesInRow > 0);
   const shouldAnimateDiceRoll =
     game.phase !== 'orderRoll' || !room || game.lastOrderRollPlayerId === localPlayer.id;
   const isDiceRolling = useDiceRollAnimation(game, shouldAnimateDiceRoll);
   const { displayPositions, isAnimating: isPawnAnimating } = useAnimatedPositions(game);
   const isBoardBusy = isDiceRolling || isPawnAnimating;
-  const isHost = !room || Boolean(room.players.find((player) => player.id === localPlayerId)?.isHost);
   const canAdvanceTurn = isHost || isLocalTurn;
   const canUseAdmin = Boolean(room?.testMode);
   const activePlayers = game.players.filter((player) => !player.isBankrupt);
   const summaryVoteCount = activePlayers.filter((player) => Boolean(game.summaryVotes?.[player.id])).length;
   const summaryVoter = room ? localPlayer : currentPlayer;
+  const roleViewer = room ? localPlayer : currentPlayer;
   const hasRequestedSummary = room
     ? Boolean(game.summaryVotes?.[summaryVoter.id])
     : activePlayers.every((player) => Boolean(game.summaryVotes?.[player.id]));
@@ -498,6 +509,10 @@ export const GameScreen = () => {
         setAdminOpen(false);
         return;
       }
+      if (rolePanelOpen) {
+        setRolePanelOpen(false);
+        return;
+      }
       if (selectedPropertyId !== undefined) {
         setSelectedPropertyId(undefined);
         return;
@@ -513,7 +528,7 @@ export const GameScreen = () => {
 
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [adminOpen, emoteWheelOpen, selectedPropertyId, tradeDraft, workspaceTab]);
+  }, [adminOpen, emoteWheelOpen, rolePanelOpen, selectedPropertyId, tradeDraft, workspaceTab]);
 
   return (
     <section className="game-screen">
@@ -523,6 +538,16 @@ export const GameScreen = () => {
           <h1>Українська Монополія</h1>
         </div>
         <div className="top-actions">
+          <button
+            className="trade-badge role-badge"
+            type="button"
+            disabled={!roleViewer.roleId}
+            title={roleViewer.roleId ? 'Показати вашу роль і прогрес.' : 'Роль зʼявиться після визначення черговості.'}
+            onClick={() => setRolePanelOpen(true)}
+          >
+            <CircleHelp size={15} />
+            Роль
+          </button>
           {incomingTrade && (
             <button className="trade-badge" type="button" onClick={() => setWorkspaceTab('trade')}>
               <ArrowLeftRight size={15} />
@@ -651,6 +676,12 @@ export const GameScreen = () => {
           />,
           document.body,
         )}
+      {rolePanelOpen &&
+        roleViewer.roleId &&
+        createPortal(
+          <RolePanel game={game} player={roleViewer} onClose={() => setRolePanelOpen(false)} />,
+          document.body,
+        )}
       {selectedPropertyId !== undefined &&
         createPortal(
           <CityModal
@@ -680,6 +711,78 @@ type EmoteWheelProps = {
   cooldownRemainingMs: number;
   cooldownProgress: number;
   cooldownNudge: number;
+};
+
+const RolePanel = ({ game, player, onClose }: { game: GameState; player: Player; onClose: () => void }) => {
+  if (!player.roleId) return null;
+  const role = ROLE_DEFINITIONS[player.roleId];
+  const { accent, Icon } = ROLE_PRESENTATION[player.roleId];
+  const progressItems = getRoleProgressItems(game, player.id);
+  return (
+    <div className="modal-backdrop role-panel-backdrop" role="presentation" onMouseDown={onClose}>
+      <motion.article
+        className="role-panel modal-card"
+        style={{ '--role-accent': accent } as CSSProperties}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Ваша роль"
+        initial={{ opacity: 0, y: 18, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 18, scale: 0.98 }}
+        transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="role-panel-hero">
+          <div className="role-panel-icon">
+            <Icon size={28} />
+          </div>
+          <div className="role-panel-title">
+            <p className="eyebrow">Ваша роль</p>
+            <h2>{role.title}</h2>
+            <span>{role.awardTitle}</span>
+          </div>
+          <button className="icon-button" type="button" aria-label="Закрити" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="role-panel-grid">
+          <section className="role-panel-section">
+            <h3>Бонус</h3>
+            <p>{role.description}</p>
+          </section>
+
+          <section className="role-panel-section">
+            <h3>Перемога</h3>
+            <p>{role.winCondition}</p>
+          </section>
+        </div>
+
+        <section className="role-panel-section">
+          <h3>Прогрес</h3>
+          <div className="role-progress-list">
+            {progressItems.map((item) => {
+              const progress = item.target > 0 ? Math.min(100, Math.round((item.current / item.target) * 100)) : item.done ? 100 : 0;
+              return (
+                <div
+                  className={`role-progress-row ${item.done ? 'done' : ''}`}
+                  key={item.label}
+                  style={{ '--role-progress': `${progress}%` } as CSSProperties}
+                >
+                  <span>{item.done ? <Check size={15} /> : <Clock3 size={15} />}</span>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <small>{item.detail}</small>
+                    <i aria-hidden="true" />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      </motion.article>
+    </div>
+  );
 };
 
 const EmoteWheel = ({
@@ -1056,6 +1159,7 @@ const GameBoard = ({
     !isBoardBusy &&
     ((game.phase === 'awaitingJailDecision' && Boolean(game.pendingJail) && isLocalTurn) ||
       (game.phase === 'casino' && shouldShowCasino) ||
+      (game.phase === 'cityEventChoice' && Boolean(game.pendingMayorCityEventChoice)) ||
       (game.phase === 'bankDeposit' && Boolean(game.pendingBankDeposit) && isLocalTurn) ||
       (game.phase === 'awaitingPurchase' && Boolean(pendingTile && isPropertyTile(pendingTile)) && isLocalTurn) ||
       (game.phase === 'rent' && Boolean(game.pendingRent)) ||
@@ -1079,7 +1183,13 @@ const GameBoard = ({
           <strong>{currentPlayer.name}</strong>
         </div>
           <CityEventBanner game={game} />
-          {game.phase === 'orderRoll' ? (
+          {game.phase === 'cityEventChoice' && game.pendingMayorCityEventChoice ? (
+            <MayorCityEventChoicePrompt
+              game={game}
+              canControl={canAdvanceTurn || game.pendingMayorCityEventChoice.playerId === tradePlayer.id}
+              dispatch={dispatch}
+            />
+          ) : game.phase === 'orderRoll' ? (
             <BoardTurnOrderPrompt
               game={game}
               orderRollPlayer={orderRollPlayer}
@@ -1249,6 +1359,56 @@ const CityEventBanner = ({ game }: { game: GameState }) => {
         </div>
       )}
     </motion.aside>
+  );
+};
+
+const MayorCityEventChoicePrompt = ({
+  game,
+  canControl,
+  dispatch,
+}: {
+  game: GameState;
+  canControl: boolean;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const choice = game.pendingMayorCityEventChoice;
+  if (!choice) return null;
+  const mayor = game.players.find((player) => player.id === choice.playerId);
+
+  return (
+    <motion.div
+      className="mayor-event-choice-prompt"
+      initial={{ opacity: 0, y: 10, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.98 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 22 }}
+    >
+      <div className="mayor-event-choice-head">
+        <Flag size={20} />
+        <div>
+          <span>Вибір Мера</span>
+          <strong>{mayor ? `${mayor.name} обирає подію` : 'Мер обирає подію'}</strong>
+        </div>
+      </div>
+      <div className="mayor-event-options">
+        {choice.options.map((eventId) => {
+          const event = getCityEventDefinition(eventId);
+          return (
+            <button
+              className="mayor-event-option"
+              type="button"
+              disabled={!canControl}
+              onClick={() => dispatch({ type: 'choose_city_event', playerId: choice.playerId, cityEventId: event.id })}
+              key={event.id}
+            >
+              <strong>{event.title}</strong>
+              <span>{event.text}</span>
+            </button>
+          );
+        })}
+      </div>
+      <p>Гроші, які обрана подія приносить банку, підуть на рахунок Мера.</p>
+    </motion.div>
   );
 };
 
@@ -1500,7 +1660,16 @@ const BoardCasinoPrompt = ({
 }) => {
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId)!;
   const pendingCasino = game.pendingCasino;
-  const maxBet = Math.min(CASINO_MAX_BET, currentPlayer.money);
+  const isOpeningSpin = pendingCasino?.forced === 'gamblerOpening';
+  const isCityEventSpin = pendingCasino?.forced === 'cityEvent';
+  const visibleMultipliers = isOpeningSpin ? GAMBLER_OPENING_CASINO_MULTIPLIERS : CASINO_MULTIPLIERS;
+  const maxMultiplier = Math.max(...visibleMultipliers);
+  const maxBet = isOpeningSpin ? currentPlayer.money : getCasinoMaxBet(currentPlayer);
+  const casinoWheelSegments = useMemo(
+    () => buildCasinoWheelSegments(currentPlayer, isOpeningSpin),
+    [currentPlayer.roleId, isOpeningSpin],
+  );
+  const casinoWheelBackground = useMemo(() => buildCasinoWheelBackground(casinoWheelSegments), [casinoWheelSegments]);
   const [bet, setBet] = useState(maxBet > 0 ? Math.min(CASINO_DEFAULT_BET, maxBet) : 0);
   const [rotation, setRotation] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -1510,13 +1679,16 @@ const BoardCasinoPrompt = ({
   const lockedBet = pendingCasino?.amount ?? bet;
 
   useEffect(() => {
-    setBet((value) => (maxBet > 0 ? Math.min(Math.max(1, value), maxBet) : 0));
-  }, [maxBet]);
+    setBet((value) => {
+      if (maxBet <= 0) return 0;
+      return isOpeningSpin ? maxBet : Math.min(Math.max(1, value), maxBet);
+    });
+  }, [isOpeningSpin, maxBet]);
 
   useEffect(() => {
-    setBet(maxBet > 0 ? Math.min(CASINO_DEFAULT_BET, maxBet) : 0);
+    setBet(maxBet > 0 ? (isOpeningSpin ? maxBet : Math.min(CASINO_DEFAULT_BET, maxBet)) : 0);
     setRotation(0);
-  }, [game.pendingCasino?.playerId, game.pendingCasino?.tileId, maxBet]);
+  }, [game.pendingCasino?.playerId, game.pendingCasino?.tileId, isOpeningSpin, maxBet]);
 
   useEffect(() => {
     if (!pendingCasino?.spinEndsAt) return;
@@ -1527,7 +1699,7 @@ const BoardCasinoPrompt = ({
 
   useEffect(() => {
     if (!pendingCasino?.spinStartedAt || pendingCasino.multiplier === undefined) return;
-    const targetSegment = CASINO_WHEEL_SEGMENTS.find((segment) => segment.multiplier === pendingCasino.multiplier);
+    const targetSegment = casinoWheelSegments.find((segment) => segment.multiplier === pendingCasino.multiplier);
     const centerAngle = targetSegment?.centerAngle ?? 0;
     const seed = Math.abs(pendingCasino.spinSeed ?? 0);
     const extraTurns = 10 + (seed % 5);
@@ -1535,7 +1707,7 @@ const BoardCasinoPrompt = ({
     setRotation(0);
     const frame = window.requestAnimationFrame(() => setRotation(targetRotation));
     return () => window.cancelAnimationFrame(frame);
-  }, [pendingCasino?.multiplier, pendingCasino?.spinSeed, pendingCasino?.spinStartedAt]);
+  }, [casinoWheelSegments, pendingCasino?.multiplier, pendingCasino?.spinSeed, pendingCasino?.spinStartedAt]);
 
   useEffect(() => {
     if (!canResolve || !pendingCasino?.spinEndsAt || !spinComplete) return;
@@ -1553,6 +1725,10 @@ const BoardCasinoPrompt = ({
 
   const updateBet = (value: number) => {
     if (pendingCasino?.spinEndsAt) return;
+    if (isOpeningSpin) {
+      setBet(maxBet);
+      return;
+    }
     if (!Number.isFinite(value)) {
       setBet(maxBet > 0 ? 1 : 0);
       return;
@@ -1562,8 +1738,8 @@ const BoardCasinoPrompt = ({
 
   const handleSpin = () => {
     if (!canControl || pendingCasino?.spinEndsAt || maxBet <= 0) return;
-    const normalizedBet = Math.min(maxBet, Math.max(1, Math.floor(bet)));
-    const multiplier = pickCasinoMultiplier();
+    const normalizedBet = isOpeningSpin ? maxBet : Math.min(maxBet, Math.max(1, Math.floor(bet)));
+    const multiplier = pickCasinoMultiplier(currentPlayer, isOpeningSpin);
     setBet(normalizedBet);
     dispatch({
       type: 'start_casino_spin',
@@ -1582,13 +1758,15 @@ const BoardCasinoPrompt = ({
     revealedMultiplier === undefined
       ? isSpinning
         ? 'Рулетка крутиться'
-        : 'Оберіть ставку й крутіть'
+        : isOpeningSpin
+          ? 'Ставка на весь баланс'
+          : 'Оберіть ставку й крутіть'
       : `${resultLabel} = ${formatMoney(projectedPayout)}`;
   const controlsLocked = !canControl || Boolean(pendingCasino?.spinEndsAt);
 
   return (
     <motion.article
-      className={`board-casino-prompt ${hasWin ? 'casino-win' : ''}`}
+      className={`board-casino-prompt ${isOpeningSpin ? 'casino-opening' : ''} ${isCityEventSpin ? 'casino-event' : ''} ${hasWin ? 'casino-win' : ''}`}
       initial={{ opacity: 0, y: 10, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 10, scale: 0.98 }}
@@ -1596,23 +1774,25 @@ const BoardCasinoPrompt = ({
     >
       <div className="casino-head">
         <div>
-          <p className="eyebrow">Казино</p>
-          <h3>Рулетка фортуни</h3>
+          <p className="eyebrow">{isOpeningSpin ? 'Стартова умова' : 'Казино'}</p>
+          <h3>{isOpeningSpin ? 'Рулетка Азартного гравця' : isCityEventSpin ? 'Рулетка міської події' : 'Рулетка фортуни'}</h3>
         </div>
         <div className="casino-head-side">
           <div className="casino-jackpot">
             <span>Макс.</span>
-            <strong>x6</strong>
+            <strong>x{maxMultiplier}</strong>
           </div>
-          <button
-            className="secondary compact casino-skip-action"
-            type="button"
-            disabled={controlsLocked}
-            onClick={() => dispatch({ type: 'skip_casino', playerId: currentPlayer.id })}
-          >
-            <X size={16} />
-            Відмовитись
-          </button>
+          {!isOpeningSpin && !isCityEventSpin && (
+            <button
+              className="secondary compact casino-skip-action"
+              type="button"
+              disabled={controlsLocked}
+              onClick={() => dispatch({ type: 'skip_casino', playerId: currentPlayer.id })}
+            >
+              <X size={16} />
+              Відмовитись
+            </button>
+          )}
         </div>
       </div>
 
@@ -1625,11 +1805,11 @@ const BoardCasinoPrompt = ({
               {
                 transform: `rotate(${rotation}deg)`,
                 '--casino-spin-ms': `${CASINO_SPIN_MS}ms`,
-                '--casino-wheel-background': CASINO_WHEEL_BACKGROUND,
+                '--casino-wheel-background': casinoWheelBackground,
               } as CSSProperties
             }
           >
-            {CASINO_WHEEL_SEGMENTS.map((segment) => (
+            {casinoWheelSegments.map((segment) => (
               <span
                 className={`${segment.multiplier === 0 ? 'zero' : ''} ${segment.weight > 1 ? 'wide' : ''}`}
                 key={segment.multiplier}
@@ -1654,7 +1834,7 @@ const BoardCasinoPrompt = ({
 
         <section className="casino-controls">
           <div className="casino-multiplier-row">
-            {CASINO_MULTIPLIERS.map((multiplier) => (
+            {visibleMultipliers.map((multiplier) => (
               <span className={revealedMultiplier === multiplier ? 'active' : ''} key={multiplier}>
                 x{multiplier}
               </span>
@@ -1663,31 +1843,33 @@ const BoardCasinoPrompt = ({
 
           <div className="casino-bet-row">
             <label>
-              <span>Ставка</span>
+              <span>{isOpeningSpin ? 'Стартова ставка' : 'Ставка'}</span>
               <div>
                 <input
                   max={maxBet}
                   type="number"
                   value={pendingCasino?.amount ?? bet}
                   min={maxBet > 0 ? 1 : 0}
-                  disabled={controlsLocked || maxBet <= 0}
+                  disabled={controlsLocked || maxBet <= 0 || isOpeningSpin}
                   onChange={(event) => updateBet(Number(event.target.value))}
                 />
                 <em>₴</em>
               </div>
             </label>
-            <strong>макс. {formatMoney(maxBet)}</strong>
+            <strong>{isOpeningSpin ? 'весь баланс' : `макс. ${formatMoney(maxBet)}`}</strong>
           </div>
 
-          <input
-            className="casino-bet-slider"
-            min={maxBet > 0 ? 1 : 0}
-            max={maxBet}
-            type="range"
-            value={pendingCasino?.amount ?? bet}
-            disabled={controlsLocked || maxBet === 0}
-            onChange={(event) => updateBet(Number(event.target.value))}
-          />
+          {!isOpeningSpin && (
+            <input
+              className="casino-bet-slider"
+              min={maxBet > 0 ? 1 : 0}
+              max={maxBet}
+              type="range"
+              value={pendingCasino?.amount ?? bet}
+              disabled={controlsLocked || maxBet === 0}
+              onChange={(event) => updateBet(Number(event.target.value))}
+            />
+          )}
 
           <div className="casino-result">
             <span>Можлива виплата</span>
@@ -1703,7 +1885,15 @@ const BoardCasinoPrompt = ({
               onClick={handleSpin}
             >
               <BadgeDollarSign size={16} />
-              {isSpinning ? 'Крутиться...' : spinComplete ? 'Результат...' : 'Підтвердити ставку'}
+              {isSpinning
+                ? 'Крутиться...'
+                : spinComplete
+                  ? 'Результат...'
+                  : isOpeningSpin
+                    ? 'Крутити стартову рулетку'
+                    : isCityEventSpin
+                      ? 'Крутити рулетку події'
+                    : 'Підтвердити ставку'}
             </button>
           </div>
         </section>
@@ -1712,13 +1902,42 @@ const BoardCasinoPrompt = ({
   );
 };
 
-const pickCasinoMultiplier = () => {
-  let roll = Math.random() * CASINO_TOTAL_WEIGHT;
-  for (const segment of CASINO_SEGMENTS) {
+const buildCasinoWheelSegments = (player: Player, isOpeningSpin = false) => {
+  const sourceSegments = isOpeningSpin ? CASINO_OPENING_SEGMENTS : CASINO_SEGMENTS;
+  const weightedSegments = sourceSegments.map((segment) => ({
+    ...segment,
+    weight: getCasinoSegmentWeight(player, segment.multiplier, segment.weight),
+  }));
+  const totalWeight = weightedSegments.reduce((sum, segment) => sum + segment.weight, 0);
+  return weightedSegments.reduce<
+    Array<(typeof weightedSegments)[number] & { startAngle: number; endAngle: number; centerAngle: number }>
+  >((segments, segment) => {
+    const startAngle = segments.at(-1)?.endAngle ?? 0;
+    const endAngle = startAngle + (segment.weight / totalWeight) * 360;
+    return [...segments, { ...segment, startAngle, endAngle, centerAngle: startAngle + (endAngle - startAngle) / 2 }];
+  }, []);
+};
+
+const buildCasinoWheelBackground = (segments: ReturnType<typeof buildCasinoWheelSegments>) =>
+  `radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.16), transparent 0 7%, transparent 8%),
+  radial-gradient(circle at center, rgba(2, 6, 23, 0.98) 0 20%, transparent 21%),
+  conic-gradient(from 0deg, ${segments
+    .map((segment) => `${segment.color} ${segment.startAngle.toFixed(2)}deg ${segment.endAngle.toFixed(2)}deg`)
+    .join(', ')})`;
+
+const pickCasinoMultiplier = (player: Player, isOpeningSpin = false) => {
+  const sourceSegments = isOpeningSpin ? CASINO_OPENING_SEGMENTS : CASINO_SEGMENTS;
+  const weightedSegments = sourceSegments.map((segment) => ({
+    ...segment,
+    weight: getCasinoSegmentWeight(player, segment.multiplier, segment.weight),
+  }));
+  const totalWeight = weightedSegments.reduce((sum, segment) => sum + segment.weight, 0);
+  let roll = Math.random() * totalWeight;
+  for (const segment of weightedSegments) {
     roll -= segment.weight;
     if (roll < 0) return segment.multiplier;
   }
-  return CASINO_SEGMENTS[CASINO_SEGMENTS.length - 1].multiplier;
+  return weightedSegments[weightedSegments.length - 1].multiplier;
 };
 
 const SURRENDER_CHARGE_MS = 3200;
@@ -1756,6 +1975,9 @@ const BoardRentPrompt = ({
 
   const payer = game.players.find((player) => player.id === pendingRent.payerId);
   const owner = game.players.find((player) => player.id === pendingRent.ownerId);
+  const mayorIncome = pendingRent.mayorEventIncome;
+  const mayor = mayorIncome ? game.players.find((player) => player.id === mayorIncome.playerId) : undefined;
+  const ownerRentAmount = mayorIncome ? (pendingRent.ownerAmount ?? pendingRent.amount - mayorIncome.amount) : pendingRent.amount;
   const tile = getTile(pendingRent.tileId);
   const canPay = Boolean(payer && payer.money >= pendingRent.amount);
   const depositBalance = payer ? getBankDepositPayout((game.bankDeposits ?? {})[payer.id]) : 0;
@@ -1764,6 +1986,11 @@ const BoardRentPrompt = ({
   const canPayWithDeposit = Boolean(payer && depositCoverage > 0);
   const hasUnoReverseCard = Boolean(payer && (payer.unoReverseCards ?? 0) > 0);
   const canUseUnoReverse = Boolean(hasUnoReverseCard && payer && owner && owner.id !== payer.id);
+  const canUseLawyerRentProtection = Boolean(
+    payer?.roleId === 'lawyer' &&
+      !pendingRent.lawyerProtected &&
+      getLawyerProtectionsLeft(game, payer.id) > 0,
+  );
   const surrenderArmed = surrenderCharge >= 100;
   const stopSurrenderCharge = () => {
     if (surrenderArmed) return;
@@ -1793,6 +2020,12 @@ const BoardRentPrompt = ({
       <p>
         {payer?.name ?? 'Гравець'} має сплатити {owner?.name ?? 'власнику'}.
       </p>
+      {mayorIncome && (
+        <p className="rent-discount-note">
+          {owner?.name ?? 'Власник'} отримує {formatMoney(ownerRentAmount)}, {mayor?.name ?? 'Мер'} отримує{' '}
+          {formatMoney(mayorIncome.amount)} націнки події.
+        </p>
+      )}
       {pendingRent.unoReverse && (
         <p className="rent-reverse-note">
           УНО РЕВЕРС активний: платіж перекинуто на {payer?.name ?? 'гравця'}.
@@ -1840,6 +2073,17 @@ const BoardRentPrompt = ({
           >
             <img src={UNO_REVERSE_CARD_IMAGE} alt="" aria-hidden />
             <span>УНО РЕВЕРС</span>
+          </button>
+        )}
+        {payer?.roleId === 'lawyer' && (
+          <button
+            className="secondary compact lawyer-protection-action"
+            disabled={!isLocalTurn || !canUseLawyerRentProtection}
+            title={canUseLawyerRentProtection ? 'Зменшити цю оренду на 60%.' : 'Захист Юриста недоступний.'}
+            onClick={() => dispatch({ type: 'use_lawyer_rent_protection', playerId: pendingRent.payerId })}
+          >
+            <ShieldAlert size={16} />
+            Захист
           </button>
         )}
         <button
@@ -1930,6 +2174,24 @@ const PaymentDecisionPanel = ({
   const canPayWithDeposit = Boolean(payer && depositCoverage > 0);
   const isLoanPayment = pendingPayment.source === 'loan' && Boolean(pendingPayment.loanPayments?.length);
   const loanMissBlocked = isLoanPayment && hasMandatoryLoanPayment(game, pendingPayment);
+  const loanPaymentKinds = (pendingPayment.loanPayments ?? [])
+    .map((loanPayment) => (game.loans ?? []).find((loan) => loan.id === loanPayment.loanId)?.kind)
+    .filter(Boolean);
+  const hasPlayerLoanPayment = isLoanPayment && loanPaymentKinds.includes('player');
+  const hasOnlyBankLoanPayments =
+    isLoanPayment && loanPaymentKinds.length > 0 && loanPaymentKinds.every((kind) => kind === 'bank');
+  const canUseLawyerPaymentProtection = Boolean(
+    payer?.roleId === 'lawyer' &&
+      getLawyerProtectionsLeft(game, payer.id) > 0 &&
+      (!isLoanPayment || hasOnlyBankLoanPayments),
+  );
+  const lawyerProtectionTitle = hasPlayerLoanPayment
+    ? 'Захист Юриста не працює для кредиту від гравця.'
+    : canUseLawyerPaymentProtection
+      ? isLoanPayment
+        ? 'Скасувати лише поточний платіж банківського кредиту.'
+        : 'Скасувати цей платіж захистом Юриста.'
+      : 'Захист Юриста недоступний.';
   const surrenderArmed = surrenderCharge >= 100;
   const stopSurrenderCharge = () => {
     if (surrenderArmed) return;
@@ -1996,6 +2258,17 @@ const PaymentDecisionPanel = ({
           >
             <Clock3 size={16} />
             Пропустити
+          </button>
+        )}
+        {payer?.roleId === 'lawyer' && (
+          <button
+            className="secondary compact lawyer-protection-action"
+            disabled={!isLocalTurn || !canUseLawyerPaymentProtection}
+            title={lawyerProtectionTitle}
+            onClick={() => dispatch({ type: 'use_lawyer_payment_protection', playerId: pendingPayment.payerId })}
+          >
+            <ShieldAlert size={16} />
+            Захист
           </button>
         )}
         <button
@@ -2140,7 +2413,8 @@ const BoardActionDock = ({
   const [isSurrenderCharging, setIsSurrenderCharging] = useState(false);
   const [surrenderCharge, setSurrenderCharge] = useState(0);
   const surrenderArmed = surrenderCharge >= 100;
-  const canSurrender = game.phase !== 'finished' && !surrenderPlayer.isBankrupt;
+  const isOpeningCasino = game.pendingCasino?.forced === 'gamblerOpening';
+  const canSurrender = game.phase !== 'finished' && !surrenderPlayer.isBankrupt && !isOpeningCasino;
 
   useEffect(() => {
     setIsSurrenderCharging(false);
@@ -2203,6 +2477,12 @@ const BoardActionDock = ({
 
         {game.phase === 'rolling' && isCurrentPlayerJailed && (
           <span className="dock-note">Вʼязниця: {currentPlayer.jailTurns} ход.</span>
+        )}
+
+        {game.phase === 'cityEventChoice' && game.pendingMayorCityEventChoice && (
+          <span className="dock-note">
+            Мер обирає подію: {game.players.find((player) => player.id === game.pendingMayorCityEventChoice?.playerId)?.name}
+          </span>
         )}
 
         {game.phase === 'awaitingPurchase' && pendingTile && isPropertyTile(pendingTile) && (
@@ -2312,7 +2592,9 @@ const BoardActionDock = ({
         title={
           canSurrender
             ? `Здатися за ${surrenderPlayer.name}. Наведіть і дочекайтесь заповнення.`
-            : 'Гравець уже вибув або партію завершено.'
+            : isOpeningCasino
+              ? 'Спочатку потрібно завершити стартову рулетку.'
+              : 'Гравець уже вибув або партію завершено.'
         }
         onBlur={stopSurrenderCharge}
         onClick={handleSurrender}
@@ -2658,7 +2940,7 @@ const AuctionOverlay = ({ game }: { game: GameState }) => {
           <input
             type="number"
             min={nextMinimumBid}
-            step={AUCTION_BID_INCREMENT}
+            step={1}
             value={bidAmount}
             onChange={(event) => setBidAmount(Math.max(0, Number(event.target.value)))}
           />
@@ -2756,10 +3038,11 @@ const TileCell = ({
     game && isInspectable
       ? getTradeTileState(game, tile.id, tradePlayerId, tradeDraft) ?? getActiveTradeTileState(tile.id, activeTradeOffer)
       : undefined;
+  const isAuctionTarget = Boolean(game?.phase === 'auction' && game.auction?.tileId === tile.id);
 
   return (
     <motion.article
-      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${district ? `district-${district.path}` : ''} ${tradeState ? `trade-${tradeState}` : ''} ${hasPawn ? 'occupied' : ''}`}
+      className={`tile tile-${position.side} ${tile.type} ${isInspectable ? 'inspectable' : ''} ${owner ? 'owned' : ''} ${property?.mortgaged ? 'mortgaged' : ''} ${district ? `district-${district.path}` : ''} ${tradeState ? `trade-${tradeState}` : ''} ${hasPawn ? 'occupied' : ''} ${isAuctionTarget ? 'auction-target' : ''}`}
       role={isInspectable ? 'button' : undefined}
       tabIndex={isInspectable ? 0 : undefined}
       style={
@@ -2784,6 +3067,7 @@ const TileCell = ({
       transition={{ type: 'spring', stiffness: 260, damping: 20 }}
     >
       <span className="tile-pawn-zone" aria-hidden />
+      {isAuctionTarget && <span className="auction-target-badge">Аукціон</span>}
       {tile.type === 'city' && (
         <>
           <CityTileArt tile={tile} />
@@ -3308,6 +3592,15 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
         const isJailed = player.jailTurns > 0;
         const propertyCount = player.properties.length;
         const borrowedLoanSummary = borrowerLoanSummary.get(player.id);
+        const roleBadgeLabel =
+          player.roleId && ROLE_DEFINITIONS[player.roleId]
+            ? ROLE_DEFINITIONS[player.roleId].publicTitle
+            : game.rolesEnabled !== false
+              ? game.phase === 'orderRoll'
+                ? 'Роль після черги'
+                : 'Роль не видана'
+              : undefined;
+        const RoleBadgeIcon = player.roleId ? ROLE_PRESENTATION[player.roleId].Icon : CircleHelp;
         return (
           <article
             className={`player-row ${isActive ? 'active' : ''} ${isJailed ? 'jailed' : ''} ${player.isBankrupt ? 'bankrupt' : ''}`}
@@ -3317,6 +3610,24 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
             <div className="player-avatar">
               <PlayerFigurine player={player} size="large" />
             </div>
+            {(roleBadgeLabel || (!player.isBankrupt && borrowedLoanSummary)) && (
+              <div className="player-top-badges">
+                {roleBadgeLabel && (
+                  <div className="player-role-line">
+                    <span className={`player-role-badge ${player.roleId ? 'assigned' : 'pending'}`}>
+                      <RoleBadgeIcon size={13} />
+                      <span>{roleBadgeLabel}</span>
+                    </span>
+                  </div>
+                )}
+                {!player.isBankrupt && borrowedLoanSummary && (
+                  <span className="player-status-chip credit player-loan-badge" title={`Непогашений кредит: ${formatMoney(borrowedLoanSummary.due)}`}>
+                    <HandCoins size={12} />
+                    <span className="player-loan-label">{borrowedLoanSummary.count > 1 ? `Кредит x${borrowedLoanSummary.count}` : 'Кредит'}</span>
+                  </span>
+                )}
+              </div>
+            )}
             <div className="player-meta">
               <div className="player-name-line">
                 <h3 title={player.name}>{player.name}</h3>
@@ -3337,12 +3648,6 @@ const PlayerRail = ({ secondsLeft }: { secondsLeft: number }) => {
               <strong>{propertyCount}</strong>
               <span className="player-property-unit">полів</span>
             </span>
-            {!player.isBankrupt && borrowedLoanSummary && (
-              <span className="player-status-chip credit player-loan-badge" title={`Непогашений кредит: ${formatMoney(borrowedLoanSummary.due)}`}>
-                <HandCoins size={12} />
-                <span className="player-loan-label">{borrowedLoanSummary.count > 1 ? `Кредит x${borrowedLoanSummary.count}` : 'Кредит'}</span>
-              </span>
-            )}
           </article>
         );
       })}
@@ -3786,7 +4091,9 @@ const CityAssetCard = ({
           <span>Будинок {formatMoney(houseCost)}</span>
         </div>
         <CityRentTable
+          game={game}
           tile={tile}
+          ownerId={player.id}
           currentHouses={property.houses}
           hasDistrict={ownsAllCities(game, player.id, getCityGroup(tile))}
           districtPath={district?.path}
@@ -4590,7 +4897,7 @@ const BoardTradeBuilder = ({
   const requestTiles = draft.requestProperties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
   const offerServiceTiles = player.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile);
   const requestServiceTiles = target ? target.properties.map((tileId) => getTile(tileId)).filter(isPropertyTile) : [];
-  const valueCheck = getTradeValueCheck(draft);
+  const valueCheck = getTradeValueCheck(game, player.id, draft);
   const hasContent =
     draft.offerMoney > 0 ||
     draft.requestMoney > 0 ||
@@ -4875,13 +5182,17 @@ const MoneyInput = ({ value, onChange }: { value: number; onChange: (money: numb
 );
 
 const CityRentTable = ({
+  game,
   tile,
+  ownerId,
   currentHouses,
   hasDistrict = false,
   districtPath,
   compact = false,
 }: {
+  game: GameState;
   tile: CityTile;
+  ownerId: string;
   currentHouses?: number;
   hasDistrict?: boolean;
   districtPath?: DistrictPath;
@@ -4897,13 +5208,13 @@ const CityRentTable = ({
         : currentHouses === 5
           ? 'hotel'
           : `house-${currentHouses}`;
-  const rows = getCityRentRows(tile, districtPath);
+  const rows = getCityRentRows(game, tile, ownerId, districtPath);
 
   return (
     <section className={`city-rent-table ${compact ? 'compact' : ''}`} aria-label={`Таблиця оренди ${tile.name}`}>
       <div className="city-rent-table-head">
         <h4>Оренда</h4>
-        <span>{districtPath === 'oldTown' || districtPath === 'residential' ? 'Знижена оренда' : `Район: ${formatMoney(tile.rents[0] * 2)}`}</span>
+        <span>{districtPath === 'oldTown' || districtPath === 'residential' ? 'Знижена оренда' : `Район: ${formatMoney(rows[1].amount)}`}</span>
       </div>
       <div className="city-rent-grid">
         {rows.map((row) => (
@@ -4917,24 +5228,55 @@ const CityRentTable = ({
   );
 };
 
-const getCityRentRows = (tile: CityTile, districtPath?: DistrictPath) => [
-  { key: 'base', label: 'Без району', amount: tile.rents[0] },
-  { key: 'district', label: 'Район', amount: getDistrictDisplayRent(tile.rents[0] * 2, districtPath) },
-  { key: 'house-1', label: '1 буд.', amount: getDistrictDisplayRent(tile.rents[1], districtPath) },
-  { key: 'house-2', label: '2 буд.', amount: getDistrictDisplayRent(tile.rents[2], districtPath) },
-  { key: 'house-3', label: '3 буд.', amount: getDistrictDisplayRent(tile.rents[3], districtPath) },
-  { key: 'house-4', label: '4 буд.', amount: getDistrictDisplayRent(tile.rents[4], districtPath) },
-  { key: 'hotel', label: 'Готель', amount: getDistrictDisplayRent(tile.rents[5], districtPath) },
+const getCityRentRows = (game: GameState, tile: CityTile, ownerId: string, districtPath?: DistrictPath) => [
+  { key: 'base', label: 'Без району', amount: calculateCityRentPreview(game, tile, ownerId, 0, false) },
+  { key: 'district', label: 'Район', amount: calculateCityRentPreview(game, tile, ownerId, 0, true, districtPath) },
+  { key: 'house-1', label: '1 буд.', amount: calculateCityRentPreview(game, tile, ownerId, 1, true, districtPath) },
+  { key: 'house-2', label: '2 буд.', amount: calculateCityRentPreview(game, tile, ownerId, 2, true, districtPath) },
+  { key: 'house-3', label: '3 буд.', amount: calculateCityRentPreview(game, tile, ownerId, 3, true, districtPath) },
+  { key: 'house-4', label: '4 буд.', amount: calculateCityRentPreview(game, tile, ownerId, 4, true, districtPath) },
+  { key: 'hotel', label: 'Готель', amount: calculateCityRentPreview(game, tile, ownerId, 5, true, districtPath) },
 ];
 
-const getDistrictDisplayRent = (rent: number, districtPath?: DistrictPath) =>
-  districtPath === 'oldTown' || districtPath === 'residential'
-    ? Math.ceil(rent / getDistrictDisplayRentDivisor(districtPath))
-    : rent;
+const calculateCityRentPreview = (
+  game: GameState,
+  tile: CityTile,
+  ownerId: string,
+  houses: number,
+  ownsGroup: boolean,
+  districtPath?: DistrictPath,
+) => {
+  const groupTileIds = boardTiles
+    .filter((candidate): candidate is CityTile => candidate.type === 'city' && candidate.group === tile.group)
+    .map((candidate) => candidate.id);
+  const districtPaths = { ...(game.districtPaths ?? {}) };
+  if (districtPath) {
+    districtPaths[tile.group] = {
+      ownerId,
+      path: districtPath,
+      createdAtTurn: game.turn,
+      creationCost: game.districtPaths?.[tile.group]?.creationCost,
+    };
+  } else {
+    delete districtPaths[tile.group];
+  }
 
-const getDistrictDisplayRentDivisor = (districtPath: DistrictPath) => {
-  if (districtPath === 'residential') return RESIDENTIAL_DISTRICT_RENT_DIVISOR;
-  return DISTRICT_RENT_DIVISOR;
+  const properties = {
+    ...game.properties,
+    ...Object.fromEntries(
+      groupTileIds.map((tileId) => [
+        tileId,
+        {
+          ...game.properties[tileId],
+          ownerId: ownsGroup || tileId === tile.id ? ownerId : undefined,
+          mortgaged: false,
+          houses: tileId === tile.id ? houses : game.properties[tileId]?.houses ?? 0,
+        },
+      ]),
+    ),
+  };
+
+  return calculateRent({ ...game, properties, districtPaths }, tile, game.dice[0] + game.dice[1]);
 };
 
 const CityModal = ({
@@ -5045,6 +5387,10 @@ const CityModal = ({
           </div>
         </div>
 
+        {manager.roleId === 'builder' && !owner && (
+          <BuilderSpecialActions game={game} tile={tile} player={manager} onClose={onClose} dispatch={dispatch} />
+        )}
+
         <div className="city-modal-grid">
           <section className="city-modal-section">
             <h3>Фінанси</h3>
@@ -5068,7 +5414,9 @@ const CityModal = ({
             </dl>
 
             <CityRentTable
+              game={game}
               tile={tile}
+              ownerId={owner?.id ?? manager.id}
               currentHouses={property.houses}
               hasDistrict={ownerHasDistrict}
               districtPath={district?.path}
@@ -5270,6 +5618,10 @@ const ServicePropertyModal = ({
           </div>
         </div>
 
+        {manager.roleId === 'builder' && !owner && (
+          <BuilderSpecialActions game={game} tile={tile} player={manager} onClose={onClose} dispatch={dispatch} />
+        )}
+
         <section className="city-modal-section">
           <h3>Оренда</h3>
           <dl className="city-stats">
@@ -5301,7 +5653,7 @@ const ServicePropertyModal = ({
             </div>
           ) : (
             <p className="rule-note">
-              Оренда сервісу залежить від кидка: один сервіс бере x4 від суми кубиків, два сервіси - x10.
+              Оренда сервісу залежить від кидка: один сервіс бере x6 від суми кубиків, два сервіси - x12.
             </p>
           )}
 
@@ -5342,6 +5694,55 @@ const ServicePropertyModal = ({
         </section>
       </motion.article>
     </div>
+  );
+};
+
+const BuilderSpecialActions = ({
+  game,
+  tile,
+  player,
+  onClose,
+  dispatch,
+}: {
+  game: GameState;
+  tile: PropertyTile;
+  player: Player;
+  onClose: () => void;
+  dispatch: ReturnType<typeof useGameStore.getState>['dispatch'];
+}) => {
+  const buyInfo = getBuilderSpecialPropertyActionInfo(game, player, tile, 'buy');
+  const auctionInfo = getBuilderSpecialPropertyActionInfo(game, player, tile, 'auction');
+  const remoteCost = getBuilderRemotePurchaseCost(game, tile);
+
+  const handleRemoteBuy = () => {
+    if (buyInfo.disabled) return;
+    dispatch({ type: 'builder_buy_property', playerId: player.id, tileId: tile.id });
+    onClose();
+  };
+
+  const handleAuction = () => {
+    if (auctionInfo.disabled) return;
+    dispatch({ type: 'builder_start_auction', playerId: player.id, tileId: tile.id });
+    onClose();
+  };
+
+  return (
+    <section className="builder-special-panel">
+      <div>
+        <strong>Спецдії Будівельника</strong>
+        <span>Кожна дія доступна 1 раз за гру для вільного майна.</span>
+      </div>
+      <div className="builder-special-actions">
+        <button className="primary compact" type="button" disabled={buyInfo.disabled} title={buyInfo.reason} onClick={handleRemoteBuy}>
+          <BadgeDollarSign size={15} />
+          Купити за {formatMoney(remoteCost)}
+        </button>
+        <button className="secondary compact" type="button" disabled={auctionInfo.disabled} title={auctionInfo.reason} onClick={handleAuction}>
+          <Hammer size={15} />
+          Запустити аукціон
+        </button>
+      </div>
+    </section>
   );
 };
 
@@ -5487,6 +5888,37 @@ const getMortgageInfo = (game: GameState, player: Player, tile: PropertyTile) =>
   return { disabled: false, reason: `Викупити за ${formatMoney(cost)}.` };
 };
 
+const getBuilderSpecialPropertyActionInfo = (
+  game: GameState,
+  player: Player,
+  tile: PropertyTile,
+  action: 'buy' | 'auction',
+) => {
+  const property = game.properties[tile.id];
+  const roleState = game.roleState?.[player.id];
+  if (player.roleId !== 'builder') return { disabled: true, reason: 'Ця дія доступна тільки Будівельнику.' };
+  if (game.currentPlayerId !== player.id) return { disabled: true, reason: 'Спецдія доступна тільки під час власного ходу.' };
+  if (game.phase !== 'rolling') return { disabled: true, reason: 'Спецдію можна використати тільки до кидка кубиків.' };
+  if (game.tradeOffers.some((offer) => offer.status === 'pending')) {
+    return { disabled: true, reason: 'Спочатку прийміть або відхиліть активну угоду.' };
+  }
+  if (player.jailTurns > 0) return { disabled: true, reason: 'У вʼязниці не можна використовувати спецдії Будівельника.' };
+  if (property.ownerId) return { disabled: true, reason: 'Майно вже має власника.' };
+  if (roleState?.builderSpecialActionRound === (game.currentRound ?? 1)) {
+    return { disabled: true, reason: 'У цьому раунді спецдію Будівельника уже використано.' };
+  }
+  if (action === 'buy') {
+    if (roleState?.builderRemotePurchaseUsed) {
+      return { disabled: true, reason: 'Купівля з будь-якої точки карти вже використана.' };
+    }
+    const cost = getBuilderRemotePurchaseCost(game, tile);
+    if (player.money < cost) return { disabled: true, reason: `Для купівлі потрібно ${formatMoney(cost)}.` };
+    return { disabled: false, reason: `Купити ${tile.name} за ${formatMoney(cost)}.` };
+  }
+  if (roleState?.builderAuctionUsed) return { disabled: true, reason: 'Вільний аукціон Будівельника уже використано.' };
+  return { disabled: false, reason: `Запустити аукціон на ${tile.name}.` };
+};
+
 const formatTradeSide = (money: number, tileIds: number[], services: RentServiceOffer[] = []) => {
   const parts = [
     ...(money > 0 ? [formatMoney(money)] : []),
@@ -5504,7 +5936,7 @@ const formatRentServiceOffer = (service: RentServiceOffer) =>
 const formatRentServiceDiscount = (service: RentServiceOffer) =>
   service.discountPercent === 100 ? 'без оренди' : '50% оренди';
 
-const getTradeValueCheck = (draft: TradeDraft) => {
+const getTradeValueCheck = (game: GameState, playerId: string, draft: TradeDraft) => {
   const offerValue = draft.offerMoney + draft.offerProperties.reduce((sum, tileId) => sum + getPropertyPrice(tileId), 0);
   const requestValue = draft.requestMoney + draft.requestProperties.reduce((sum, tileId) => sum + getPropertyPrice(tileId), 0);
   const hasProperties = draft.offerProperties.length > 0 || draft.requestProperties.length > 0;
@@ -5512,12 +5944,21 @@ const getTradeValueCheck = (draft: TradeDraft) => {
   if (requestValue <= 0) {
     return { valid: false, offerValue, requestValue, message: 'Майно має мати цінність з обох сторін' };
   }
-  const maximum = Math.floor(requestValue * 3);
+  if (draft.offerProperties.length > 0) {
+    const saleMaximum = getTradePropertySaleLimit(game, playerId, offerValue);
+    if (requestValue > saleMaximum) {
+      return { valid: false, offerValue, requestValue, message: `Максимум перепродажу ${formatMoney(saleMaximum)}` };
+    }
+  }
+  const maximum = Math.floor(requestValue * getTradeValueMultiplier(game, playerId));
   if (offerValue > maximum) {
     return { valid: false, offerValue, requestValue, message: `Максимум ${formatMoney(maximum)}` };
   }
   return { valid: true, offerValue, requestValue, message: 'Баланс угоди в межах правил' };
 };
+
+const getLawyerProtectionsLeft = (game: GameState, playerId: string): number =>
+  Math.max(0, game.roleState?.[playerId]?.lawyerProtectionsLeft ?? LAWYER_TOTAL_PROTECTIONS);
 
 const validateLoanDraft = (
   game: GameState,
@@ -6491,6 +6932,7 @@ const playNoise = (context: AudioContext, duration: number, volume: number, filt
 const useTurnTimer = (
   game: GameState,
   isLocalTurn: boolean,
+  canResolveMayorChoice: boolean,
   dispatch: ReturnType<typeof useGameStore.getState>['dispatch'],
 ) => {
   const timerPhaseKey = getTurnTimerPhaseKey(game);
@@ -6515,12 +6957,26 @@ const useTurnTimer = (
 
   useEffect(() => {
     if (timerState.turnKey !== turnKey) return;
-    if (secondsLeft > 0 || expiredRef.current === turnKey || !isLocalTurn) return;
+    if (secondsLeft > 0 || expiredRef.current === turnKey) return;
 
     const dispatchTimerAction = (action: Parameters<typeof dispatch>[0]) => {
       expiredRef.current = turnKey;
       dispatch(action);
     };
+
+    if (game.phase === 'cityEventChoice' && game.pendingMayorCityEventChoice) {
+      if (!canResolveMayorChoice) return;
+      const fallbackEventId = game.pendingMayorCityEventChoice.options[0];
+      if (!fallbackEventId) return;
+      dispatchTimerAction({
+        type: 'choose_city_event',
+        playerId: game.pendingMayorCityEventChoice.playerId,
+        cityEventId: fallbackEventId,
+      });
+      return;
+    }
+
+    if (!isLocalTurn) return;
 
     if (game.phase === 'orderRoll') {
       dispatchTimerAction({ type: 'roll_for_order', playerId: game.currentPlayerId });
@@ -6545,6 +7001,34 @@ const useTurnTimer = (
 
     if (game.phase === 'casino') {
       if (game.pendingCasino?.spinEndsAt) return;
+      if (game.pendingCasino?.forced === 'gamblerOpening') {
+        const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId);
+        if (!currentPlayer || currentPlayer.money <= 0) return;
+        const multiplier =
+          GAMBLER_OPENING_CASINO_MULTIPLIERS[
+            Math.floor(Math.random() * GAMBLER_OPENING_CASINO_MULTIPLIERS.length)
+          ];
+        dispatchTimerAction({
+          type: 'start_casino_spin',
+          playerId: game.currentPlayerId,
+          amount: currentPlayer.money,
+          multiplier,
+          spinSeed: Math.floor(Math.random() * 1_000_000),
+        });
+        return;
+      }
+      if (game.pendingCasino?.forced === 'cityEvent') {
+        const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId);
+        if (!currentPlayer || currentPlayer.money <= 0) return;
+        dispatchTimerAction({
+          type: 'start_casino_spin',
+          playerId: game.currentPlayerId,
+          amount: Math.min(CASINO_DEFAULT_BET, getCasinoMaxBet(currentPlayer)),
+          multiplier: pickCasinoMultiplier(currentPlayer, false),
+          spinSeed: Math.floor(Math.random() * 1_000_000),
+        });
+        return;
+      }
       dispatchTimerAction({ type: 'skip_casino', playerId: game.currentPlayerId });
       return;
     }
@@ -6562,7 +7046,7 @@ const useTurnTimer = (
     if ((game.phase === 'turnEnd' || game.phase === 'manage' || game.phase === 'trade') && !game.tradeOffers.some((offer) => offer.status === 'pending')) {
       dispatchTimerAction({ type: 'continue_turn', playerId: game.currentPlayerId });
     }
-  }, [dispatch, game, isLocalTurn, secondsLeft, timerState.turnKey, turnKey]);
+  }, [canResolveMayorChoice, dispatch, game, isLocalTurn, secondsLeft, timerState.turnKey, turnKey]);
 
   return secondsLeft;
 };
@@ -6576,9 +7060,11 @@ const getTurnTimerPhaseKey = (game: GameState): string => {
     case 'awaitingJailDecision':
       return `${game.phase}:${game.pendingJail?.playerId ?? 'none'}:${game.pendingJail?.tileId ?? 'none'}`;
     case 'casino':
-      return `${game.phase}:${game.pendingCasino?.playerId ?? 'none'}:${game.pendingCasino?.tileId ?? 'none'}:${game.pendingCasino?.spinStartedAt ?? 'ready'}`;
+      return `${game.phase}:${game.pendingCasino?.playerId ?? 'none'}:${game.pendingCasino?.tileId ?? 'none'}:${game.pendingCasino?.forced ?? 'optional'}:${game.pendingCasino?.spinStartedAt ?? 'ready'}`;
     case 'bankDeposit':
       return `${game.phase}:${game.pendingBankDeposit?.playerId ?? 'none'}:${game.pendingBankDeposit?.tileId ?? 'none'}`;
+    case 'cityEventChoice':
+      return `${game.phase}:${game.pendingMayorCityEventChoice?.playerId ?? 'none'}:${game.pendingMayorCityEventChoice?.eventNumber ?? 0}`;
     case 'payment':
       return `${game.phase}:${game.pendingPayment?.payerId ?? 'none'}:${game.pendingPayment?.amount ?? 0}:${game.pendingPayment?.source ?? 'none'}`;
     case 'rent':

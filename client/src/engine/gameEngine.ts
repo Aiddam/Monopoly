@@ -1,4 +1,4 @@
-import { boardTiles, getTile, isPropertyTile, propertyTiles } from '../data/board';
+import { boardTiles, cityTiles, getTile, isPropertyTile, propertyTiles } from '../data/board';
 import { chanceCards, communityCards } from '../data/cards';
 import { CITY_EVENT_ROUND_INTERVAL, cityEventDefinitions, getCityEventDefinition } from '../data/cityEvents';
 import type {
@@ -21,6 +21,7 @@ import type {
   PendingPayment,
   Player,
   PlayerMatchStats,
+  PlayerRoleState,
   PostMatchAward,
   PostMatchAwardId,
   DistrictMatchStats,
@@ -31,12 +32,49 @@ import type {
   PropertyState,
   PropertyTile,
   RentServiceOffer,
+  RoleId,
   TransferStatSource,
   TradeOffer,
 } from './types';
 import { money } from './economy';
 import { getStartReward } from './startRewards';
 import { getLateGameFineMultiplier, getLateGamePriceMultiplier } from './difficulty';
+import {
+  BANKER_BANK_CARD_WEIGHT_MULTIPLIER,
+  BANKER_RENT_MULTIPLIER,
+  BANKER_STARTING_BANK_TILE_ID,
+  BANKER_WIN_BANKS,
+  BANKER_WIN_DEPOSIT_PAYOUT,
+  BUILDER_BUILDING_REFUND_MULTIPLIER,
+  BUILDER_HOUSE_COST_MULTIPLIER,
+  BUILDER_REMOTE_PURCHASE_MULTIPLIER,
+  BUILDER_WIN_DISTRICTS,
+  CASINO_CHANCE_CARD_ID,
+  COLLECTOR_GROUP_BONUS,
+  COLLECTOR_WIN_NET_WORTH,
+  COLLECTOR_WIN_PROPERTIES,
+  DEFAULT_TRADE_VALUE_MULTIPLIER,
+  GAMBLER_CASINO_CARD_WEIGHT_MULTIPLIER,
+  GAMBLER_CASINO_ZERO_WEIGHT_MULTIPLIER,
+  GAMBLER_OPENING_CASINO_MULTIPLIERS,
+  GAMBLER_STARTING_CASH,
+  GAMBLER_STARTING_CASINO_TILE_ID,
+  GAMBLER_WIN_CASH,
+  LAWYER_FINE_DISCOUNT,
+  LAWYER_RENT_DISCOUNT,
+  LAWYER_TOTAL_PROTECTIONS,
+  LAWYER_WIN_SAVED,
+  MAYOR_CHOOSE_EVENT_INTERVAL,
+  MAYOR_CITY_EVENT_CHOICE_COUNT,
+  MAYOR_WIN_EVENT_INCOME,
+  NEAREST_BANK_CHANCE_CARD_ID,
+  REALTOR_BUILD_COST_MULTIPLIER,
+  REALTOR_STARTING_CITY_COUNT,
+  REALTOR_TRADE_VALUE_MULTIPLIER,
+  REALTOR_WIN_PROFIT,
+  ROLE_DEFINITIONS,
+  ROLE_IDS,
+} from './roles';
 
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 6;
@@ -47,6 +85,7 @@ const MORTGAGE_GRACE_TURNS = 10;
 const UNMORTGAGE_INTEREST_MULTIPLIER = 1.05;
 const AUCTION_DURATION_MS = 15_000;
 export const AUCTION_BID_INCREMENT = money(10);
+const TRADE_MONEY_INCREMENT = money(50);
 const CASINO_MAX_BET = money(600);
 const CASINO_MAX_MULTIPLIER = 6;
 const CASINO_SPIN_DURATION_MS = 5_400;
@@ -120,6 +159,8 @@ const OLD_TOWN_PASS_THROUGH_MESSAGES: Record<string, string> = {
 
 interface CreateInitialGameOptions {
   determineTurnOrder?: boolean;
+  rolesEnabled?: boolean;
+  roleOrder?: RoleId[];
 }
 
 export const createInitialGame = (
@@ -146,23 +187,32 @@ export const createInitialGame = (
     isBankrupt: false,
   }));
 
-  const properties = Object.fromEntries(
+  let properties: GameState['properties'] = Object.fromEntries(
     propertyTiles.map((tile) => [
       tile.id,
       { houses: 0, mortgaged: false, mortgagedAtTurn: undefined, mortgageTurnsLeft: undefined },
     ]),
   );
+  let assignedPlayers: Player[] = players;
+  let roleState: GameState['roleState'];
+  const rolesEnabled = options.rolesEnabled ?? true;
+  if (rolesEnabled && !options.determineTurnOrder) {
+    const assigned = assignRolesAndStartingBenefits(players, properties, options.roleOrder);
+    assignedPlayers = assigned.players;
+    properties = assigned.properties;
+    roleState = assigned.roleState;
+  }
   const moneyHistory = createMoneyHistorySnapshot({
-    players,
+    players: assignedPlayers,
     turn: 1,
     currentRound: 1,
     properties,
   });
 
-  return {
+  const initial: GameState = {
     id,
-    players,
-    currentPlayerId: players[0].id,
+    players: assignedPlayers,
+    currentPlayerId: assignedPlayers[0].id,
     turn: 1,
     currentRound: 1,
     phase: options.determineTurnOrder ? 'orderRoll' : 'rolling',
@@ -181,13 +231,16 @@ export const createInitialGame = (
     rentServices: [],
     rentServiceCooldowns: {},
     bankDeposits: {},
+    rolesEnabled,
+    roleState,
     summaryVotes: {},
-    matchStats: createInitialMatchStats(players),
+    matchStats: createInitialMatchStats(assignedPlayers),
     dice: [1, 1],
     diceRollId: 0,
     doublesInRow: 0,
     moneyHistory: [moneyHistory],
     turnOrderRolls: options.determineTurnOrder ? {} : undefined,
+    pendingRoleOrder: rolesEnabled && options.determineTurnOrder ? options.roleOrder : undefined,
     log: [
       log(
         options.determineTurnOrder
@@ -197,6 +250,104 @@ export const createInitialGame = (
       ),
     ],
   };
+
+  return openGamblerOpeningCasinoIfNeeded(initial);
+};
+
+const createDefaultRoleState = (): PlayerRoleState => ({
+  realtorProfit: 0,
+  lawyerSaved: 0,
+  lawyerProtectionsLeft: LAWYER_TOTAL_PROTECTIONS,
+  collectorBonusReceived: 0,
+  gamblerOpeningSpinDone: false,
+  gamblerOpeningSingleDieRollPending: false,
+  builderRemotePurchaseUsed: false,
+  builderAuctionUsed: false,
+  builderSpecialActionRound: 0,
+  mayorCityEventsSeen: 0,
+  mayorEventIncome: 0,
+});
+
+const getRoleAssignmentOrder = (count: number, roleOrder?: RoleId[]): RoleId[] => {
+  const seen = new Set<RoleId>();
+  const preferred = (roleOrder ?? []).filter((roleId) => {
+    if (!ROLE_IDS.includes(roleId) || seen.has(roleId)) return false;
+    seen.add(roleId);
+    return true;
+  });
+  const remaining = shuffle(ROLE_IDS.filter((roleId) => !seen.has(roleId)));
+  return [...preferred, ...remaining].slice(0, count);
+};
+
+const assignRolesAndStartingBenefits = (
+  players: Player[],
+  properties: GameState['properties'],
+  roleOrder?: RoleId[],
+): { players: Player[]; properties: GameState['properties']; roleState: Record<string, PlayerRoleState> } => {
+  const roles = getRoleAssignmentOrder(players.length, roleOrder);
+  let nextPlayers: Player[] = players.map((player, index) => ({ ...player, roleId: roles[index] }));
+  let nextProperties: GameState['properties'] = { ...properties };
+  const roleState: Record<string, PlayerRoleState> = Object.fromEntries(
+    nextPlayers.map((player) => [player.id, createDefaultRoleState()]),
+  );
+
+  nextPlayers.forEach((player) => {
+    if (player.roleId === 'gambler') {
+      nextPlayers = nextPlayers.map((candidate) =>
+        candidate.id === player.id
+          ? { ...candidate, money: money(GAMBLER_STARTING_CASH), position: GAMBLER_STARTING_CASINO_TILE_ID }
+          : candidate,
+      );
+    }
+    if (player.roleId === 'banker') {
+      const granted = grantStartingProperty(nextPlayers, nextProperties, player.id, BANKER_STARTING_BANK_TILE_ID);
+      nextPlayers = granted.players;
+      nextProperties = granted.properties;
+    }
+    if (player.roleId === 'realtor') {
+      const startingCityIds = pickRealtorStartingCityIds(nextProperties);
+      startingCityIds.forEach((tileId) => {
+        const granted = grantStartingProperty(nextPlayers, nextProperties, player.id, tileId);
+        nextPlayers = granted.players;
+        nextProperties = granted.properties;
+      });
+    }
+  });
+
+  return { players: nextPlayers, properties: nextProperties, roleState };
+};
+
+const grantStartingProperty = (
+  players: Player[],
+  properties: GameState['properties'],
+  playerId: string,
+  tileId: number,
+): { players: Player[]; properties: GameState['properties'] } => {
+  const property = properties[tileId];
+  if (!property || property.ownerId) return { players, properties };
+  return {
+    properties: {
+      ...properties,
+      [tileId]: { ...property, ownerId: playerId },
+    },
+    players: players.map((player) =>
+      player.id === playerId && !player.properties.includes(tileId)
+        ? { ...player, properties: [...player.properties, tileId] }
+        : player,
+    ),
+  };
+};
+
+const pickRealtorStartingCityIds = (properties: GameState['properties']): number[] => {
+  const pickedGroups = new Set<string>();
+  const picked: number[] = [];
+  shuffle(cityTiles).forEach((tile) => {
+    if (picked.length >= REALTOR_STARTING_CITY_COUNT) return;
+    if (properties[tile.id]?.ownerId || pickedGroups.has(tile.group)) return;
+    pickedGroups.add(tile.group);
+    picked.push(tile.id);
+  });
+  return picked;
 };
 
 export const reduceGame = (state: GameState, action: GameAction): GameState => {
@@ -226,6 +377,15 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       break;
     case 'resolve_auction':
       next = resolveAuction(state);
+      break;
+    case 'builder_buy_property':
+      next = builderBuyUnownedProperty(state, action.playerId, action.tileId);
+      break;
+    case 'builder_start_auction':
+      next = builderStartUnownedAuction(state, action.playerId, action.tileId);
+      break;
+    case 'choose_city_event':
+      next = chooseMayorCityEvent(state, action.playerId, action.cityEventId);
       break;
     case 'skip_casino':
       next = skipCasino(state, action.playerId);
@@ -305,6 +465,12 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
     case 'pay_payment_with_deposit':
       next = payPendingPayment(state, action.playerId, { useBankDeposit: true });
       break;
+    case 'use_lawyer_payment_protection':
+      next = useLawyerPaymentProtection(state, action.playerId);
+      break;
+    case 'use_lawyer_rent_protection':
+      next = useLawyerRentProtection(state, action.playerId);
+      break;
     case 'pay_bail':
       next = payBail(state, action.playerId);
       break;
@@ -333,7 +499,7 @@ export const reduceGame = (state: GameState, action: GameAction): GameState => {
       next = state;
   }
 
-  const normalized = normalizeLoans(normalizeBankDeposits(normalizeDistrictPaths(next)));
+  const normalized = normalizeRoleState(normalizeLoans(normalizeBankDeposits(normalizeDistrictPaths(next))));
   const withStats = recordMatchStats(state, normalized, action);
   const completed = maybeFinalizeGame(withStats, action);
   return recordMoneyHistory(state, completed);
@@ -826,8 +992,222 @@ export const maybeFinishBySummaryVotes = (state: GameState): GameState => {
   return finishGame(state, 'summary');
 };
 
+const maybeFinishByRole = (state: GameState): GameState => {
+  if (state.phase === 'finished' || state.roleWin || state.rolesEnabled === false) return state;
+  const winner = state.players.find((player) => !player.isBankrupt && player.roleId && isRoleWinAchieved(state, player));
+  if (!winner?.roleId) return state;
+  const roleWin = {
+    playerId: winner.id,
+    roleId: winner.roleId,
+    achievedAtTurn: state.turn,
+    achievedAtRound: state.currentRound ?? 1,
+    reason: getRoleWinReason(state, winner),
+  };
+  return finishGame(
+    {
+      ...state,
+      roleWin,
+      winnerId: winner.id,
+      winnerIds: [winner.id],
+      log: appendLog(state, `${winner.name} виконує умову ролі "${ROLE_DEFINITIONS[winner.roleId].title}" і перемагає.`, 'good'),
+    },
+    'role',
+  );
+};
+
+const isRoleWinAchieved = (state: GameState, player: Player): boolean => {
+  switch (player.roleId) {
+    case 'gambler':
+      return player.money >= GAMBLER_WIN_CASH;
+    case 'builder':
+      return getBuilderCompletedDistrictCount(state, player.id) >= BUILDER_WIN_DISTRICTS;
+    case 'realtor':
+      return getPlayerRoleState(state, player.id).realtorProfit >= REALTOR_WIN_PROFIT;
+    case 'banker':
+      return (
+        ownedBankCount(state, player.id) >= BANKER_WIN_BANKS &&
+        getBankDepositPayout((state.bankDeposits ?? {})[player.id]) >= BANKER_WIN_DEPOSIT_PAYOUT
+      );
+    case 'lawyer':
+      return getPlayerRoleState(state, player.id).lawyerSaved >= LAWYER_WIN_SAVED;
+    case 'collector':
+      return (
+        getCollectorUniqueRegionCount(state, player.id) >= COLLECTOR_WIN_PROPERTIES &&
+        calculatePlayerWorth(state, player) >= COLLECTOR_WIN_NET_WORTH
+      );
+    case 'mayor':
+      return getPlayerRoleState(state, player.id).mayorEventIncome >= MAYOR_WIN_EVENT_INCOME;
+    default:
+      return false;
+  }
+};
+
+const getRoleWinReason = (state: GameState, player: Player): string => {
+  switch (player.roleId) {
+    case 'gambler':
+      return `${player.name} накопичує ${player.money}₴ кешу.`;
+    case 'builder':
+      return `${player.name} завершує ${getBuilderCompletedDistrictCount(state, player.id)} райони з готелями.`;
+    case 'realtor':
+      return `${player.name} заробляє ${getPlayerRoleState(state, player.id).realtorProfit}₴ вигоди з угод.`;
+    case 'banker':
+      return `${player.name} має ${ownedBankCount(state, player.id)} банки і депозит ${getBankDepositPayout(
+        (state.bankDeposits ?? {})[player.id],
+      )}₴.`;
+    case 'lawyer':
+      return `${player.name} економить ${getPlayerRoleState(state, player.id).lawyerSaved}₴.`;
+    case 'collector':
+      return `${player.name} має ${getCollectorUniqueRegionCount(state, player.id)} унікальних районів і чисту вартість ${calculatePlayerWorth(
+        state,
+        player,
+      )}₴.`;
+    case 'mayor':
+      return `${player.name} заробляє ${getPlayerRoleState(state, player.id).mayorEventIncome}₴ з міських подій.`;
+    default:
+      return 'Умова ролі виконана.';
+  }
+};
+
+export interface RoleProgressItem {
+  label: string;
+  current: number;
+  target: number;
+  done: boolean;
+  detail: string;
+}
+
+export const getRoleProgressItems = (state: GameState, playerId: string): RoleProgressItem[] => {
+  const player = getPlayer(state, playerId);
+  const roleState = getPlayerRoleState(state, playerId);
+  switch (player.roleId) {
+    case 'gambler':
+      return [
+        {
+          label: 'Кеш на рахунку',
+          current: player.money,
+          target: GAMBLER_WIN_CASH,
+          done: player.money >= GAMBLER_WIN_CASH,
+          detail: `${player.money}/${GAMBLER_WIN_CASH}₴`,
+        },
+      ];
+    case 'builder': {
+      const completed = getBuilderCompletedDistrictCount(state, playerId);
+      return [
+        {
+          label: 'Райони з готелями',
+          current: completed,
+          target: BUILDER_WIN_DISTRICTS,
+          done: completed >= BUILDER_WIN_DISTRICTS,
+          detail: `${completed}/${BUILDER_WIN_DISTRICTS}`,
+        },
+      ];
+    }
+    case 'realtor':
+      return [
+        {
+          label: 'Прибуток з угод',
+          current: roleState.realtorProfit,
+          target: REALTOR_WIN_PROFIT,
+          done: roleState.realtorProfit >= REALTOR_WIN_PROFIT,
+          detail: `${roleState.realtorProfit}/${REALTOR_WIN_PROFIT}₴`,
+        },
+      ];
+    case 'banker': {
+      const bankCount = ownedBankCount(state, playerId);
+      const depositPayout = getBankDepositPayout((state.bankDeposits ?? {})[playerId]);
+      return [
+        {
+          label: 'Банки у власності',
+          current: bankCount,
+          target: BANKER_WIN_BANKS,
+          done: bankCount >= BANKER_WIN_BANKS,
+          detail: `${bankCount}/${BANKER_WIN_BANKS}`,
+        },
+        {
+          label: 'Активний депозит',
+          current: depositPayout,
+          target: BANKER_WIN_DEPOSIT_PAYOUT,
+          done: depositPayout >= BANKER_WIN_DEPOSIT_PAYOUT,
+          detail: `${depositPayout}/${BANKER_WIN_DEPOSIT_PAYOUT}₴`,
+        },
+      ];
+    }
+    case 'lawyer':
+      return [
+        {
+          label: 'Зекономлено',
+          current: roleState.lawyerSaved,
+          target: LAWYER_WIN_SAVED,
+          done: roleState.lawyerSaved >= LAWYER_WIN_SAVED,
+          detail: `${roleState.lawyerSaved}/${LAWYER_WIN_SAVED}₴`,
+        },
+        {
+          label: 'Захисти доступні',
+          current: roleState.lawyerProtectionsLeft,
+          target: LAWYER_TOTAL_PROTECTIONS,
+          done: roleState.lawyerProtectionsLeft > 0,
+          detail: `${roleState.lawyerProtectionsLeft}/${LAWYER_TOTAL_PROTECTIONS}`,
+        },
+      ];
+    case 'collector': {
+      const regionCount = getCollectorUniqueRegionCount(state, playerId);
+      const netWorth = calculatePlayerWorth(state, player);
+      return [
+        {
+          label: 'Клітинки в унікальних районах',
+          current: regionCount,
+          target: COLLECTOR_WIN_PROPERTIES,
+          done: regionCount >= COLLECTOR_WIN_PROPERTIES,
+          detail: `${regionCount}/${COLLECTOR_WIN_PROPERTIES}`,
+        },
+        {
+          label: 'Чиста вартість',
+          current: Math.max(0, netWorth),
+          target: COLLECTOR_WIN_NET_WORTH,
+          done: netWorth >= COLLECTOR_WIN_NET_WORTH,
+          detail: `${netWorth}/${COLLECTOR_WIN_NET_WORTH}₴`,
+        },
+        {
+          label: 'Бонуси отримано',
+          current: roleState.collectorBonusReceived,
+          target: 0,
+          done: roleState.collectorBonusReceived > 0,
+          detail: `${roleState.collectorBonusReceived}₴`,
+        },
+      ];
+    }
+    case 'mayor': {
+      const hasPendingChoice = state.pendingMayorCityEventChoice?.playerId === playerId;
+      const choiceProgress = hasPendingChoice
+        ? MAYOR_CHOOSE_EVENT_INTERVAL
+        : roleState.mayorCityEventsSeen % MAYOR_CHOOSE_EVENT_INTERVAL;
+      const eventsToChoice = hasPendingChoice ? 0 : MAYOR_CHOOSE_EVENT_INTERVAL - choiceProgress;
+      return [
+        {
+          label: 'Дохід з подій',
+          current: roleState.mayorEventIncome,
+          target: MAYOR_WIN_EVENT_INCOME,
+          done: roleState.mayorEventIncome >= MAYOR_WIN_EVENT_INCOME,
+          detail: `${roleState.mayorEventIncome}/${MAYOR_WIN_EVENT_INCOME}₴`,
+        },
+        {
+          label: 'До вибору події',
+          current: choiceProgress,
+          target: MAYOR_CHOOSE_EVENT_INTERVAL,
+          done: hasPendingChoice,
+          detail: hasPendingChoice ? 'Вибір зараз' : `${eventsToChoice} до вибору`,
+        },
+      ];
+    }
+    default:
+      return [];
+  }
+};
+
 const maybeFinalizeGame = (state: GameState, action: GameAction): GameState => {
   if (state.phase === 'finished' && !state.postMatch) return finishGame(state, 'survivor');
+  const roleFinished = maybeFinishByRole(state);
+  if (roleFinished.phase === 'finished') return roleFinished;
   const summaryFinished = maybeFinishBySummaryVotes(state);
   if (summaryFinished.phase === 'finished') return summaryFinished;
   if (action.type === 'declare_bankruptcy' || action.type === 'end_turn' || action.type === 'continue_turn') {
@@ -849,8 +1229,12 @@ export const selectAwardIds = (game: GameState): PostMatchAwardId[] => {
     'loanMagnet',
   ];
   const shuffled = shuffleAwardIds(optional, hashString(`${game.id}:${game.players.length}:${game.turn}`));
-  return [...mandatory, ...shuffled.slice(0, 3)];
+  const selected = [...mandatory, ...shuffled.slice(0, 3)];
+  return game.roleWin ? [...selected, 'roleVictory'] : selected;
 };
+
+const BONUS_AWARD_INDEX = 5;
+const BONUS_AWARD_CROWN_VALUE = 5;
 
 export const finishGame = (state: GameState, reason: GameFinishReason): GameState => {
   const finishedState = {
@@ -880,19 +1264,21 @@ export const buildMatchSummary = (game: GameState, reason: GameFinishReason = ga
   const selectedAwardIds = selectAwardIds(game);
   const selectedAwards = selectedAwardIds.map((awardId) => buildAward(game, awardId));
   const survivor = reason === 'survivor' ? game.players.find((player) => !player.isBankrupt) : undefined;
-  const awards: PostMatchAward[] = survivor
-    ? [
-        ...selectedAwards,
-        {
-          id: 'lastSurvivor',
-          title: 'Останній вижив',
-          description: 'Фінальна нагорода за перемогу через вибування суперників.',
-          winnerIds: [survivor.id],
-          value: 1,
-          crown: true,
-        },
-      ]
-    : selectedAwards;
+  const awards: PostMatchAward[] = withAwardCrownValues(
+    survivor
+      ? [
+          ...selectedAwards,
+          {
+            id: 'lastSurvivor',
+            title: 'Останній вижив',
+            description: 'Фінальна нагорода за перемогу через вибування суперників.',
+            winnerIds: [survivor.id],
+            value: 1,
+            crown: true,
+          },
+        ]
+      : selectedAwards,
+  );
   const crownCounts = countCrowns(game.players, awards);
   const players = buildPlayerSummaries(game, crownCounts);
   return {
@@ -909,9 +1295,18 @@ export const buildMatchSummary = (game: GameState, reason: GameFinishReason = ga
     communityCards: Object.entries(game.matchStats?.communityDrawCounts ?? {})
       .map(([cardId, count]) => ({ cardId: Number(cardId), count }))
       .sort((left, right) => right.count - left.count || left.cardId - right.cardId),
-    winnerIds: players.filter((player) => player.rank === 1).map((player) => player.playerId),
+    winnerIds:
+      reason === 'role' && game.roleWin
+        ? [game.roleWin.playerId]
+        : players.filter((player) => player.rank === 1).map((player) => player.playerId),
   };
 };
+
+const withAwardCrownValues = (awards: PostMatchAward[]): PostMatchAward[] =>
+  awards.map((award, index) => ({
+    ...award,
+    crownValue: award.crown ? (index === BONUS_AWARD_INDEX ? BONUS_AWARD_CROWN_VALUE : 1) : 0,
+  }));
 
 const AWARD_TEXT: Record<PostMatchAwardId, { title: string; description: string }> = {
   propertyCount: {
@@ -954,6 +1349,10 @@ const AWARD_TEXT: Record<PostMatchAwardId, { title: string; description: string 
     title: 'Кредитний магнат',
     description: 'Найбільше залучено кредитних коштів.',
   },
+  roleVictory: {
+    title: 'Рольова перемога',
+    description: 'Спеціальна номінація за виконану умову ролі.',
+  },
   lastSurvivor: {
     title: 'Останній вижив',
     description: 'Фінальна нагорода за перемогу через вибування суперників.',
@@ -961,6 +1360,17 @@ const AWARD_TEXT: Record<PostMatchAwardId, { title: string; description: string 
 };
 
 const buildAward = (game: GameState, id: PostMatchAwardId): PostMatchAward => {
+  if (id === 'roleVictory' && game.roleWin) {
+    const definition = ROLE_DEFINITIONS[game.roleWin.roleId];
+    return {
+      id,
+      title: definition.awardTitle,
+      description: game.roleWin.reason,
+      winnerIds: [game.roleWin.playerId],
+      value: 1,
+      crown: true,
+    };
+  }
   const values = game.players.map((player) => ({ playerId: player.id, value: getAwardMetric(game, id, player) }));
   const max = Math.max(...values.map((entry) => entry.value));
   const winnerIds = values.filter((entry) => entry.value === max).map((entry) => entry.playerId);
@@ -997,6 +1407,8 @@ const getAwardMetric = (game: GameState, id: PostMatchAwardId, player: Player): 
       return stats.tradesAccepted;
     case 'loanMagnet':
       return stats.loanPrincipalTaken;
+    case 'roleVictory':
+      return game.roleWin?.playerId === player.id ? 1 : 0;
     case 'lastSurvivor':
       return player.isBankrupt ? 0 : 1;
   }
@@ -1007,7 +1419,7 @@ const countCrowns = (players: Player[], awards: PostMatchAward[]): Record<string
   awards.forEach((award) => {
     if (!award.crown) return;
     award.winnerIds.forEach((playerId) => {
-      counts[playerId] = (counts[playerId] ?? 0) + 1;
+      counts[playerId] = (counts[playerId] ?? 0) + (award.crownValue ?? 1);
     });
   });
   return counts;
@@ -1120,13 +1532,19 @@ const calculatePlayerWorth = (
   getBankDepositPayout((state.bankDeposits ?? {})[player.id]) +
   getLoanNetWorth(state.loans ?? [], player.id);
 
-export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 0): number => {
+export const calculateRent = (
+  state: GameState,
+  tile: PropertyTile,
+  diceTotal = 0,
+  options: { includeMayorEvents?: boolean } = {},
+): number => {
   const ownerId = state.properties[tile.id]?.ownerId;
   if (!ownerId || state.properties[tile.id]?.mortgaged) return 0;
 
   let rent = 0;
   if (tile.type === 'bank') {
     rent = getBankRentForCount(ownedBankCount(state, ownerId));
+    if (getPlayer(state, ownerId).roleId === 'banker') rent *= BANKER_RENT_MULTIPLIER;
   } else if (tile.type === 'utility') {
     const utilityCount = ownedProperties(state, ownerId).filter((owned) => owned.type === 'utility').length;
     rent = diceTotal * (utilityCount === 2 ? money(12) : money(6));
@@ -1137,28 +1555,51 @@ export const calculateRent = (state: GameState, tile: PropertyTile, diceTotal = 
     rent = getDistrictAdjustedCityRent(state, tile, cityRent);
   }
 
-  return ceilMoney(rent * getCityEventRentMultiplier(state, tile));
+  return ceilMoney(rent * getCityEventRentMultiplier(state, tile, options));
 };
 
 export const getEffectivePropertyPrice = (state: GameState, tile: PropertyTile): number =>
   ceilMoney(tile.price * getCityEventPropertyPriceMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
 
+const getEffectivePropertyPriceWithoutMayorEvents = (state: GameState, tile: PropertyTile): number =>
+  ceilMoney(
+    tile.price *
+      getCityEventPropertyPriceMultiplier(state, tile, { includeMayorEvents: false }) *
+      getLateGamePriceMultiplier(state.turn),
+  );
+
 export const getEffectiveHouseCost = (state: GameState, tile: CityTile): number => {
   return ceilMoney(
     tile.houseCost *
       getDistrictHouseCostMultiplier(state, tile) *
+      getRoleHouseCostMultiplier(state, state.properties[tile.id]?.ownerId) *
       getCityEventHouseCostMultiplier(state, tile) *
       getLateGamePriceMultiplier(state.turn),
   );
 };
 
-export const getEffectiveBuildingRefund = (state: GameState, tile: CityTile): number =>
-  Math.floor(ceilMoney(tile.houseCost * getDistrictHouseCostMultiplier(state, tile)) / 2);
+const getRoleHouseCostMultiplier = (state: GameState, ownerId: string | undefined): number =>
+  ownerId && getPlayer(state, ownerId).roleId === 'builder'
+    ? BUILDER_HOUSE_COST_MULTIPLIER
+    : ownerId && getPlayer(state, ownerId).roleId === 'realtor'
+      ? REALTOR_BUILD_COST_MULTIPLIER
+      : 1;
+
+const getRealtorBuildCostMultiplier = (state: GameState, ownerId: string | undefined): number =>
+  ownerId && getPlayer(state, ownerId).roleId === 'realtor' ? REALTOR_BUILD_COST_MULTIPLIER : 1;
+
+export const getEffectiveBuildingRefund = (state: GameState, tile: CityTile): number => {
+  const baseRefund = Math.floor(ceilMoney(tile.houseCost * getDistrictHouseCostMultiplier(state, tile)) / 2);
+  const ownerId = state.properties[tile.id]?.ownerId;
+  if (!ownerId || getPlayer(state, ownerId).roleId !== 'builder') return baseRefund;
+  return Math.max(baseRefund, Math.floor(getEffectiveHouseCost(state, tile) * BUILDER_BUILDING_REFUND_MULTIPLIER));
+};
 
 export const getDistrictCreationCost = (state: GameState, group: string): number => {
   const groupTiles = cityGroup(group);
   if (groupTiles.length === 0) throw new Error('Unknown city group.');
-  return Math.max(...groupTiles.map((tile) => getDistrictCreationHouseCost(state, tile))) * 2;
+  const ownerId = getCityGroupOwner(state, group);
+  return Math.max(...groupTiles.map((tile) => getDistrictCreationHouseCost(state, tile, ownerId))) * 2;
 };
 
 export const getEffectiveMortgageValue = (state: GameState, tile: PropertyTile): number => {
@@ -1250,8 +1691,13 @@ const ceilMoney = (value: number): number => Math.ceil(value - 1e-6);
 
 const getDistrictPath = (state: GameState, group: string) => (state.districtPaths ?? {})[group];
 
-const getDistrictCreationHouseCost = (state: GameState, tile: CityTile): number =>
-  ceilMoney(tile.houseCost * getCityEventHouseCostMultiplier(state, tile) * getLateGamePriceMultiplier(state.turn));
+const getDistrictCreationHouseCost = (state: GameState, tile: CityTile, ownerId: string | undefined): number =>
+  ceilMoney(
+    tile.houseCost *
+      getRealtorBuildCostMultiplier(state, ownerId) *
+      getCityEventHouseCostMultiplier(state, tile) *
+      getLateGamePriceMultiplier(state.turn),
+  );
 
 const getDistrictMortgageShare = (
   state: GameState,
@@ -1323,21 +1769,96 @@ const applyRentService = (rent: number, service: ActiveRentService | undefined):
 const getActiveCityEventDefinitions = (state: GameState): CityEventDefinition[] =>
   (state.activeCityEvents ?? []).map((event) => getCityEventDefinition(event.id));
 
-const getCityEventRentMultiplier = (state: GameState, tile: PropertyTile): number =>
-  getActiveCityEventDefinitions(state).reduce((multiplier, event) => {
-    const effect = event.effects;
-    if (!effect.rentMultiplier) return multiplier;
-    const matchesGroup = tile.type === 'city' && effect.rentGroups?.includes(tile.group);
-    const matchesType = effect.rentPropertyTypes?.includes(tile.type);
-    return matchesGroup || matchesType ? multiplier * effect.rentMultiplier : multiplier;
+const getActiveCityEventEntries = (state: GameState): Array<ActiveCityEvent & { definition: CityEventDefinition }> =>
+  (state.activeCityEvents ?? []).map((event) => ({ ...event, definition: getCityEventDefinition(event.id) }));
+
+const cityEventAffectsRent = (event: CityEventDefinition, tile: PropertyTile): boolean => {
+  const effect = event.effects;
+  if (!effect.rentMultiplier) return false;
+  const matchesGroup = tile.type === 'city' && effect.rentGroups?.includes(tile.group);
+  const matchesType = effect.rentPropertyTypes?.includes(tile.type);
+  return Boolean(matchesGroup || matchesType);
+};
+
+const cityEventAffectsPropertyPrice = (event: CityEventDefinition, tile: PropertyTile): boolean => {
+  const effect = event.effects;
+  if (!effect.propertyPriceMultiplier) return false;
+  return Boolean(effect.propertyPriceTypes?.includes(tile.type));
+};
+
+const getCityEventRentMultiplier = (
+  state: GameState,
+  tile: PropertyTile,
+  options: { includeMayorEvents?: boolean } = {},
+): number =>
+  getActiveCityEventEntries(state).reduce((multiplier, event) => {
+    if (options.includeMayorEvents === false && event.mayorId) return multiplier;
+    const effect = event.definition.effects;
+    return cityEventAffectsRent(event.definition, tile) ? multiplier * (effect.rentMultiplier ?? 1) : multiplier;
   }, 1);
 
-const getCityEventPropertyPriceMultiplier = (state: GameState, tile: PropertyTile): number =>
-  getActiveCityEventDefinitions(state).reduce((multiplier, event) => {
-    const effect = event.effects;
-    if (!effect.propertyPriceMultiplier) return multiplier;
-    return effect.propertyPriceTypes?.includes(tile.type) ? multiplier * effect.propertyPriceMultiplier : multiplier;
+const getCityEventPropertyPriceMultiplier = (
+  state: GameState,
+  tile: PropertyTile,
+  options: { includeMayorEvents?: boolean } = {},
+): number =>
+  getActiveCityEventEntries(state).reduce((multiplier, event) => {
+    if (options.includeMayorEvents === false && event.mayorId) return multiplier;
+    const effect = event.definition.effects;
+    return cityEventAffectsPropertyPrice(event.definition, tile) ? multiplier * (effect.propertyPriceMultiplier ?? 1) : multiplier;
   }, 1);
+
+const getMayorRentEventId = (state: GameState, tile: PropertyTile): string | undefined =>
+  getActiveCityEventEntries(state).find(
+    (event) => event.mayorId && cityEventAffectsRent(event.definition, tile) && (event.definition.effects.rentMultiplier ?? 1) > 1,
+  )?.mayorId;
+
+const getMayorPropertyPriceEventId = (state: GameState, tile: PropertyTile): string | undefined =>
+  getActiveCityEventEntries(state).find(
+    (event) =>
+      event.mayorId &&
+      cityEventAffectsPropertyPrice(event.definition, tile) &&
+      (event.definition.effects.propertyPriceMultiplier ?? 1) > 1,
+  )?.mayorId;
+
+const getMayorPropertyPriceIncome = (
+  state: GameState,
+  tile: PropertyTile,
+  totalPrice: number,
+): PendingPayment['mayorEventIncome'] | undefined => {
+  const mayorId = getMayorPropertyPriceEventId(state, tile);
+  if (!mayorId) return undefined;
+  const basePrice = getEffectivePropertyPriceWithoutMayorEvents(state, tile);
+  const amount = Math.max(0, totalPrice - basePrice);
+  return amount > 0 ? { playerId: mayorId, amount } : undefined;
+};
+
+const getRentWithMayorEventSplit = (
+  state: GameState,
+  tile: PropertyTile,
+  diceTotal: number,
+  rentService: ActiveRentService | undefined,
+): {
+  amount: number;
+  baseAmount: number;
+  ownerAmount?: number;
+  mayorEventIncome?: PendingPayment['mayorEventIncome'];
+} => {
+  const baseAmount = calculateRent(state, tile, diceTotal);
+  const amount = applyRentService(baseAmount, rentService);
+  const mayorId = getMayorRentEventId(state, tile);
+  if (!mayorId) return { amount, baseAmount };
+  const baseWithoutMayor = calculateRent(state, tile, diceTotal, { includeMayorEvents: false });
+  const amountWithoutMayor = applyRentService(baseWithoutMayor, rentService);
+  const mayorAmount = Math.max(0, amount - amountWithoutMayor);
+  if (mayorAmount <= 0) return { amount, baseAmount };
+  return {
+    amount,
+    baseAmount,
+    ownerAmount: amount - mayorAmount,
+    mayorEventIncome: { playerId: mayorId, amount: mayorAmount },
+  };
+};
 
 const getCityEventHouseCostMultiplier = (state: GameState, tile: CityTile): number =>
   getActiveCityEventDefinitions(state).reduce((multiplier, event) => {
@@ -1352,11 +1873,23 @@ const getCityEventFineMultiplier = (state: GameState): number =>
 
 const getCityEventStepFee = (state: GameState, steps: number): number => {
   if (steps <= 0) return 0;
-  const feePerStep = getActiveCityEventDefinitions(state).reduce(
-    (total, event) => total + (event.effects.stepFeePerMove ?? 0),
+  const feePerStep = getActiveCityEventEntries(state).reduce(
+    (total, event) => total + (event.definition.effects.stepFeePerMove ?? 0),
     0,
   );
   return feePerStep > 0 ? ceilMoney(feePerStep * steps) : 0;
+};
+
+const getMayorStepFeeIncome = (state: GameState, steps: number): PendingPayment['mayorEventIncome'] | undefined => {
+  if (steps <= 0) return undefined;
+  const incomeByMayor = new Map<string, number>();
+  getActiveCityEventEntries(state).forEach((event) => {
+    const feePerMove = event.definition.effects.stepFeePerMove ?? 0;
+    if (!event.mayorId || feePerMove <= 0) return;
+    incomeByMayor.set(event.mayorId, (incomeByMayor.get(event.mayorId) ?? 0) + ceilMoney(feePerMove * steps));
+  });
+  const [entry] = incomeByMayor.entries();
+  return entry ? { playerId: entry[0], amount: entry[1] } : undefined;
 };
 
 const hasSingleDieRolls = (state: GameState): boolean =>
@@ -1365,7 +1898,13 @@ const hasSingleDieRolls = (state: GameState): boolean =>
 const isBuildingBlockedByCityEvent = (state: GameState): boolean =>
   getActiveCityEventDefinitions(state).some((event) => event.effects.buildingBlocked);
 
-const getRollDiceCount = (state: GameState): 1 | 2 => (hasSingleDieRolls(state) ? 1 : 2);
+const hasGamblerOpeningSingleDieRoll = (state: GameState): boolean => {
+  const player = state.players.find((candidate) => candidate.id === state.currentPlayerId);
+  return Boolean(player?.roleId === 'gambler' && getPlayerRoleState(state, player.id).gamblerOpeningSingleDieRollPending);
+};
+
+const getRollDiceCount = (state: GameState): 1 | 2 =>
+  hasSingleDieRolls(state) || hasGamblerOpeningSingleDieRoll(state) ? 1 : 2;
 
 const normalizeDiceForRoll = (state: GameState, dice: [number, number]): [number, number] =>
   getRollDiceCount(state) === 1 ? [dice[0], 0] : dice;
@@ -1373,8 +1912,24 @@ const normalizeDiceForRoll = (state: GameState, dice: [number, number]): [number
 const isDoubleDice = (dice: [number, number] | undefined): boolean =>
   Boolean(dice && dice[1] > 0 && dice[0] === dice[1]);
 
-export const getEffectiveFineAmount = (state: GameState, amount: number): number =>
+const getBaseFineAmount = (state: GameState, amount: number): number =>
   ceilMoney(amount * getCityEventFineMultiplier(state) * getLateGameFineMultiplier(state.currentRound ?? state.turn));
+
+export const getEffectiveFineAmount = (state: GameState, amount: number, playerId?: string): number => {
+  const baseAmount = getBaseFineAmount(state, amount);
+  return playerId && getPlayer(state, playerId).roleId === 'lawyer' ? ceilMoney(baseAmount * LAWYER_FINE_DISCOUNT) : baseAmount;
+};
+
+export const applyRoleFineDiscount = (
+  state: GameState,
+  playerId: string,
+  amount: number,
+): { state: GameState; amount: number; saved: number } => {
+  const baseAmount = getBaseFineAmount(state, amount);
+  const discountedAmount = getPlayer(state, playerId).roleId === 'lawyer' ? ceilMoney(baseAmount * LAWYER_FINE_DISCOUNT) : baseAmount;
+  const saved = Math.max(0, baseAmount - discountedAmount);
+  return { state: addRoleSavings(state, playerId, saved), amount: discountedAmount, saved };
+};
 
 export const diceRotationForValue = (value: number): [number, number, number] => {
   const rotations: Record<number, [number, number, number]> = {
@@ -1433,11 +1988,23 @@ const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, num
   const orderText = orderedPlayers
     .map((candidate, index) => `${index + 1}. ${candidate.name} (${(rolls[candidate.id] ?? [0, 0]).join(' + ')})`)
     .join('; ');
+  const roleAssignment =
+    base.rolesEnabled === false
+      ? { players: orderedPlayers, properties: base.properties, roleState: base.roleState }
+      : assignRolesAndStartingBenefits(orderedPlayers, base.properties, base.pendingRoleOrder);
+  const roleText =
+    base.rolesEnabled === false
+      ? ''
+      : ` Ролі: ${roleAssignment.players
+          .map((candidate) => `${candidate.name} - ${ROLE_DEFINITIONS[candidate.roleId!].title}`)
+          .join('; ')}.`;
 
-  return {
+  return openGamblerOpeningCasinoIfNeeded({
     ...base,
-    players: orderedPlayers,
-    currentPlayerId: orderedPlayers[0].id,
+    players: roleAssignment.players,
+    properties: roleAssignment.properties,
+    roleState: roleAssignment.roleState,
+    currentPlayerId: roleAssignment.players[0].id,
     phase: 'rolling',
     turn: 1,
     currentRound: 1,
@@ -1445,8 +2012,9 @@ const rollForTurnOrder = (state: GameState, playerId: string, dice: [number, num
     builtThisRoll: undefined,
     buildsThisRoll: undefined,
     lastOrderRollPlayerId: playerId,
-    log: appendLog(base, `Чергу визначено: ${orderText}. ${orderedPlayers[0].name} починає партію.`, 'good'),
-  };
+    pendingRoleOrder: undefined,
+    log: appendLog(base, `Чергу визначено: ${orderText}. ${roleAssignment.players[0].name} починає партію.${roleText}`, 'good'),
+  });
 };
 
 const rollDice = (state: GameState, playerId: string, dice: [number, number]): GameState => {
@@ -1455,6 +2023,7 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
   if (hasPendingTrade(state)) throw new Error('Спочатку прийміть або відхиліть активну угоду.');
 
   const player = getPlayer(state, playerId);
+  const usesOpeningSingleDieRoll = hasGamblerOpeningSingleDieRoll(state);
   const normalizedDice = normalizeDiceForRoll(state, dice);
   const isSingleDieRoll = normalizedDice[1] <= 0;
   const isDouble = isDoubleDice(normalizedDice);
@@ -1469,6 +2038,16 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
     builtThisRoll: undefined,
     buildsThisRoll: undefined,
   };
+  if (usesOpeningSingleDieRoll) {
+    next = updatePlayerRoleState(
+      {
+        ...next,
+        log: appendLog(next, `${player.name} кидає один кубик після стартового x4 Азартного гравця.`),
+      },
+      playerId,
+      (roleState) => ({ ...roleState, gamblerOpeningSingleDieRollPending: false }),
+    );
+  }
 
   if (isJailed && !isDouble) {
     const remainingTurns = Math.max(0, player.jailTurns - 1);
@@ -1508,10 +2087,19 @@ const rollDice = (state: GameState, playerId: string, dice: [number, number]): G
   return movePlayer(next, playerId, normalizedDice[0] + normalizedDice[1]);
 };
 
+const getPlayerStartReward = (
+  state: GameState,
+  player: Player,
+  nextPosition: number,
+  isForwardMove: boolean,
+): number => {
+  return getStartReward(player.position, nextPosition, isForwardMove, state.turn, { roleId: player.roleId });
+};
+
 const movePlayer = (state: GameState, playerId: string, steps: number): GameState => {
   const player = getPlayer(state, playerId);
   const nextPosition = (player.position + steps) % boardTiles.length;
-  const startReward = getStartReward(player.position, nextPosition, steps > 0, state.turn);
+  const startReward = getPlayerStartReward(state, player, nextPosition, steps > 0);
   const startRewardText = startReward > 0 ? ` і отримує ${startReward}₴ за Старт` : '';
   let next: GameState = {
     ...state,
@@ -1530,6 +2118,7 @@ const movePlayer = (state: GameState, playerId: string, steps: number): GameStat
   next = addBankDepositTurn(next, playerId, steps);
 
   const stepFee = getCityEventStepFee(next, steps);
+  const mayorStepFeeIncome = getMayorStepFeeIncome(next, steps);
   const oldTownTolls = getOldTownMovementTolls(next, playerId, player.position, nextPosition, steps);
   const oldTownTotal = oldTownTolls.reduce((sum, toll) => sum + toll.amount, 0);
   const movementPayment = stepFee + oldTownTotal;
@@ -1549,7 +2138,11 @@ const movePlayer = (state: GameState, playerId: string, steps: number): GameStat
       amount: movementPayment,
       reason: [stepReason, tollReason].filter(Boolean).join('; '),
       source: oldTownTolls.length > 0 ? 'movement' : 'cityEvent',
-      recipients: oldTownTolls.map((toll) => ({ playerId: toll.ownerId, amount: toll.amount })),
+      recipients: [
+        ...oldTownTolls.map((toll) => ({ playerId: toll.ownerId, amount: toll.amount })),
+        ...(mayorStepFeeIncome ? [mayorStepFeeIncome] : []),
+      ],
+      mayorEventIncome: mayorStepFeeIncome,
       afterPayment: {
         type: 'resolveTile',
         playerId,
@@ -1624,7 +2217,7 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
   const tile = getTile(player.position);
 
   if (tile.type === 'goToJail') {
-    const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
+    const jailFine = getEffectiveFineAmount(state, JAIL_FINE, playerId);
     return {
       ...state,
       phase: 'awaitingJailDecision',
@@ -1658,11 +2251,12 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
   }
 
   if (tile.type === 'casino') {
+    const maxBet = getCasinoMaxBet(player);
     return {
       ...state,
       phase: 'casino',
       pendingCasino: { playerId, tileId: tile.id },
-      log: appendLog(state, `${player.name} зупиняється біля казино і може зробити ставку до ${CASINO_MAX_BET}₴.`),
+      log: appendLog(state, `${player.name} зупиняється біля казино і може зробити ставку до ${maxBet}₴.`),
     };
   }
 
@@ -1686,9 +2280,9 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
     }
 
     if (property.ownerId !== playerId) {
-      const baseRent = calculateRent(state, tile, diceTotal);
       const rentService = findRentService(state, property.ownerId, playerId, tile.id);
-      const rent = applyRentService(baseRent, rentService);
+      const rentSplit = getRentWithMayorEventSplit(state, tile, diceTotal, rentService);
+      const { amount: rent, baseAmount: baseRent } = rentSplit;
       const owner = getPlayer(state, property.ownerId);
       if (rent <= 0) {
         return {
@@ -1711,6 +2305,8 @@ const resolveTile = (state: GameState, playerId: string, diceTotal: number): Gam
           ownerId: property.ownerId,
           tileId: tile.id,
           amount: rent,
+          ownerAmount: rentSplit.ownerAmount,
+          mayorEventIncome: rentSplit.mayorEventIncome,
           originalAmount: rentService ? baseRent : undefined,
           rentServiceId: rentService?.id,
           discountPercent: rentService?.discountPercent,
@@ -1800,9 +2396,10 @@ const buyPendingProperty = (state: GameState, playerId: string): GameState => {
   if (!isPropertyTile(tile)) throw new Error('Цю клітинку не можна купити.');
   const player = getPlayer(state, playerId);
   const price = getEffectivePropertyPrice(state, tile);
+  const mayorIncome = getMayorPropertyPriceIncome(state, tile, price);
   if (player.money < price) throw new Error('Недостатньо грошей.');
 
-  return {
+  const bought: GameState = {
     ...state,
     phase: 'turnEnd',
     pendingPurchaseTileId: undefined,
@@ -1817,13 +2414,23 @@ const buyPendingProperty = (state: GameState, playerId: string): GameState => {
         mortgageTurnsLeft: undefined,
       },
     },
-    players: state.players.map((candidate) =>
-      candidate.id === playerId
-        ? { ...candidate, money: candidate.money - price, properties: [...candidate.properties, tile.id] }
-        : candidate,
+    players: state.players.map((candidate) => {
+      const pays = candidate.id === playerId ? price : 0;
+      const receives = candidate.id === mayorIncome?.playerId ? mayorIncome.amount : 0;
+      const properties = candidate.id === playerId ? [...candidate.properties, tile.id] : candidate.properties;
+      return pays > 0 || receives > 0 || candidate.id === playerId
+        ? { ...candidate, money: candidate.money - pays + receives, properties }
+        : candidate;
+    }),
+    log: appendLog(
+      state,
+      mayorIncome
+        ? `${player.name} купує ${tile.name} за ${price}₴. Націнка події ${mayorIncome.amount}₴ іде Меру.`
+        : `${player.name} купує ${tile.name} за ${price}₴.`,
+      'good',
     ),
-    log: appendLog(state, `${player.name} купує ${tile.name} за ${price}₴.`, 'good'),
   };
+  return addMayorEventIncome(bought, mayorIncome?.playerId, mayorIncome?.amount ?? 0);
 };
 
 const startAuction = (state: GameState, playerId: string): GameState => {
@@ -1899,16 +2506,17 @@ const resolveAuction = (state: GameState): GameState => {
   if (Date.now() < auction.endsAt) throw new Error('Аукціон ще триває.');
 
   if (!auction.highestBidderId) {
-    return {
+    const resolved: GameState = {
       ...state,
       phase: auction.source === 'cityEvent' ? 'rolling' : 'turnEnd',
       auction: undefined,
       log: appendLog(state, `Аукціон за ${getTile(auction.tileId).name} завершено без покупця.`),
     };
+    return auction.source === 'cityEvent' ? openTurnStartCasinoIfNeeded(resolved, resolved.currentPlayerId) : resolved;
   }
 
   const winner = getPlayer(state, auction.highestBidderId);
-  return {
+  let resolved: GameState = {
     ...state,
     phase: auction.source === 'cityEvent' ? 'rolling' : 'turnEnd',
     auction: undefined,
@@ -1921,17 +2529,117 @@ const resolveAuction = (state: GameState): GameState => {
         mortgageTurnsLeft: undefined,
       },
     },
-    players: state.players.map((player) =>
-      player.id === winner.id
-        ? {
-            ...player,
-            money: player.money - auction.highestBid,
-            properties: [...player.properties, auction.tileId],
-          }
-        : player,
-    ),
+    players: state.players.map((player) => {
+      const paysBid = player.id === winner.id;
+      const receivesMayorIncome = auction.sourceMayorId === player.id;
+      if (!paysBid && !receivesMayorIncome) return player;
+      return {
+        ...player,
+        money: player.money - (paysBid ? auction.highestBid : 0) + (receivesMayorIncome ? auction.highestBid : 0),
+        properties: paysBid ? [...player.properties, auction.tileId] : player.properties,
+      };
+    }),
     log: appendLog(state, `${winner.name} виграє аукціон за ${auction.highestBid}₴.`, 'good'),
   };
+
+  if (auction.sourceMayorId) {
+    resolved = addMayorEventIncome(resolved, auction.sourceMayorId, auction.highestBid);
+  }
+
+  return auction.source === 'cityEvent' ? openTurnStartCasinoIfNeeded(resolved, resolved.currentPlayerId) : resolved;
+};
+
+export const getBuilderRemotePurchaseCost = (state: GameState, tile: PropertyTile): number =>
+  ceilMoney(getEffectivePropertyPrice(state, tile) * BUILDER_REMOTE_PURCHASE_MULTIPLIER);
+
+const getBuilderSpecialActionRound = (state: Pick<GameState, 'currentRound'>): number => state.currentRound ?? 1;
+
+const hasBuilderSpecialActionThisRound = (state: Pick<GameState, 'currentRound'>, roleState: PlayerRoleState): boolean =>
+  roleState.builderSpecialActionRound === getBuilderSpecialActionRound(state);
+
+const assertBuilderSpecialPropertyAction = (state: GameState, playerId: string, tileId: number): PropertyTile => {
+  assertCurrent(state, playerId);
+  if (state.phase !== 'rolling') throw new Error('Здібності Будівельника доступні тільки до кидка кубиків.');
+  if (hasPendingTrade(state)) throw new Error('Спочатку прийміть або відхиліть активну угоду.');
+  const player = getPlayer(state, playerId);
+  if (player.roleId !== 'builder') throw new Error('Ця дія доступна тільки Будівельнику.');
+  if (player.jailTurns > 0) throw new Error('У вʼязниці не можна використовувати здібності Будівельника.');
+  const tile = getTile(tileId);
+  if (!isPropertyTile(tile)) throw new Error('Обрати можна тільки майно.');
+  if (state.properties[tile.id]?.ownerId) throw new Error('Майно вже має власника.');
+  return tile;
+};
+
+const builderBuyUnownedProperty = (state: GameState, playerId: string, tileId: number): GameState => {
+  const tile = assertBuilderSpecialPropertyAction(state, playerId, tileId);
+  const roleState = getPlayerRoleState(state, playerId);
+  if (roleState.builderRemotePurchaseUsed) throw new Error('Будівельник уже купував майно з будь-якої точки карти.');
+  if (hasBuilderSpecialActionThisRound(state, roleState)) {
+    throw new Error('Будівельник уже використав спецдію в цьому раунді.');
+  }
+  const player = getPlayer(state, playerId);
+  const cost = getBuilderRemotePurchaseCost(state, tile);
+  if (player.money < cost) throw new Error(`Для купівлі потрібно ${cost}₴.`);
+
+  return updatePlayerRoleState(
+    {
+      ...state,
+      properties: {
+        ...state.properties,
+        [tile.id]: { ...state.properties[tile.id], ownerId: playerId, mortgagedAtTurn: undefined, mortgageTurnsLeft: undefined },
+      },
+      players: state.players.map((candidate) =>
+        candidate.id === playerId
+          ? { ...candidate, money: candidate.money - cost, properties: [...candidate.properties, tile.id] }
+          : candidate,
+      ),
+      log: appendLog(state, `${player.name} купує ${tile.name} як Будівельник за ${cost}₴.`, 'good'),
+    },
+    playerId,
+    (current) => ({
+      ...current,
+      builderRemotePurchaseUsed: true,
+      builderSpecialActionRound: getBuilderSpecialActionRound(state),
+    }),
+  );
+};
+
+const builderStartUnownedAuction = (state: GameState, playerId: string, tileId: number): GameState => {
+  const tile = assertBuilderSpecialPropertyAction(state, playerId, tileId);
+  const roleState = getPlayerRoleState(state, playerId);
+  if (roleState.builderAuctionUsed) throw new Error('Будівельник уже запускав вільний аукціон.');
+  if (hasBuilderSpecialActionThisRound(state, roleState)) {
+    throw new Error('Будівельник уже використав спецдію в цьому раунді.');
+  }
+  const player = getPlayer(state, playerId);
+  const minimumBid = getEffectivePropertyPrice(state, tile);
+  const now = Date.now();
+
+  return updatePlayerRoleState(
+    {
+      ...state,
+      phase: 'auction',
+      pendingPurchaseTileId: undefined,
+      pendingCard: undefined,
+      pendingCardDraw: undefined,
+      auction: {
+        tileId: tile.id,
+        source: 'builder',
+        startedAt: now,
+        endsAt: now + AUCTION_DURATION_MS,
+        minimumBid,
+        highestBid: 0,
+        bids: [],
+      },
+      log: appendLog(state, `${player.name} запускає аукціон Будівельника на ${tile.name}.`),
+    },
+    playerId,
+    (current) => ({
+      ...current,
+      builderAuctionUsed: true,
+      builderSpecialActionRound: getBuilderSpecialActionRound(state),
+    }),
+  );
 };
 
 const skipCasino = (state: GameState, playerId: string): GameState => {
@@ -1940,6 +2648,12 @@ const skipCasino = (state: GameState, playerId: string): GameState => {
     throw new Error('Зараз немає рішення в казино.');
   }
   if (state.pendingCasino.spinEndsAt) throw new Error('Рулетка вже крутиться.');
+  if (isGamblerOpeningCasino(state.pendingCasino)) {
+    throw new Error('Стартову рулетку Азартного гравця не можна пропустити.');
+  }
+  if (isCityEventCasino(state.pendingCasino)) {
+    throw new Error('Рулетку міської події не можна пропустити.');
+  }
 
   const player = getPlayer(state, playerId);
   return {
@@ -1964,8 +2678,8 @@ const startCasinoSpin = (
   if (state.pendingCasino.spinEndsAt) throw new Error('Рулетка вже крутиться.');
 
   const player = getPlayer(state, playerId);
-  const bet = normalizeCasinoBet(player, amount);
-  const resultMultiplier = normalizeCasinoMultiplier(multiplier);
+  const bet = normalizeCasinoBetForPending(state.pendingCasino, player, amount);
+  const resultMultiplier = normalizeCasinoMultiplierForPending(state.pendingCasino, multiplier);
   const now = Date.now();
   return {
     ...state,
@@ -1977,7 +2691,14 @@ const startCasinoSpin = (
       spinStartedAt: now,
       spinEndsAt: now + CASINO_SPIN_DURATION_MS,
     },
-    log: appendLog(state, `${player.name} ставить ${bet}₴ і запускає рулетку.`),
+    log: appendLog(
+      state,
+      isGamblerOpeningCasino(state.pendingCasino)
+        ? `${player.name} ставить весь стартовий баланс ${bet}₴ і запускає рулетку Азартного гравця.`
+        : isCityEventCasino(state.pendingCasino)
+          ? `${player.name} запускає обовʼязкову рулетку міської події зі ставкою ${bet}₴.`
+        : `${player.name} ставить ${bet}₴ і запускає рулетку.`,
+    ),
   };
 };
 
@@ -1988,8 +2709,10 @@ const casinoBet = (state: GameState, playerId: string, amount: number, multiplie
   }
 
   const player = getPlayer(state, playerId);
-  const bet = normalizeCasinoBet(player, amount);
-  const resultMultiplier = normalizeCasinoMultiplier(multiplier);
+  const isOpeningSpin = isGamblerOpeningCasino(state.pendingCasino);
+  const isCityEventSpin = isCityEventCasino(state.pendingCasino);
+  const bet = normalizeCasinoBetForPending(state.pendingCasino, player, amount);
+  const resultMultiplier = normalizeCasinoMultiplierForPending(state.pendingCasino, multiplier);
   if (state.pendingCasino.spinEndsAt && Date.now() < state.pendingCasino.spinEndsAt) {
     throw new Error('Рулетка ще крутиться.');
   }
@@ -2008,9 +2731,10 @@ const casinoBet = (state: GameState, playerId: string, amount: number, multiplie
       : `${player.name} ставить ${bet}₴ у казино: x${resultMultiplier}, виплата ${payout}₴.`;
 
   if (net < 0) {
-    return createPendingPayment(
+    const afterCasino = completeCityEventCasinoSpin(state, playerId);
+    const paymentState = createPendingPayment(
       {
-        ...state,
+        ...afterCasino,
         pendingCasino: undefined,
         log: appendLog(state, text, 'bad'),
       },
@@ -2020,30 +2744,71 @@ const casinoBet = (state: GameState, playerId: string, amount: number, multiplie
         reason: 'програш у казино',
         tileId: state.pendingCasino.tileId,
         source: 'casino',
+        afterPayment: isCityEventSpin ? { type: 'resumeRolling', playerId } : undefined,
       },
     );
+    return isOpeningSpin ? markGamblerOpeningSpinDone(paymentState, playerId, resultMultiplier) : paymentState;
   }
 
-  const nextPlayers = state.players.map((candidate) =>
+  const afterCasino = completeCityEventCasinoSpin(state, playerId);
+  const nextPlayers = afterCasino.players.map((candidate) =>
     candidate.id === playerId ? { ...candidate, money: candidate.money + net } : candidate,
   );
 
-  return {
-    ...state,
-    phase: 'turnEnd',
+  const resolved: GameState = {
+    ...afterCasino,
+    phase: isOpeningSpin || isCityEventSpin ? 'rolling' : 'turnEnd',
     pendingCasino: undefined,
     players: nextPlayers,
     log: appendLog(state, text, net > 0 ? 'good' : net < 0 ? 'bad' : 'neutral'),
   };
+
+  const afterOpening = isOpeningSpin ? markGamblerOpeningSpinDone(resolved, playerId, resultMultiplier) : resolved;
+  return isOpeningSpin ? openTurnStartCasinoIfNeeded(afterOpening, playerId) : afterOpening;
+};
+
+const isGamblerOpeningCasino = (pendingCasino: GameState['pendingCasino']): boolean =>
+  pendingCasino?.forced === 'gamblerOpening';
+
+const isCityEventCasino = (pendingCasino: GameState['pendingCasino']): boolean =>
+  pendingCasino?.forced === 'cityEvent';
+
+const normalizeCasinoBetForPending = (
+  pendingCasino: GameState['pendingCasino'],
+  player: Player,
+  amount: number,
+): number => (isGamblerOpeningCasino(pendingCasino) ? normalizeGamblerOpeningCasinoBet(player, amount) : normalizeCasinoBet(player, amount));
+
+const normalizeGamblerOpeningCasinoBet = (player: Player, amount: number): number => {
+  const bet = Math.floor(amount);
+  const requiredBet = Math.floor(player.money);
+  if (!Number.isFinite(bet) || requiredBet <= 0 || bet !== requiredBet) {
+    throw new Error(`Стартова рулетка Азартного гравця вимагає ставку на весь баланс: ${requiredBet}₴.`);
+  }
+  return bet;
 };
 
 const normalizeCasinoBet = (player: Player, amount: number): number => {
   const bet = Math.floor(amount);
-  const maxBet = Math.min(CASINO_MAX_BET, player.money);
+  const maxBet = getCasinoMaxBet(player);
   if (!Number.isFinite(bet) || bet <= 0 || bet > maxBet) {
     throw new Error(`Ставка має бути від 1 до ${maxBet}₴.`);
   }
   return bet;
+};
+
+export const getCasinoMaxBet = (player: Player): number =>
+  Math.min(player.roleId === 'gambler' ? player.money : CASINO_MAX_BET, player.money);
+
+export const getCasinoSegmentWeight = (player: Player, multiplier: number, baseWeight: number): number =>
+  player.roleId === 'gambler' && multiplier === 0 ? baseWeight * GAMBLER_CASINO_ZERO_WEIGHT_MULTIPLIER : baseWeight;
+
+const normalizeCasinoMultiplierForPending = (pendingCasino: GameState['pendingCasino'], multiplier: number): number => {
+  const resultMultiplier = normalizeCasinoMultiplier(multiplier);
+  if (isGamblerOpeningCasino(pendingCasino) && !GAMBLER_OPENING_CASINO_MULTIPLIERS.includes(resultMultiplier as 2 | 3 | 4)) {
+    throw new Error('Стартова рулетка Азартного гравця має множник x2, x3 або x4.');
+  }
+  return resultMultiplier;
 };
 
 const normalizeCasinoMultiplier = (multiplier: number): number => {
@@ -2107,13 +2872,14 @@ const adminStartCityEvent = (state: GameState, cityEventId: CityEventId): GameSt
   }
 
   const event = getCityEventDefinition(cityEventId);
-  return drawCityEvent(
+  const drawn = drawCityEvent(
     {
       ...state,
       cityEventDeck: [event.id, ...(state.cityEventDeck ?? []).filter((candidate) => candidate !== event.id)],
     },
     { allowDouble: false },
   );
+  return openTurnStartCasinoIfNeeded(drawn, drawn.currentPlayerId);
 };
 
 const payJailFine = (state: GameState, playerId: string): GameState => {
@@ -2123,11 +2889,12 @@ const payJailFine = (state: GameState, playerId: string): GameState => {
   }
 
   const player = getPlayer(state, playerId);
-  const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
+  const fine = applyRoleFineDiscount(state, playerId, JAIL_FINE);
+  const jailFine = fine.amount;
   if (player.money < jailFine) throw new Error('Недостатньо коштів для штрафу.');
 
   return {
-    ...chargePlayer(state, playerId, jailFine),
+    ...chargePlayer(fine.state, playerId, jailFine),
     phase: 'turnEnd',
     doublesInRow: 0,
     pendingJail: undefined,
@@ -2463,7 +3230,7 @@ const validateTradeOffer = (state: GameState, offer: Omit<TradeOffer, 'id' | 'st
   validateTradeProperties(state, offer.requestProperties, to.id);
   validateTradeRentServices(state, offerRentServices, from.id, to.id, offer.offerProperties);
   validateTradeRentServices(state, requestRentServices, to.id, from.id, offer.requestProperties);
-  validateTradeValueRange({
+  validateTradeValueRange(state, {
     ...offer,
     offerRentServices,
     requestRentServices,
@@ -2520,7 +3287,7 @@ const validateTradeRentServices = (
   });
 };
 
-const validateTradeValueRange = (offer: Omit<TradeOffer, 'id' | 'status'> | TradeOffer) => {
+const validateTradeValueRange = (state: GameState, offer: Omit<TradeOffer, 'id' | 'status'> | TradeOffer) => {
   const hasPricedProperty = offer.offerProperties.length > 0 || offer.requestProperties.length > 0;
   if (!hasPricedProperty) return;
 
@@ -2530,11 +3297,27 @@ const validateTradeValueRange = (offer: Omit<TradeOffer, 'id' | 'status'> | Trad
     throw new Error('Обмін майном має мати цінність з обох сторін.');
   }
 
-  const maximum = Math.floor(requestValue * 3);
+  if (offer.offerProperties.length > 0) {
+    const saleMaximum = getTradePropertySaleLimit(state, offer.fromPlayerId, offerValue);
+    if (requestValue > saleMaximum) {
+      throw new Error(`Перепродаж майна занадто дорогий: максимум ${saleMaximum}₴.`);
+    }
+  }
+
+  const maximum = Math.floor(requestValue * getTradeValueMultiplier(state, offer.fromPlayerId));
   if (offerValue > maximum) {
     throw new Error(`Пропозиція занадто велика: максимум ${maximum}₴ з урахуванням майна.`);
   }
 };
+
+export const getTradeValueMultiplier = (state: GameState, playerId: string): number =>
+  getPlayer(state, playerId).roleId === 'realtor' ? REALTOR_TRADE_VALUE_MULTIPLIER : DEFAULT_TRADE_VALUE_MULTIPLIER;
+
+export const getTradePropertySaleLimit = (state: GameState, playerId: string, propertyValue: number): number =>
+  floorTradeMoney(propertyValue * getTradeValueMultiplier(state, playerId));
+
+const floorTradeMoney = (amount: number): number =>
+  Math.max(0, Math.floor(amount / TRADE_MONEY_INCREMENT) * TRADE_MONEY_INCREMENT);
 
 const tradePropertiesValue = (tileIds: number[]): number =>
   tileIds.reduce((sum, tileId) => {
@@ -2557,7 +3340,7 @@ const acceptTrade = (state: GameState, playerId: string, offerId: string): GameS
   next = activateRentServices(next, offer.requestRentServices ?? [], offer.toPlayerId, offer.fromPlayerId);
   const from = getPlayer(state, offer.fromPlayerId);
   const to = getPlayer(state, offer.toPlayerId);
-  return {
+  const accepted: GameState = {
     ...next,
     phase: getTradeResolutionPhase(state),
     tradeOffers: next.tradeOffers.map((candidate) =>
@@ -2565,6 +3348,26 @@ const acceptTrade = (state: GameState, playerId: string, offerId: string): GameS
     ),
     log: appendLog(next, `${to.name} приймає угоду ${from.name}: ${formatTradeOfferLog(offer)}.`, 'good'),
   };
+  return recordRealtorTradeProfit(accepted, offer);
+};
+
+const recordRealtorTradeProfit = (state: GameState, offer: TradeOffer): GameState => {
+  const offerValue = offer.offerMoney + tradePropertiesValue(offer.offerProperties);
+  const requestValue = offer.requestMoney + tradePropertiesValue(offer.requestProperties);
+  return state.players.reduce((next, player) => {
+    if (player.roleId !== 'realtor') return next;
+    const profit =
+      player.id === offer.fromPlayerId
+        ? Math.max(0, requestValue - offerValue)
+        : player.id === offer.toPlayerId
+          ? Math.max(0, offerValue - requestValue)
+          : 0;
+    if (profit <= 0) return next;
+    return updatePlayerRoleState(next, player.id, (roleState) => ({
+      ...roleState,
+      realtorProfit: roleState.realtorProfit + profit,
+    }));
+  }, state);
 };
 
 const activateRentServices = (
@@ -2826,7 +3629,7 @@ const createNextLoanPaymentFromQueue = (
 ): GameState => {
   const [nextPayment, ...remainingQueue] = queue.filter((payment) => payment.amount > 0);
   if (!nextPayment) {
-    return { ...state, phase: 'rolling', pendingPayment: undefined };
+    return openTurnStartCasinoIfNeeded({ ...state, phase: 'rolling', pendingPayment: undefined }, playerId);
   }
   const loan = (state.loans ?? []).find((candidate) => candidate.id === nextPayment.loanId);
   if (!loan || loan.borrowerId !== playerId || loan.remainingDue <= 0) {
@@ -3054,31 +3857,43 @@ const payRent = (state: GameState, playerId: string, options: { useBankDeposit?:
   const tile = getTile(pendingRent.tileId);
   const funding = prepareBankDepositPayment(state, playerId, pendingRent.amount, options.useBankDeposit);
   if (options.useBankDeposit && funding.cashAmount > 0) {
-    return {
+    const splitRecipients = splitPartialAmounts(getPendingRentPaymentEntries(pendingRent), funding.depositUsed);
+    const recipientAmounts = sumRecipientAmounts(splitRecipients.paid);
+    const remainingRent = getPendingRentAfterPartialPayment(pendingRent, funding.cashAmount, splitRecipients.remaining);
+    const mayorPaid = sumMayorRentEntries(splitRecipients.paid);
+    return addMayorEventIncome(
+      {
       ...funding.state,
       phase: 'rent',
-      pendingRent: {
-        ...pendingRent,
-        amount: funding.cashAmount,
-      },
-      players: funding.state.players.map((player) =>
-        player.id === pendingRent.ownerId ? { ...player, money: player.money + funding.depositUsed } : player,
-      ),
+      pendingRent: remainingRent,
+      players: funding.state.players.map((player) => {
+        const received = recipientAmounts.get(player.id) ?? 0;
+        return received > 0 ? { ...player, money: player.money + received } : player;
+      }),
       log: appendLog(
         state,
         `${payer.name} покриває ${funding.depositUsed}₴ оренди з депозиту за ${tile.name}. Залишилось сплатити ${funding.cashAmount}₴ гравцю ${owner.name}.`,
         'bad',
       ),
-    };
+      },
+      pendingRent.mayorEventIncome?.playerId,
+      mayorPaid,
+    );
   }
   if (payer.money < funding.cashAmount) throw new Error('Недостатньо грошей для сплати оренди.');
 
-  return {
+  const rentRecipientEntries = getPendingRentPaymentEntries(pendingRent);
+  const recipientAmounts = sumRecipientAmounts(rentRecipientEntries);
+  const mayorPaid = sumMayorRentEntries(rentRecipientEntries);
+  const mayorRentNote = pendingRent.mayorEventIncome
+    ? ` База власнику: ${pendingRent.ownerAmount ?? pendingRent.amount - pendingRent.mayorEventIncome.amount}₴, націнка Меру: ${pendingRent.mayorEventIncome.amount}₴.`
+    : '';
+  const paid: GameState = {
     ...funding.state,
     players: funding.state.players.map((player) => {
-      if (player.id === playerId) return { ...player, money: player.money - funding.cashAmount };
-      if (player.id === pendingRent.ownerId) return { ...player, money: player.money + pendingRent.amount };
-      return player;
+      const paidAmount = player.id === playerId ? funding.cashAmount : 0;
+      const received = recipientAmounts.get(player.id) ?? 0;
+      return paidAmount > 0 || received > 0 ? { ...player, money: player.money - paidAmount + received } : player;
     }),
     currentPlayerId: pendingRent.unoReverse?.originalTurnPlayerId ?? state.currentPlayerId,
     phase: 'turnEnd',
@@ -3086,13 +3901,119 @@ const payRent = (state: GameState, playerId: string, options: { useBankDeposit?:
     log: appendLog(
       state,
       pendingRent.unoReverse
-        ? `${payer.name} сплачує ${pendingRent.amount}₴ після УНО РЕВЕРС гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`
+        ? `${payer.name} сплачує ${pendingRent.amount}₴ після УНО РЕВЕРС гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.${mayorRentNote}`
         : pendingRent.originalAmount
-          ? `${payer.name} сплачує ${pendingRent.amount}₴ замість ${pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`
-          : `${payer.name} сплачує ${pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.`,
+          ? `${payer.name} сплачує ${pendingRent.amount}₴ замість ${pendingRent.originalAmount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.${mayorRentNote}`
+        : `${payer.name} сплачує ${pendingRent.amount}₴ оренди гравцю ${owner.name} за ${tile.name}${formatBankDepositPaymentSuffix(funding)}.${mayorRentNote}`,
       'bad',
     ),
   };
+  return addMayorEventIncome(paid, pendingRent.mayorEventIncome?.playerId, mayorPaid);
+};
+
+const useLawyerRentProtection = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  const pendingRent = state.pendingRent;
+  if (state.phase !== 'rent' || !pendingRent || pendingRent.payerId !== playerId) {
+    throw new Error('Зараз немає оренди для захисту Юриста.');
+  }
+  if (pendingRent.lawyerProtected) throw new Error('Захист Юриста вже застосовано до цієї оренди.');
+
+  const charged = useLawyerProtectionCharge(state, playerId);
+  const protectedAmount = ceilMoney(pendingRent.amount * (1 - LAWYER_RENT_DISCOUNT));
+  const saved = Math.max(0, pendingRent.amount - protectedAmount);
+  const next = addRoleSavings(charged, playerId, saved);
+  const protectedSplit = getProtectedPendingRentSplit(pendingRent, protectedAmount);
+  const payer = getPlayer(state, playerId);
+  return {
+    ...next,
+    pendingRent: {
+      ...pendingRent,
+      amount: protectedAmount,
+      ownerAmount: protectedSplit.ownerAmount,
+      mayorEventIncome: protectedSplit.mayorEventIncome,
+      originalAmount: pendingRent.originalAmount ?? pendingRent.amount,
+      lawyerProtected: true,
+    },
+    log: appendLog(state, `${payer.name} застосовує захист Юриста: оренду зменшено на ${saved}₴.`, 'good'),
+  };
+};
+
+const useLawyerPaymentProtection = (state: GameState, playerId: string): GameState => {
+  assertCurrent(state, playerId);
+  const payment = state.pendingPayment;
+  if (state.phase !== 'payment' || !payment || payment.payerId !== playerId) {
+    throw new Error('Зараз немає платежу для захисту Юриста.');
+  }
+
+  const charged = useLawyerProtectionCharge(state, playerId);
+  const payer = getPlayer(state, playerId);
+  if (payment.source === 'loan' && payment.loanPayments?.length) {
+    if (!canLawyerProtectLoanPayment(state.loans ?? [], payment.loanPayments)) {
+      throw new Error('Захист Юриста можна використати тільки для банківського кредиту.');
+    }
+    const loanProtection = applyLawyerLoanProtection(charged.loans ?? [], payment.loanPayments);
+    const next = addRoleSavings({ ...charged, loans: loanProtection.loans }, playerId, loanProtection.saved);
+    const protectedLoanState: GameState = {
+      ...next,
+      phase: 'rolling',
+      pendingPayment: undefined,
+      loans: loanProtection.loans,
+      log: appendLog(
+        state,
+        `${payer.name} скасовує платіж банківського кредиту ${payment.amount}₴ через захист Юриста.`,
+        'good',
+      ),
+    };
+    return createNextLoanPaymentFromQueue(protectedLoanState, playerId, payment.loanPaymentQueue ?? []);
+  }
+  const next = addRoleSavings(charged, playerId, payment.amount);
+  const protectedState: GameState = {
+    ...next,
+    phase: 'turnEnd',
+    pendingPayment: undefined,
+    log: appendLog(state, `${payer.name} скасовує платіж ${payment.amount}₴ через захист Юриста: ${payment.reason}.`, 'good'),
+  };
+  if (payment.afterPayment?.type === 'resolveTile') {
+    return resolveTile(protectedState, payment.afterPayment.playerId, payment.afterPayment.diceTotal ?? 0);
+  }
+  if (payment.afterPayment?.type === 'resumeRolling') {
+    return openTurnStartCasinoIfNeeded({ ...protectedState, phase: 'rolling' }, payment.afterPayment.playerId);
+  }
+  return protectedState;
+};
+
+const canLawyerProtectLoanPayment = (
+  loans: ActiveLoan[],
+  loanPayments: NonNullable<PendingPayment['loanPayments']>,
+): boolean => {
+  if (loanPayments.length === 0) return false;
+  const loanById = new Map(loans.map((loan) => [loan.id, loan]));
+  return loanPayments.every((loanPayment) => loanById.get(loanPayment.loanId)?.kind === 'bank');
+};
+
+const applyLawyerLoanProtection = (
+  loans: ActiveLoan[],
+  loanPayments: NonNullable<PendingPayment['loanPayments']>,
+): { loans: ActiveLoan[]; saved: number } => {
+  const dueById = new Map(loanPayments.map((loanPayment) => [loanPayment.loanId, loanPayment.amount]));
+  let saved = 0;
+  const protectedLoans = loans
+    .map((loan) => {
+      const due = dueById.get(loan.id) ?? 0;
+      if (due <= 0) return loan;
+      saved += due;
+      return {
+        ...loan,
+        remainingDue: Math.max(0, loan.remainingDue - due),
+        remainingTurns: Math.max(0, loan.remainingTurns - 1 - (loan.deferredTurns ?? 0)),
+        deferredDue: 0,
+        deferredTurns: 0,
+      };
+    })
+    .filter((loan): loan is ActiveLoan => loan !== undefined && loan.remainingDue > 0);
+
+  return { loans: protectedLoans, saved };
 };
 
 const useUnoReverse = (state: GameState, playerId: string): GameState => {
@@ -3120,6 +4041,12 @@ const useUnoReverse = (state: GameState, playerId: string): GameState => {
       ownerId: playerId,
       tileId: pendingRent.tileId,
       amount: pendingRent.amount,
+      ownerAmount: pendingRent.ownerAmount,
+      mayorEventIncome: pendingRent.mayorEventIncome,
+      originalAmount: pendingRent.originalAmount,
+      rentServiceId: pendingRent.rentServiceId,
+      discountPercent: pendingRent.discountPercent,
+      lawyerProtected: pendingRent.lawyerProtected,
       unoReverse: {
         originalTurnPlayerId,
         eventId: `${state.id}:${state.turn}:${sequence}:${playerId}:${target.id}:${now}`,
@@ -3210,8 +4137,10 @@ const payPendingPayment = (state: GameState, playerId: string, options: { useBan
     const splitRecipients = splitPartialAmounts(payment.recipients, funding.depositUsed);
     const splitLoanPayments = splitPartialAmounts(payment.loanPayments, funding.depositUsed);
     const recipientAmounts = new Map(splitRecipients.paid.map((recipient) => [recipient.playerId, recipient.amount]));
+    const mayorDepositIncome = splitMayorEventIncome(payment.mayorEventIncome, funding.depositUsed);
 
-    return {
+    return addMayorEventIncome(
+      {
       ...funding.state,
       phase: 'payment',
       pendingPayment: {
@@ -3219,6 +4148,7 @@ const payPendingPayment = (state: GameState, playerId: string, options: { useBan
         amount: funding.cashAmount,
         recipients: splitRecipients.remaining,
         loanPayments: splitLoanPayments.remaining,
+        mayorEventIncome: mayorDepositIncome.remaining,
       },
       loans:
         payment.source === 'loan'
@@ -3233,7 +4163,10 @@ const payPendingPayment = (state: GameState, playerId: string, options: { useBan
         `${payer.name} покриває ${funding.depositUsed}₴ з депозиту: ${payment.reason}. Залишилось сплатити ${funding.cashAmount}₴.`,
         'bad',
       ),
-    };
+      },
+      mayorDepositIncome.paid?.playerId,
+      mayorDepositIncome.paid?.amount ?? 0,
+    );
   }
   if (payer.money < funding.cashAmount) throw new Error('Недостатньо грошей для сплати.');
 
@@ -3241,37 +4174,53 @@ const payPendingPayment = (state: GameState, playerId: string, options: { useBan
     return payLoanInstallmentPayment(funding.state, playerId, payment, funding);
   }
 
+  const stateAfterLawyerSavings = addPendingPaymentLawyerSavings(funding.state, payment);
   const recipientAmounts = new Map((payment.recipients ?? []).map((recipient) => [recipient.playerId, recipient.amount]));
-  const paid: GameState = {
-    ...funding.state,
+  const paid: GameState = addMayorEventIncome(
+    {
+    ...stateAfterLawyerSavings,
     phase: 'turnEnd',
     pendingPayment: undefined,
-    players: funding.state.players.map((player) => {
-      if (player.id === playerId) return { ...player, money: player.money - funding.cashAmount };
+    players: stateAfterLawyerSavings.players.map((player) => {
       const received = recipientAmounts.get(player.id) ?? 0;
-      return received > 0 ? { ...player, money: player.money + received } : player;
+      if (player.id !== playerId && received <= 0) return player;
+      return { ...player, money: player.money - (player.id === playerId ? funding.cashAmount : 0) + received };
     }),
     log: appendLog(state, `${payer.name} сплачує ${payment.amount}₴${formatBankDepositPaymentSuffix(funding)}: ${payment.reason}.`, 'bad'),
-  };
+    },
+    payment.mayorEventIncome?.playerId,
+    payment.mayorEventIncome?.amount ?? 0,
+  );
 
   if (payment.afterPayment?.type === 'resolveTile') {
-    return resolveTile(paid, payment.afterPayment.playerId, payment.afterPayment.diceTotal);
+    return resolveTile(paid, payment.afterPayment.playerId, payment.afterPayment.diceTotal ?? 0);
+  }
+  if (payment.afterPayment?.type === 'resumeRolling') {
+    return openTurnStartCasinoIfNeeded({ ...paid, phase: 'rolling' }, payment.afterPayment.playerId);
   }
 
   return paid;
 };
 
+const addPendingPaymentLawyerSavings = (state: GameState, payment: PendingPayment): GameState =>
+  payment.lawyerDiscountSaved && payment.lawyerDiscountSaved > 0
+    ? addRoleSavings(state, payment.payerId, payment.lawyerDiscountSaved)
+    : state;
+
 const payBail = (state: GameState, playerId: string): GameState => {
   assertCurrent(state, playerId);
   const player = getPlayer(state, playerId);
   if (player.jailTurns <= 0) throw new Error('Гравець не у вʼязниці.');
-  const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
-  if (player.money < jailFine && player.jailCards <= 0) throw new Error('Недостатньо коштів.');
   const usesCard = player.jailCards > 0;
+  const fine = usesCard
+    ? { state, amount: getEffectiveFineAmount(state, JAIL_FINE, playerId) }
+    : applyRoleFineDiscount(state, playerId, JAIL_FINE);
+  const jailFine = fine.amount;
+  if (player.money < jailFine && player.jailCards <= 0) throw new Error('Недостатньо коштів.');
   return {
-    ...state,
+    ...fine.state,
     phase: 'rolling',
-    players: state.players.map((candidate) =>
+    players: fine.state.players.map((candidate) =>
       candidate.id === playerId
         ? {
             ...candidate,
@@ -3309,15 +4258,16 @@ const endTurn = (state: GameState, playerId: string): GameState => {
   const stateAfterCityEventTicks = startsNewRound
     ? tickCityEventsForNewRound({ ...stateAfterMortgages, currentRound: nextRound })
     : { ...stateAfterMortgages, currentRound: nextRound };
+  const stateAfterRoundBonuses = startsNewRound ? applyCollectorRoundBonuses(stateAfterCityEventTicks) : stateAfterCityEventTicks;
 
   const next: GameState = {
-    ...stateAfterCityEventTicks,
-    cityEventDeck: stateAfterCityEventTicks.cityEventDeck ?? createCityEventDeck(),
-    cityEventDiscard: stateAfterCityEventTicks.cityEventDiscard ?? [],
-    activeCityEvents: stateAfterCityEventTicks.activeCityEvents ?? [],
+    ...stateAfterRoundBonuses,
+    cityEventDeck: stateAfterRoundBonuses.cityEventDeck ?? createCityEventDeck(),
+    cityEventDiscard: stateAfterRoundBonuses.cityEventDiscard ?? [],
+    activeCityEvents: stateAfterRoundBonuses.activeCityEvents ?? [],
     currentPlayerId: nextPlayer.id,
     currentRound: nextRound,
-    turn: stateAfterCityEventTicks.turn + 1,
+    turn: stateAfterRoundBonuses.turn + 1,
     phase: 'rolling',
     pendingRent: undefined,
     pendingPayment: undefined,
@@ -3328,15 +4278,68 @@ const endTurn = (state: GameState, playerId: string): GameState => {
     buildsThisRoll: undefined,
     pendingCard: undefined,
     pendingCardDraw: undefined,
+    pendingMayorCityEventChoice: undefined,
     doublesInRow: 0,
-    log: appendLog(stateAfterCityEventTicks, `Хід переходить до ${nextPlayer.name}.`),
+    log: appendLog(stateAfterRoundBonuses, `Хід переходить до ${nextPlayer.name}.`),
   };
 
-  const stateAfterRoundStart = startsNewRound && shouldDrawCityEvent(nextRound) ? drawCityEvent(next) : next;
-  return createLoanPaymentIfDue(stateAfterRoundStart, nextPlayer.id);
+  const stateAfterRoundStart = startsNewRound && shouldDrawCityEvent(nextRound) ? startCityEventDraw(next) : next;
+  return prepareTurnStart(stateAfterRoundStart, nextPlayer.id);
 };
 
 const shouldDrawCityEvent = (round: number): boolean => round > 1 && (round - 1) % CITY_EVENT_ROUND_INTERVAL === 0;
+
+const startCityEventDraw = (state: GameState): GameState => {
+  const mayor = state.players.find((player) => !player.isBankrupt && player.roleId === 'mayor');
+  if (!mayor) return drawCityEvent(state);
+  const nextEventNumber = getPlayerRoleState(state, mayor.id).mayorCityEventsSeen + 1;
+  const counted = updatePlayerRoleState(state, mayor.id, (roleState) => ({
+    ...roleState,
+    mayorCityEventsSeen: nextEventNumber,
+  }));
+  if (nextEventNumber % MAYOR_CHOOSE_EVENT_INTERVAL !== 0) return drawCityEvent(counted);
+
+  const options = getMayorCityEventChoiceOptions(counted);
+  return {
+    ...counted,
+    phase: 'cityEventChoice',
+    pendingMayorCityEventChoice: {
+      playerId: mayor.id,
+      options,
+      round: counted.currentRound ?? 1,
+      eventNumber: nextEventNumber,
+    },
+    log: appendLog(counted, `${mayor.name} як Мер обирає міську подію з 3 варіантів.`, 'good'),
+  };
+};
+
+const applyCollectorRoundBonuses = (state: GameState): GameState => {
+  let next = state;
+  state.players.forEach((player) => {
+    if (player.isBankrupt || player.roleId !== 'collector') return;
+    const groupCount = getOwnedCityGroupCount(next, player.id);
+    const bonus = groupCount * COLLECTOR_GROUP_BONUS;
+    if (bonus <= 0) return;
+    next = updatePlayerRoleState(
+      {
+        ...next,
+        players: next.players.map((candidate) =>
+          candidate.id === player.id ? { ...candidate, money: candidate.money + bonus } : candidate,
+        ),
+      },
+      player.id,
+      (roleState) => ({
+        ...roleState,
+        collectorBonusReceived: roleState.collectorBonusReceived + bonus,
+      }),
+    );
+    next = {
+      ...next,
+      log: appendLog(next, `${player.name} отримує ${bonus}₴ бонусу Колекціонера за ${groupCount} районів.`, 'good'),
+    };
+  });
+  return next;
+};
 
 const tickCityEventsForNewRound = (state: GameState): GameState => {
   const expiredEvents: ActiveCityEvent[] = [];
@@ -3401,10 +4404,12 @@ const getVisiblePendingCityEvent = (
 
 interface DrawCityEventOptions {
   allowDouble?: boolean;
+  mayorId?: string;
 }
 
 const drawCityEvent = (state: GameState, options: DrawCityEventOptions = {}): GameState => {
   const allowDouble = options.allowDouble ?? true;
+  const mayorId = options.mayorId;
   const cityEventDeck = state.cityEventDeck?.length ? state.cityEventDeck : createCityEventDeck(state.cityEventDiscard ?? []);
   const [eventId, ...restDeck] = cityEventDeck;
   const event = getCityEventDefinition(eventId);
@@ -3414,19 +4419,19 @@ const drawCityEvent = (state: GameState, options: DrawCityEventOptions = {}): Ga
   const secondaryEvent = secondaryEventId ? getCityEventDefinition(secondaryEventId) : undefined;
   const events = secondaryEvent ? [event, secondaryEvent] : [event];
   const nextDeck = secondaryEventId ? removeFirstCityEventId(restDeck, secondaryEventId) : restDeck;
-  const activeCityEvents = activateCityEvents(state.activeCityEvents ?? [], events, state.currentRound ?? 1);
+  const activeCityEvents = activateCityEvents(state.activeCityEvents ?? [], events, state.currentRound ?? 1, mayorId);
   const nextBeforeStartEffects: GameState = {
     ...state,
     cityEventDeck: nextDeck,
     cityEventDiscard: [...(state.cityEventDiscard ?? []), ...events.map((cityEvent) => cityEvent.id)],
     activeCityEvents,
-    pendingCityEvent: createPendingCityEvent(events, state.currentRound ?? 1),
+    pendingCityEvent: createPendingCityEvent(events, state.currentRound ?? 1, mayorId),
     log: appendLog(state, formatCityEventDrawLog(events), 'good'),
   };
-  const next = events.reduce((current, cityEvent) => applyCityEventStartEffects(current, cityEvent), nextBeforeStartEffects);
+  const next = events.reduce((current, cityEvent) => applyCityEventStartEffects(current, cityEvent, mayorId), nextBeforeStartEffects);
   const auctionEvent = events.find((cityEvent) => cityEvent.effects.startAuctionOnUnowned);
 
-  return auctionEvent ? startCityEventAuction(next, auctionEvent) : next;
+  return auctionEvent ? startCityEventAuction(next, auctionEvent, mayorId) : next;
 };
 
 const shouldDrawDoubleCityEvent = (
@@ -3460,6 +4465,7 @@ const activateCityEvents = (
   activeCityEvents: ActiveCityEvent[],
   events: CityEventDefinition[],
   currentRound: number,
+  mayorId?: string,
 ): ActiveCityEvent[] =>
   events.reduce((active, event) => {
     if (event.durationRounds <= 0) return active;
@@ -3470,11 +4476,12 @@ const activateCityEvents = (
         remainingRounds: event.durationRounds,
         durationRounds: event.durationRounds,
         startedRound: currentRound,
+        mayorId,
       },
     ];
   }, activeCityEvents);
 
-const createPendingCityEvent = (events: CityEventDefinition[], round: number): GameState['pendingCityEvent'] => {
+const createPendingCityEvent = (events: CityEventDefinition[], round: number, mayorId?: string): GameState['pendingCityEvent'] => {
   const [primary, secondary] = events;
   return {
     id: primary.id,
@@ -3489,6 +4496,7 @@ const createPendingCityEvent = (events: CityEventDefinition[], round: number): G
         }
       : undefined,
     isDouble: events.length > 1,
+    mayorId,
   };
 };
 
@@ -3498,24 +4506,52 @@ const formatCityEventDrawLog = (events: CityEventDefinition[]): string => {
   return `Подвійна подія міста: ${primary.title} + ${secondary.title}. ${primary.text} ${secondary.text}`;
 };
 
-const applyCityEventStartEffects = (state: GameState, event: CityEventDefinition): GameState => {
+const applyCityEventStartEffects = (state: GameState, event: CityEventDefinition, mayorId?: string): GameState => {
+  let next = event.effects.sendAllToCasino ? sendAllPlayersToCasinoForCityEvent(state, event) : state;
   const cashPaymentPercent = event.effects.cashPaymentPercent;
-  if (!cashPaymentPercent) return state;
+  if (!cashPaymentPercent) return next;
 
-  const payments = state.players.map((player) =>
+  const payments = next.players.map((player) =>
     player.isBankrupt ? 0 : Math.max(0, Math.min(player.money, ceilMoney(Math.max(0, player.money) * cashPaymentPercent))),
   );
   const total = payments.reduce((sum, payment) => sum + payment, 0);
-  if (total <= 0) return state;
+  if (total <= 0) return next;
 
+  const charged: GameState = {
+    ...next,
+    players: next.players.map((player, index) => ({
+      ...player,
+      money: player.money - payments[index] + (mayorId && player.id === mayorId ? total : 0),
+    })),
+    log: appendLog(
+      next,
+      mayorId
+        ? `${event.title}: гравці сплачують ${total}₴, кошти отримує Мер.`
+        : `${event.title}: гравці сплачують банку разом ${total}₴.`,
+      'bad',
+    ),
+  };
+
+  return mayorId ? addMayorEventIncome(charged, mayorId, total) : charged;
+};
+
+const sendAllPlayersToCasinoForCityEvent = (state: GameState, event: CityEventDefinition): GameState => {
+  const casinoPlayerIds = state.players.filter((player) => !player.isBankrupt).map((player) => player.id);
+  if (casinoPlayerIds.length === 0) return state;
+  const pendingIds = Array.from(new Set([...(state.pendingCityEventCasinoPlayerIds ?? []), ...casinoPlayerIds]));
   return {
     ...state,
-    players: state.players.map((player, index) => ({ ...player, money: player.money - payments[index] })),
-    log: appendLog(state, `${event.title}: гравці сплачують банку разом ${total}₴.`, 'bad'),
+    pendingCityEventCasinoPlayerIds: pendingIds,
+    players: state.players.map((player) =>
+      casinoPlayerIds.includes(player.id)
+        ? { ...player, position: GAMBLER_STARTING_CASINO_TILE_ID, jailTurns: 0 }
+        : player,
+    ),
+    log: appendLog(state, `${event.title}: усі гравці переміщуються в казино і мають прокрутити рулетку на своєму ході.`, 'good'),
   };
 };
 
-const startCityEventAuction = (state: GameState, event: CityEventDefinition): GameState => {
+const startCityEventAuction = (state: GameState, event: CityEventDefinition, mayorId?: string): GameState => {
   const availableTiles = propertyTiles.filter((tile) => !state.properties[tile.id]?.ownerId);
   if (availableTiles.length === 0) {
     return {
@@ -3538,6 +4574,7 @@ const startCityEventAuction = (state: GameState, event: CityEventDefinition): Ga
     auction: {
       tileId: tile.id,
       source: 'cityEvent',
+      sourceMayorId: mayorId,
       startedAt: now,
       endsAt: now + AUCTION_DURATION_MS,
       minimumBid,
@@ -3546,6 +4583,41 @@ const startCityEventAuction = (state: GameState, event: CityEventDefinition): Ga
     },
     log: appendLog(state, `${event.title}: аукціон на ${tile.name} зі стартом ${minimumBid}₴.`),
   };
+};
+
+const getMayorCityEventChoiceOptions = (state: GameState): CityEventId[] => {
+  const deck = state.cityEventDeck?.length ? state.cityEventDeck : createCityEventDeck(state.cityEventDiscard ?? []);
+  const options: CityEventId[] = [];
+  [...deck, ...cityEventDefinitions.map((event) => event.id)].forEach((eventId) => {
+    if (options.length >= MAYOR_CITY_EVENT_CHOICE_COUNT || options.includes(eventId)) return;
+    options.push(eventId);
+  });
+  return options;
+};
+
+const chooseMayorCityEvent = (state: GameState, playerId: string, cityEventId: CityEventId): GameState => {
+  const choice = state.pendingMayorCityEventChoice;
+  if (state.phase !== 'cityEventChoice' || !choice) throw new Error('Зараз немає вибору міської події.');
+  if (choice.playerId !== playerId) throw new Error('Обрати подію може тільки Мер.');
+  const mayor = getPlayer(state, playerId);
+  if (mayor.roleId !== 'mayor' || mayor.isBankrupt) throw new Error('Обрати подію може тільки активний Мер.');
+  if (!choice.options.includes(cityEventId)) throw new Error('Цієї події немає серед варіантів Мера.');
+
+  const deck = state.cityEventDeck?.length ? state.cityEventDeck : createCityEventDeck(state.cityEventDiscard ?? []);
+  const deckWithoutChoice = removeFirstCityEventId(deck, cityEventId);
+  return prepareTurnStart(
+    drawCityEvent(
+      {
+        ...state,
+        phase: 'rolling',
+        pendingMayorCityEventChoice: undefined,
+        cityEventDeck: [cityEventId, ...deckWithoutChoice],
+        log: appendLog(state, `${mayor.name} обирає міську подію: ${getCityEventDefinition(cityEventId).title}.`, 'good'),
+      },
+      { allowDouble: false, mayorId: playerId },
+    ),
+    state.currentPlayerId,
+  );
 };
 
 const tickRentServicesForPlayer = (state: GameState, playerId: string): GameState => {
@@ -3643,6 +4715,7 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
       pendingCard: undefined,
       pendingPurchaseTileId: undefined,
       pendingCardDraw: undefined,
+      pendingMayorCityEventChoice: undefined,
       log: appendLog(state, `${player.name} викинув дубль і може кидати ще раз.`, 'good'),
     };
   }
@@ -3651,6 +4724,9 @@ const continueTurn = (state: GameState, playerId: string): GameState => {
 };
 
 const declareBankruptcy = (state: GameState, playerId: string): GameState => {
+  if (state.pendingCasino?.playerId === playerId && isGamblerOpeningCasino(state.pendingCasino)) {
+    throw new Error('Спочатку потрібно завершити стартову рулетку Азартного гравця.');
+  }
   const debtor = getPlayer(state, playerId);
   const pendingRent = state.pendingRent?.payerId === playerId ? state.pendingRent : undefined;
   const isPendingPaymentPayer = state.pendingPayment?.payerId === playerId;
@@ -3658,10 +4734,16 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   const pendingBankDeposit = state.pendingBankDeposit?.playerId === playerId ? state.pendingBankDeposit : undefined;
   const collateralTransfers = getBankruptcyCollateralTransfers(state, playerId);
   const loanBankPayouts = getBankruptcyLoanBankPayouts(state, playerId);
+  const pendingRentPaymentEntries = pendingRent ? getPendingRentPaymentEntries(pendingRent) : undefined;
   const creditorPayments = distributeCreditorPayments(
     debtor.money,
-    pendingRent ? [{ playerId: pendingRent.ownerId, amount: pendingRent.amount }] : pendingPayment?.recipients ?? [],
+    pendingRentPaymentEntries?.map((entry) => ({ playerId: entry.playerId, amount: entry.amount })) ??
+      pendingPayment?.recipients ??
+      [],
   );
+  const mayorRentBankruptcyIncome = pendingRentPaymentEntries
+    ? sumMayorRentEntries(splitPartialAmounts(pendingRentPaymentEntries, debtor.money).paid)
+    : 0;
   const shouldAdvanceTurn = state.currentPlayerId === playerId || Boolean(pendingRent) || isPendingPaymentPayer || Boolean(pendingBankDeposit);
   let next: GameState = {
     ...state,
@@ -3698,6 +4780,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
     pendingRent: pendingRent ? undefined : state.pendingRent,
     pendingPayment: isPendingPaymentPayer ? undefined : state.pendingPayment,
     pendingBankDeposit: pendingBankDeposit ? undefined : state.pendingBankDeposit,
+    pendingCityEventCasinoPlayerIds: (state.pendingCityEventCasinoPlayerIds ?? []).filter((id) => id !== playerId),
     pendingJail: state.pendingJail?.playerId === playerId ? undefined : state.pendingJail,
     rentServices: (state.rentServices ?? []).filter(
       (service) => service.ownerId !== playerId && service.beneficiaryId !== playerId,
@@ -3734,7 +4817,7 @@ const declareBankruptcy = (state: GameState, playerId: string): GameState => {
   } else {
     next = endTurn({ ...next, phase: 'turnEnd' }, playerId);
   }
-  return next;
+  return addMayorEventIncome(next, pendingRent?.mayorEventIncome?.playerId, mayorRentBankruptcyIncome);
 };
 
 const distributeCreditorPayments = (
@@ -3883,7 +4966,7 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
   const player = getPlayer(state, playerId);
   const tile = getTile(player.position);
   if (tile.type === 'goToJail') {
-    const jailFine = getEffectiveFineAmount(state, JAIL_FINE);
+    const jailFine = getEffectiveFineAmount(state, JAIL_FINE, playerId);
     return {
       ...state,
       phase: 'awaitingJailDecision',
@@ -3913,9 +4996,9 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
       if (depositDecision) return depositDecision;
     }
     if (property.ownerId !== playerId) {
-      const baseRent = calculateRent(state, tile, state.dice[0] + state.dice[1]);
       const rentService = findRentService(state, property.ownerId, playerId, tile.id);
-      const rent = applyRentService(baseRent, rentService);
+      const rentSplit = getRentWithMayorEventSplit(state, tile, state.dice[0] + state.dice[1], rentService);
+      const { amount: rent, baseAmount: baseRent } = rentSplit;
       const owner = getPlayer(state, property.ownerId);
       if (rent <= 0) {
         return rentService
@@ -3933,6 +5016,8 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
           ownerId: property.ownerId,
           tileId: tile.id,
           amount: rent,
+          ownerAmount: rentSplit.ownerAmount,
+          mayorEventIncome: rentSplit.mayorEventIncome,
           originalAmount: rentService ? baseRent : undefined,
           rentServiceId: rentService?.id,
           discountPercent: rentService?.discountPercent,
@@ -3948,11 +5033,12 @@ const resolveTileAfterCard = (state: GameState, playerId: string): GameState => 
     }
   }
   if (tile.type === 'casino') {
+    const maxBet = getCasinoMaxBet(player);
     return {
       ...state,
       phase: 'casino',
       pendingCasino: { playerId, tileId: tile.id },
-      log: appendLog(state, `${player.name} зупиняється біля казино і може зробити ставку до ${CASINO_MAX_BET}₴.`),
+      log: appendLog(state, `${player.name} зупиняється біля казино і може зробити ставку до ${maxBet}₴.`),
     };
   }
   return state;
@@ -3967,6 +5053,7 @@ const sendToJail = (state: GameState, playerId: string, message: string): GameSt
   pendingPurchaseTileId: undefined,
   pendingPayment: undefined,
   pendingBankDeposit: undefined,
+  pendingMayorCityEventChoice: undefined,
   players: state.players.map((player) =>
     player.id === playerId ? { ...player, position: 10, jailTurns: JAIL_TURNS } : player,
   ),
@@ -3982,27 +5069,110 @@ const transfer = (state: GameState, fromId: string, toId: string, amount: number
   }),
 });
 
+type PendingRentPaymentEntry = {
+  playerId: string;
+  amount: number;
+  rentPart: 'owner' | 'mayor';
+};
+
+const getPendingRentPaymentEntries = (pendingRent: NonNullable<GameState['pendingRent']>): PendingRentPaymentEntry[] => {
+  const mayorAmount = pendingRent.mayorEventIncome?.amount ?? 0;
+  const ownerAmount = Math.max(0, pendingRent.ownerAmount ?? pendingRent.amount - mayorAmount);
+  const entries: PendingRentPaymentEntry[] = [
+    { playerId: pendingRent.ownerId, amount: ownerAmount, rentPart: 'owner' },
+    ...(pendingRent.mayorEventIncome ? [{ ...pendingRent.mayorEventIncome, rentPart: 'mayor' as const }] : []),
+  ];
+  return entries.filter((entry) => entry.amount > 0);
+};
+
+const getPendingRentAfterPartialPayment = (
+  pendingRent: NonNullable<GameState['pendingRent']>,
+  amount: number,
+  remainingEntries: PendingRentPaymentEntry[],
+): NonNullable<GameState['pendingRent']> => {
+  const ownerAmount = remainingEntries.find((entry) => entry.rentPart === 'owner')?.amount ?? 0;
+  const mayorEntry = remainingEntries.find((entry) => entry.rentPart === 'mayor');
+  return {
+    ...pendingRent,
+    amount,
+    ownerAmount: mayorEntry ? ownerAmount : undefined,
+    mayorEventIncome: mayorEntry ? { playerId: mayorEntry.playerId, amount: mayorEntry.amount } : undefined,
+  };
+};
+
+const getProtectedPendingRentSplit = (
+  pendingRent: NonNullable<GameState['pendingRent']>,
+  protectedAmount: number,
+): Pick<NonNullable<GameState['pendingRent']>, 'ownerAmount' | 'mayorEventIncome'> => {
+  if (!pendingRent.mayorEventIncome || protectedAmount <= 0 || pendingRent.amount <= 0) {
+    return { ownerAmount: undefined, mayorEventIncome: undefined };
+  }
+  const scale = protectedAmount / pendingRent.amount;
+  const mayorAmount = Math.min(protectedAmount, Math.floor(pendingRent.mayorEventIncome.amount * scale));
+  return {
+    ownerAmount: protectedAmount - mayorAmount,
+    mayorEventIncome:
+      mayorAmount > 0 ? { playerId: pendingRent.mayorEventIncome.playerId, amount: mayorAmount } : undefined,
+  };
+};
+
+const sumRecipientAmounts = (entries: Array<{ playerId: string; amount: number }>): Map<string, number> => {
+  const amounts = new Map<string, number>();
+  entries.forEach((entry) => {
+    if (entry.amount <= 0) return;
+    amounts.set(entry.playerId, (amounts.get(entry.playerId) ?? 0) + entry.amount);
+  });
+  return amounts;
+};
+
+const sumMayorRentEntries = (entries: PendingRentPaymentEntry[]): number =>
+  entries.reduce((total, entry) => total + (entry.rentPart === 'mayor' ? entry.amount : 0), 0);
+
 const createPendingPayment = (state: GameState, payment: PendingPayment): GameState => {
-  const amount = Math.floor(payment.source === 'tax' ? getEffectiveFineAmount(state, payment.amount) : payment.amount);
+  const discounted = applyPendingPaymentRoleDiscount(state, payment);
+  const amount = discounted.amount;
   if (!Number.isFinite(amount) || amount <= 0) {
     return {
-      ...state,
+      ...discounted.state,
       phase: 'turnEnd',
       pendingPayment: undefined,
     };
   }
 
-  const payer = getPlayer(state, payment.payerId);
+  const payer = getPlayer(discounted.state, payment.payerId);
+  const scale = payment.amount > 0 && amount !== payment.amount ? amount / payment.amount : 1;
+  const recipients = scalePaymentRecipients(payment.recipients, scale);
+  const mayorEventIncome = payment.mayorEventIncome
+    ? { ...payment.mayorEventIncome, amount: Math.floor(payment.mayorEventIncome.amount * scale) }
+    : undefined;
   return {
-    ...state,
+    ...discounted.state,
     phase: 'payment',
     pendingPayment: {
       ...payment,
       amount,
+      recipients,
+      mayorEventIncome,
+      originalAmount: discounted.saved > 0 ? discounted.originalAmount : payment.originalAmount,
+      lawyerDiscountSaved: discounted.saved > 0 ? discounted.saved : payment.lawyerDiscountSaved,
     },
     pendingRent: undefined,
     log: appendLog(state, `${payer.name} має сплатити ${amount}₴: ${payment.reason}.`, 'bad'),
   };
+};
+
+const applyPendingPaymentRoleDiscount = (
+  state: GameState,
+  payment: PendingPayment,
+): { state: GameState; amount: number; originalAmount: number; saved: number } => {
+  const baseAmount = Math.floor(payment.source === 'tax' ? getBaseFineAmount(state, payment.amount) : payment.amount);
+  const player = getPlayer(state, payment.payerId);
+  const shouldDiscount =
+    player.roleId === 'lawyer' && (payment.source === 'tax' || payment.source === 'card' || payment.source === 'cityEvent');
+  if (!shouldDiscount) return { state, amount: baseAmount, originalAmount: baseAmount, saved: 0 };
+  const amount = ceilMoney(baseAmount * LAWYER_FINE_DISCOUNT);
+  const saved = Math.max(0, baseAmount - amount);
+  return { state, amount, originalAmount: baseAmount, saved };
 };
 
 const chargePlayer = (state: GameState, playerId: string, amount: number): GameState => ({
@@ -4034,6 +5204,37 @@ const mergeRecipients = (recipients: Array<{ playerId: string; amount: number }>
     amounts.set(recipient.playerId, (amounts.get(recipient.playerId) ?? 0) + recipient.amount);
   });
   return [...amounts.entries()].map(([playerId, amount]) => ({ playerId, amount }));
+};
+
+const scalePaymentRecipients = (
+  recipients: PendingPayment['recipients'],
+  scale: number,
+): PendingPayment['recipients'] | undefined => {
+  if (!recipients) return undefined;
+  if (scale === 1) return recipients;
+  return mergeRecipients(recipients.map((recipient) => ({ ...recipient, amount: Math.floor(recipient.amount * scale) })));
+};
+
+const splitMayorEventIncome = (
+  income: PendingPayment['mayorEventIncome'],
+  paidAmount: number,
+): { paid?: PendingPayment['mayorEventIncome']; remaining?: PendingPayment['mayorEventIncome'] } => {
+  if (!income || income.amount <= 0 || paidAmount <= 0) return { remaining: income };
+  const paid = Math.min(income.amount, paidAmount);
+  return {
+    paid: { playerId: income.playerId, amount: paid },
+    remaining: income.amount > paid ? { playerId: income.playerId, amount: income.amount - paid } : undefined,
+  };
+};
+
+const addMayorEventIncome = (state: GameState, playerId: string | undefined, amount: number): GameState => {
+  if (!playerId || amount <= 0) return state;
+  const player = state.players.find((candidate) => candidate.id === playerId);
+  if (!player || player.roleId !== 'mayor') return state;
+  return updatePlayerRoleState(state, playerId, (roleState) => ({
+    ...roleState,
+    mayorEventIncome: roleState.mayorEventIncome + Math.floor(amount),
+  }));
 };
 
 const getCollateralTileIdSet = (state: Pick<GameState, 'loans'> | Partial<Pick<GameState, 'loans'>>): Set<number> =>
@@ -4091,6 +5292,83 @@ const normalizeBankDeposits = (state: GameState): GameState => {
   return { ...state, bankDeposits: Object.fromEntries(normalizedEntries) };
 };
 
+const normalizeRoleState = (state: GameState): GameState => {
+  if (state.rolesEnabled === false) return state;
+  const current = state.roleState ?? {};
+  const nextEntries = state.players.map((player) => [player.id, normalizePlayerRoleState(current[player.id])] as const);
+  const nextRoleState: Record<string, PlayerRoleState> = Object.fromEntries(nextEntries);
+  const isSame =
+    state.roleState &&
+    Object.keys(nextRoleState).length === Object.keys(current).length &&
+    Object.entries(nextRoleState).every(([playerId, roleState]) => isSameRoleState(roleState, current[playerId]));
+  return isSame ? state : { ...state, roleState: nextRoleState };
+};
+
+const normalizePlayerRoleState = (roleState: Partial<PlayerRoleState> | undefined): PlayerRoleState => ({
+  realtorProfit: Math.max(0, Math.floor(roleState?.realtorProfit ?? 0)),
+  lawyerSaved: Math.max(0, Math.floor(roleState?.lawyerSaved ?? 0)),
+  lawyerProtectionsLeft: Math.max(0, Math.floor(roleState?.lawyerProtectionsLeft ?? LAWYER_TOTAL_PROTECTIONS)),
+  collectorBonusReceived: Math.max(0, Math.floor(roleState?.collectorBonusReceived ?? 0)),
+  gamblerOpeningSpinDone: roleState?.gamblerOpeningSpinDone ?? true,
+  gamblerOpeningSingleDieRollPending: roleState?.gamblerOpeningSingleDieRollPending ?? false,
+  builderRemotePurchaseUsed: roleState?.builderRemotePurchaseUsed ?? false,
+  builderAuctionUsed: roleState?.builderAuctionUsed ?? false,
+  builderSpecialActionRound: Math.max(0, Math.floor(roleState?.builderSpecialActionRound ?? 0)),
+  mayorCityEventsSeen: Math.max(0, Math.floor(roleState?.mayorCityEventsSeen ?? 0)),
+  mayorEventIncome: Math.max(0, Math.floor(roleState?.mayorEventIncome ?? 0)),
+});
+
+const isSameRoleState = (left: PlayerRoleState, right: PlayerRoleState | undefined): boolean => {
+  const normalizedRight = normalizePlayerRoleState(right);
+  return (
+    left.realtorProfit === normalizedRight.realtorProfit &&
+    left.lawyerSaved === normalizedRight.lawyerSaved &&
+    left.lawyerProtectionsLeft === normalizedRight.lawyerProtectionsLeft &&
+    left.collectorBonusReceived === normalizedRight.collectorBonusReceived &&
+    left.gamblerOpeningSpinDone === normalizedRight.gamblerOpeningSpinDone &&
+    left.gamblerOpeningSingleDieRollPending === normalizedRight.gamblerOpeningSingleDieRollPending &&
+    left.builderRemotePurchaseUsed === normalizedRight.builderRemotePurchaseUsed &&
+    left.builderAuctionUsed === normalizedRight.builderAuctionUsed &&
+    left.builderSpecialActionRound === normalizedRight.builderSpecialActionRound &&
+    left.mayorCityEventsSeen === normalizedRight.mayorCityEventsSeen &&
+    left.mayorEventIncome === normalizedRight.mayorEventIncome
+  );
+};
+
+const getPlayerRoleState = (state: GameState, playerId: string): PlayerRoleState =>
+  normalizePlayerRoleState((state.roleState ?? {})[playerId]);
+
+const updatePlayerRoleState = (
+  state: GameState,
+  playerId: string,
+  updater: (roleState: PlayerRoleState) => PlayerRoleState,
+): GameState => ({
+  ...state,
+  roleState: {
+    ...(state.roleState ?? {}),
+    [playerId]: updater(getPlayerRoleState(state, playerId)),
+  },
+});
+
+const addRoleSavings = (state: GameState, playerId: string, amount: number): GameState => {
+  if (amount <= 0 || getPlayer(state, playerId).roleId !== 'lawyer') return state;
+  return updatePlayerRoleState(state, playerId, (roleState) => ({
+    ...roleState,
+    lawyerSaved: roleState.lawyerSaved + Math.floor(amount),
+  }));
+};
+
+const useLawyerProtectionCharge = (state: GameState, playerId: string): GameState => {
+  const player = getPlayer(state, playerId);
+  if (player.roleId !== 'lawyer') throw new Error('Цей захист доступний тільки Юристу.');
+  const roleState = getPlayerRoleState(state, playerId);
+  if (roleState.lawyerProtectionsLeft <= 0) throw new Error('Юрист уже використав усі захисти.');
+  return updatePlayerRoleState(state, playerId, (current) => ({
+    ...current,
+    lawyerProtectionsLeft: Math.max(0, current.lawyerProtectionsLeft - 1),
+  }));
+};
+
 const normalizeLoans = (state: GameState): GameState => {
   const loans = state.loans ?? [];
   const offers = state.loanOffers ?? [];
@@ -4114,8 +5392,34 @@ const ownsFullGroup = (state: GameState, playerId: string, group: string): boole
 const cityGroup = (group: string): CityTile[] =>
   boardTiles.filter((tile): tile is CityTile => tile.type === 'city' && tile.group === group);
 
+const getCityGroupOwner = (state: GameState, group: string): string | undefined => {
+  const groupTiles = cityGroup(group);
+  if (groupTiles.length === 0) return undefined;
+  const ownerId = state.properties[groupTiles[0].id]?.ownerId;
+  return ownerId && groupTiles.every((tile) => state.properties[tile.id]?.ownerId === ownerId) ? ownerId : undefined;
+};
+
+const getOwnedCityGroups = (state: GameState, playerId: string): string[] =>
+  Array.from(
+    new Set(cityTiles.filter((tile) => state.properties[tile.id]?.ownerId === playerId).map((tile) => tile.group)),
+  );
+
+const getOwnedCityGroupCount = (state: GameState, playerId: string): number => getOwnedCityGroups(state, playerId).length;
+
+const getBuilderCompletedDistrictCount = (state: GameState, playerId: string): number =>
+  Object.entries(state.districtPaths ?? {}).filter(([group, district]) => {
+    if (district.ownerId !== playerId) return false;
+    const groupTiles = cityGroup(group);
+    return groupTiles.length > 0 && groupTiles.every((tile) => {
+      const property = state.properties[tile.id];
+      return property?.ownerId === playerId && property.houses >= 5;
+    });
+  }).length;
+
 const ownedProperties = (state: GameState, playerId: string): PropertyTile[] =>
   propertyTiles.filter((tile) => state.properties[tile.id]?.ownerId === playerId);
+
+const getCollectorUniqueRegionCount = (state: GameState, playerId: string): number => getOwnedCityGroupCount(state, playerId);
 
 const ownedBankCount = (state: GameState, playerId: string): number =>
   ownedProperties(state, playerId).filter((tile) => tile.type === 'bank').length;
@@ -4162,7 +5466,95 @@ const canManageLoansInPhase = (state: GameState, playerId: string): boolean =>
   (state.phase === 'rent' && state.pendingRent?.payerId === playerId) ||
   state.phase === 'awaitingPurchase' ||
   (state.phase === 'bankDeposit' && state.pendingBankDeposit?.playerId === playerId) ||
-  (state.phase === 'casino' && state.pendingCasino?.playerId === playerId && !state.pendingCasino.spinEndsAt);
+  (state.phase === 'casino' &&
+    state.pendingCasino?.playerId === playerId &&
+    !state.pendingCasino.spinEndsAt &&
+    !isGamblerOpeningCasino(state.pendingCasino) &&
+    !isCityEventCasino(state.pendingCasino));
+
+const prepareTurnStart = (state: GameState, playerId: string): GameState => {
+  const afterLoans = createLoanPaymentIfDue(state, playerId);
+  return afterLoans.phase === 'rolling' ? openTurnStartCasinoIfNeeded(afterLoans, playerId) : afterLoans;
+};
+
+const openTurnStartCasinoIfNeeded = (state: GameState, playerId: string): GameState =>
+  openGamblerOpeningCasinoIfNeeded(openCityEventCasinoIfNeeded(state, playerId));
+
+const openCityEventCasinoIfNeeded = (state: GameState, playerId: string): GameState => {
+  if (state.phase !== 'rolling' || state.pendingCasino) return state;
+  const activePlayerIds = new Set(state.players.filter((player) => !player.isBankrupt).map((player) => player.id));
+  const pendingIds = (state.pendingCityEventCasinoPlayerIds ?? []).filter((id) => activePlayerIds.has(id));
+  if (!pendingIds.includes(playerId)) {
+    return pendingIds.length === (state.pendingCityEventCasinoPlayerIds ?? []).length
+      ? state
+      : { ...state, pendingCityEventCasinoPlayerIds: pendingIds };
+  }
+
+  const player = getPlayer(state, playerId);
+  const nextPendingIds = pendingIds.filter((id) => id !== playerId);
+  if (getCasinoMaxBet(player) <= 0) {
+    return {
+      ...state,
+      pendingCityEventCasinoPlayerIds: nextPendingIds,
+      log: appendLog(state, `${player.name} пропускає рулетку міської події, бо не має грошей для ставки.`),
+    };
+  }
+
+  return {
+    ...state,
+    phase: 'casino',
+    pendingCityEventCasinoPlayerIds: pendingIds,
+    pendingCasino: {
+      playerId,
+      tileId: GAMBLER_STARTING_CASINO_TILE_ID,
+      forced: 'cityEvent',
+    },
+    players: state.players.map((candidate) =>
+      candidate.id === playerId ? { ...candidate, position: GAMBLER_STARTING_CASINO_TILE_ID, jailTurns: 0 } : candidate,
+    ),
+    log: appendLog(state, `${player.name} має прокрутити рулетку міської події перед кидком кубиків.`, 'good'),
+  };
+};
+
+const openGamblerOpeningCasinoIfNeeded = (state: GameState): GameState => {
+  if (state.rolesEnabled === false || state.phase !== 'rolling' || state.pendingCasino) return state;
+  const player = state.players.find((candidate) => candidate.id === state.currentPlayerId);
+  if (!player || player.isBankrupt || player.roleId !== 'gambler') return state;
+  if (getPlayerRoleState(state, player.id).gamblerOpeningSpinDone) return state;
+
+  return {
+    ...state,
+    phase: 'casino',
+    pendingCasino: {
+      playerId: player.id,
+      tileId: GAMBLER_STARTING_CASINO_TILE_ID,
+      forced: 'gamblerOpening',
+    },
+    players: state.players.map((candidate) =>
+      candidate.id === player.id ? { ...candidate, position: GAMBLER_STARTING_CASINO_TILE_ID } : candidate,
+    ),
+    log: appendLog(
+      state,
+      `${player.name} починає як Азартний гравець: обов'язкова рулетка на весь баланс з множниками x2/x3/x4.`,
+      'good',
+    ),
+  };
+};
+
+const markGamblerOpeningSpinDone = (state: GameState, playerId: string, multiplier: number): GameState =>
+  updatePlayerRoleState(state, playerId, (roleState) => ({
+    ...roleState,
+    gamblerOpeningSpinDone: true,
+    gamblerOpeningSingleDieRollPending: multiplier === 4,
+  }));
+
+const completeCityEventCasinoSpin = (state: GameState, playerId: string): GameState => {
+  if (!isCityEventCasino(state.pendingCasino)) return state;
+  return {
+    ...state,
+    pendingCityEventCasinoPlayerIds: (state.pendingCityEventCasinoPlayerIds ?? []).filter((id) => id !== playerId),
+  };
+};
 
 const randomDice = (diceCount: 1 | 2 = 2): [number, number] => {
   const first = Math.floor(Math.random() * 6) + 1;
@@ -4197,11 +5589,8 @@ const drawCardIdFromDeck = (
     .filter((entry) => isCardDrawable(state, deck, entry.cardId));
   const candidates = drawableEntries.length > 0 ? drawableEntries : cardIds.map((cardId, index) => ({ cardId, index }));
 
-  if (
-    deck !== 'community' ||
-    candidates.length <= 1 ||
-    !candidates.some((entry) => entry.cardId === COMMUNISM_COMMUNITY_CARD_ID)
-  ) {
+  const weights = candidates.map((entry) => getRoleCardDrawWeightMultiplier(state, playerId, deck, entry.cardId));
+  if (candidates.length <= 1 || weights.every((weight) => weight === 1)) {
     const selectedIndex = candidates[0]?.index ?? 0;
     return {
       cardId: cardIds[selectedIndex],
@@ -4209,22 +5598,10 @@ const drawCardIdFromDeck = (
     };
   }
 
-  const communismWeight = getCommunismDrawWeightMultiplier(state, playerId);
-  if (communismWeight === 1) {
-    const selectedIndex = candidates[0]?.index ?? 0;
-    return {
-      cardId: cardIds[selectedIndex],
-      rest: cardIds.filter((_, index) => index !== selectedIndex),
-    };
-  }
-
-  const totalWeight = candidates.reduce(
-    (sum, entry) => sum + (entry.cardId === COMMUNISM_COMMUNITY_CARD_ID ? communismWeight : 1),
-    0,
-  );
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   let target = Math.random() * totalWeight;
-  const selectedCandidateIndex = candidates.findIndex((entry) => {
-    target -= entry.cardId === COMMUNISM_COMMUNITY_CARD_ID ? communismWeight : 1;
+  const selectedCandidateIndex = candidates.findIndex((_entry, index) => {
+    target -= weights[index];
     return target < 0;
   });
   const safeIndex = selectedCandidateIndex >= 0 ? candidates[selectedCandidateIndex].index : candidates[candidates.length - 1].index;
@@ -4232,6 +5609,20 @@ const drawCardIdFromDeck = (
     cardId: cardIds[safeIndex],
     rest: cardIds.filter((_, index) => index !== safeIndex),
   };
+};
+
+const getRoleCardDrawWeightMultiplier = (state: GameState, playerId: string, deck: CardDeck, cardId: number): number => {
+  if (deck === 'community' && cardId === COMMUNISM_COMMUNITY_CARD_ID) {
+    return getCommunismDrawWeightMultiplier(state, playerId);
+  }
+  const roleId = getPlayer(state, playerId).roleId;
+  if (deck === 'chance' && roleId === 'gambler' && cardId === CASINO_CHANCE_CARD_ID) {
+    return GAMBLER_CASINO_CARD_WEIGHT_MULTIPLIER;
+  }
+  if (deck === 'chance' && roleId === 'banker' && cardId === NEAREST_BANK_CHANCE_CARD_ID) {
+    return BANKER_BANK_CARD_WEIGHT_MULTIPLIER;
+  }
+  return 1;
 };
 
 const isCardDrawable = (state: GameState, deck: CardDeck, cardId: number): boolean => {
