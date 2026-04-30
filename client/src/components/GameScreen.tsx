@@ -230,7 +230,7 @@ const EMOTE_OPTIONS: EmoteOption[] = [
   { id: 'halepa', label: 'Халепа', Icon: CircleHelp, color: '#38bdf8', audioSrc: '/assets/emotes/halepa.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'unlucky', label: 'Un-un-un-un-un-unlucky', Icon: ShieldAlert, color: '#fb923c', audioSrc: '/assets/emotes/unlucky.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'i-feel-nothing', label: 'I feel nothing', Icon: HeartCrack, color: '#f472b6', audioSrc: '/assets/emotes/i-feel-nothing.mp3', gain: EMOTE_AUDIO_GAIN },
-  { id: 'ready-catch-you', label: '准备好了吗，要来抓你咯', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/ready-catch-you.mp3', gain: EMOTE_AUDIO_GAIN },
+  { id: 'potuzhno', label: 'Потужно', Icon: BadgeDollarSign, color: '#34d399', audioSrc: '/assets/emotes/potuzhno.m4a', gain: 0.45 },
   { id: 'dai-deneg', label: 'Дай денег', Icon: HandCoins, color: '#facc15', audioSrc: '/assets/emotes/dai-deneg.m4a', gain: 0.45 },
   { id: 'bagata-simya', label: "Я не з такої сім'ї, я з богатої", Icon: Crown, color: '#f59e0b', audioSrc: '/assets/emotes/ya-ne-z-takoyi-simyi-ya-z-bogatoyi.mp3', gain: EMOTE_AUDIO_GAIN },
   { id: 'yippiee', label: 'Yippiee!', Icon: Dice5, color: '#a78bfa', audioSrc: '/assets/emotes/yippiee.mp3', gain: EMOTE_AUDIO_GAIN },
